@@ -1245,7 +1245,7 @@ export default function App() {
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {groupedOrders.map((group, gi) => {
+              {groupedOrders.map((group, gIdx) => {
                 const gKey = `ord-${group.customer}-${group.date}`;
                 const isExp = expanded[gKey];
                 const allFulfilled = group.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
