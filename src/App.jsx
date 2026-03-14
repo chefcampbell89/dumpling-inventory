@@ -294,6 +294,9 @@ export default function App() {
   const [rcvType, setRcvType] = useState("PO Receipt");
   const [rcvNotes, setRcvNotes] = useState("");
   const [rcvPoAction, setRcvPoAction] = useState("received");
+  const [manualPOModal, setManualPOModal] = useState(false);
+  const [manualPOForm, setManualPOForm] = useState({ vendor: "", notes: "" });
+  const [manualPOLines, setManualPOLines] = useState([]);
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState("All");
   const [stockFilter, setStockFilter] = useState("All");
@@ -487,6 +490,31 @@ export default function App() {
     w.document.write(`<html><head><title>PO ${po.id}</title><style>body{font-family:Arial,sans-serif;padding:40px;color:#222}table{width:100%;border-collapse:collapse;margin:20px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:13px}th{background:#f5f5f5}.total{text-align:right;font-size:16px;font-weight:bold;margin-top:10px}</style></head><body><h1>PURCHASE ORDER ${po.id}</h1><p>Date: ${po.date} | Status: ${po.status}</p><div style="display:flex;justify-content:space-between;margin:20px 0"><div><strong>${po.vendor}</strong><br>${v?.address || ""}<br>${v?.contact || ""} ${v?.email || ""} ${v?.phone || ""}</div><div style="text-align:right"><strong>Terms:</strong> ${po.paymentTerms || "N/A"}<br><strong>Lead:</strong> ${po.leadDays || "?"} days</div></div><table><thead><tr><th>Part ID</th><th>Description</th><th>Qty</th><th>Unit</th><th>Cost</th><th>Total</th></tr></thead><tbody>${po.lines.map((l) => `<tr><td>${l.partId}</td><td>${l.name}</td><td>${l.qty}</td><td>${l.unit}</td><td>$${l.unitCost.toFixed(2)}</td><td>$${l.total.toFixed(2)}</td></tr>`).join("")}</tbody></table><div class="total">TOTAL: $${po.total.toFixed(2)}</div></body></html>`);
     w.document.close();
     w.print();
+  };
+
+  const openManualPO = () => {
+    setManualPOForm({ vendor: "", notes: "" });
+    setManualPOLines([{ partId: "", name: "", qty: 0, unit: "", unitCost: 0 }]);
+    setManualPOModal(true);
+  };
+
+  const submitManualPO = async () => {
+    if (!manualPOForm.vendor) { show("Vendor is required", "error"); return; }
+    const validLines = manualPOLines.filter(l => l.partId && l.qty > 0);
+    if (validLines.length === 0) { show("Add at least one item with qty > 0", "error"); return; }
+    const vObj = vendors.find(v => v.name === manualPOForm.vendor);
+    const pid = `PO-${String(pos.length + 1).padStart(3, "0")}`;
+    const total = validLines.reduce((s, l) => s + l.qty * l.unitCost, 0);
+    const po = {
+      id: pid, vendor: manualPOForm.vendor, vendorId: vObj?.id || "", date: new Date().toISOString().slice(0, 10),
+      status: "Draft", total, paymentTerms: vObj?.paymentTerms || "", leadDays: vObj?.leadDays || 0,
+      notes: manualPOForm.notes,
+      lines: validLines.map(l => ({ partId: l.partId, name: l.name, qty: l.qty, unit: l.unit, unitCost: l.unitCost, total: l.qty * l.unitCost })),
+    };
+    setPOs(prev => [...prev, po]);
+    try { await createPurchaseOrder(po); } catch (e) { console.warn("PO save failed:", e.message); }
+    show(`Created ${pid}`);
+    setManualPOModal(false);
   };
 
   // ---- RECEIVING ----
@@ -766,6 +794,7 @@ export default function App() {
         {tab === "orders" && <button onClick={() => openAdd("order")} style={B1}><Plus size={14} /> Order</button>}
         {tab === "vendors" && <button onClick={() => openAdd("vendor")} style={B1}><Plus size={14} /> Vendor</button>}
         {tab === "receiving" && <button onClick={openReceiveManual} style={B1}><Plus size={14} /> Manual Receipt</button>}
+        {tab === "pos" && <button onClick={openManualPO} style={B1}><Plus size={14} /> Create PO</button>}
       </div>
 
       {/* ================== INVENTORY TABLE ================== */}
@@ -1062,6 +1091,75 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ================== MANUAL PO MODAL ================== */}
+      <Modal open={manualPOModal} onClose={() => setManualPOModal(false)} title="Create Purchase Order" wide>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Vendor *</label>
+            <select value={manualPOForm.vendor} onChange={e => setManualPOForm(f => ({ ...f, vendor: e.target.value }))} style={IS}>
+              <option value="">Select vendor...</option>
+              {vendors.map(v => <option key={v.id} value={v.name}>{v.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label>
+            <input value={manualPOForm.notes} onChange={e => setManualPOForm(f => ({ ...f, notes: e.target.value }))} placeholder="Optional notes" style={IS} />
+          </div>
+        </div>
+
+        {manualPOForm.vendor && (() => {
+          const vObj = vendors.find(v => v.name === manualPOForm.vendor);
+          return vObj ? (
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 16, display: "flex", gap: 16, flexWrap: "wrap" }}>
+              {vObj.contact && <span>Contact: {vObj.contact}</span>}
+              {vObj.paymentTerms && <span>Terms: {vObj.paymentTerms}</span>}
+              {vObj.leadDays > 0 && <span>Lead: {vObj.leadDays} days</span>}
+            </div>
+          ) : null;
+        })()}
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc" }}>Line Items</div>
+          <button onClick={() => setManualPOLines(prev => [...prev, { partId: "", name: "", qty: 0, unit: "", unitCost: 0 }])} style={B2}><Plus size={14} /> Add Line</button>
+        </div>
+
+        <div style={{ overflowX: "auto", border: "1px solid #2a2a3a", borderRadius: 8, marginBottom: 16 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>{["Item", "Qty", "Unit", "Unit Cost", "Line Total", ""].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
+            <tbody>
+              {manualPOLines.map((line, i) => (
+                <tr key={i}>
+                  <td style={TD}>
+                    <select value={line.partId} onChange={e => {
+                      const p = parts.find(x => x.id === e.target.value);
+                      setManualPOLines(prev => prev.map((l, j) => j === i ? { ...l, partId: e.target.value, name: p?.name || "", unit: p?.unit || "", unitCost: p?.avgCost || 0 } : l));
+                    }} style={{ ...IS, fontSize: 12, minWidth: 200 }}>
+                      <option value="">Select item...</option>
+                      {parts.map(p => <option key={p.id} value={p.id}>[{p.id}] {p.name}</option>)}
+                    </select>
+                  </td>
+                  <td style={TD}><input type="number" step="any" min="0" value={line.qty} onChange={e => setManualPOLines(prev => prev.map((l, j) => j === i ? { ...l, qty: Number(e.target.value) } : l))} style={{ ...IS, width: 80, fontSize: 12 }} /></td>
+                  <td style={{ ...TD, fontSize: 12, color: "#888" }}>{line.unit}</td>
+                  <td style={TD}><input type="number" step="0.01" min="0" value={line.unitCost} onChange={e => setManualPOLines(prev => prev.map((l, j) => j === i ? { ...l, unitCost: Number(e.target.value) } : l))} style={{ ...IS, width: 90, fontSize: 12 }} /></td>
+                  <td style={{ ...TD, fontSize: 12, fontWeight: 600, color: "#f59e0b" }}>${(line.qty * line.unitCost).toFixed(2)}</td>
+                  <td style={TD}><button onClick={() => setManualPOLines(prev => prev.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Minus size={14} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: "#f59e0b" }}>
+            Total: ${manualPOLines.reduce((s, l) => s + l.qty * l.unitCost, 0).toFixed(2)}
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setManualPOModal(false)} style={B2}>Cancel</button>
+            <button onClick={submitManualPO} style={B1}><FileText size={14} /> Create PO</button>
+          </div>
+        </div>
+      </Modal>
 
       {/* ================== RECEIVING MODAL ================== */}
       <Modal open={rcvModal} onClose={() => setRcvModal(false)} title={rcvMode === "po" ? `Receive Against ${rcvPO}` : "Manual Receipt"} wide>
