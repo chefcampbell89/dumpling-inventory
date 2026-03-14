@@ -8,7 +8,7 @@ import {
   fetchReceipts, createReceipt, updateItemQty,
   fetchProductionRuns, createProductionRun,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles,
-  getInviteCode, setInviteCode, changePassword,
+  getInviteCode, setInviteCode, changePassword, supabase,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
