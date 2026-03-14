@@ -294,7 +294,6 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [debugInfo, setDebugInfo] = useState("init");
-  const [debugInfo, setDebugInfo] = useState("init");
   const [allProfiles, setAllProfiles] = useState([]);
   const [pwModal, setPwModal] = useState(false);
   const [newPw, setNewPw] = useState("");
