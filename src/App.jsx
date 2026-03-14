@@ -7,13 +7,15 @@ import {
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
   fetchProductionRuns, createProductionRun,
+  signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles,
+  getInviteCode, setInviteCode, changePassword,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
 import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
-  ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer,
+  ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
 } from "lucide-react";
 
 // ============================================================
@@ -281,6 +283,20 @@ function LevelBadge({ level }) {
 export default function App() {
   // ---- State ----
   const [loading, setLoading] = useState(true);
+  const [authUser, setAuthUser] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [authScreen, setAuthScreen] = useState("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPass, setAuthPass] = useState("");
+  const [authName, setAuthName] = useState("");
+  const [authInvite, setAuthInvite] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+  const [allProfiles, setAllProfiles] = useState([]);
+  const [pwModal, setPwModal] = useState(false);
+  const [newPw, setNewPw] = useState("");
+  const [newPwConfirm, setNewPwConfirm] = useState("");
+  const isAdmin = profile?.role === "admin";
   const [tab, setTab] = useState("inventory");
   const [parts, setParts] = useState(SEED_PARTS);
   const [assemblies, setAssemblies] = useState(SEED_ASSEMBLIES);
@@ -343,6 +359,47 @@ export default function App() {
     }
     loadAll();
   }, []);
+
+  // ---- Auth handlers ----
+  const handleLogin = async () => {
+    setAuthLoading(true); setAuthError("");
+    try {
+      const data = await signIn(authEmail, authPass);
+      setAuthUser(data.user);
+      try { const p = await getProfile(data.user.id); setProfile(p); } catch { setProfile({ id: data.user.id, email: data.user.email, name: "", role: "user" }); }
+      setAuthEmail(""); setAuthPass("");
+      window.location.reload();
+    } catch (e) { setAuthError(e.message); }
+    finally { setAuthLoading(false); }
+  };
+
+  const handleSignup = async () => {
+    setAuthLoading(true); setAuthError("");
+    try {
+      const code = await getInviteCode();
+      if (authInvite !== code) { setAuthError("Invalid invite code"); setAuthLoading(false); return; }
+      const data = await signUp(authEmail, authPass);
+      if (data.user) {
+        try { await updateProfile(data.user.id, { name: authName }); } catch {}
+        setAuthUser(data.user);
+        setProfile({ id: data.user.id, email: authEmail, name: authName, role: "user" });
+        window.location.reload();
+      }
+    } catch (e) { setAuthError(e.message); }
+    finally { setAuthLoading(false); }
+  };
+
+  const handleLogout = async () => {
+    await signOut();
+    setAuthUser(null); setProfile(null);
+    window.location.reload();
+  };
+
+  const handleChangePassword = async () => {
+    if (newPw.length < 6) { show("Password must be at least 6 characters", "error"); return; }
+    if (newPw !== newPwConfirm) { show("Passwords don't match", "error"); return; }
+    try { await changePassword(newPw); show("Password changed!"); setPwModal(false); setNewPw(""); setNewPwConfirm(""); } catch (e) { show(e.message, "error"); }
+  };
 
   // ---- Derived ----
   const allItems = useMemo(() => [...parts, ...assemblies], [parts, assemblies]);
@@ -599,7 +656,7 @@ export default function App() {
     const run = {
       id: runId, assemblyId: prodAssemblyItem.id, assemblyName: prodAssemblyItem.name,
       qtyProduced: prodQty, date: new Date().toISOString().slice(0, 10),
-      notes: prodNotes, createdBy: "", consumed,
+      notes: prodNotes, createdBy: profile?.email || "", consumed,
     };
 
     const updParts = [...parts];
@@ -744,7 +801,7 @@ export default function App() {
     const receiptId = `RCV-${new Date().toISOString().slice(0,10)}-${String(receipts.length + 1).padStart(3, "0")}`;
     const receipt = {
       id: receiptId, poId: rcvMode === "po" ? rcvPO : null, type: rcvType,
-      date: new Date().toISOString().slice(0, 10), notes: rcvNotes, createdBy: "",
+      date: new Date().toISOString().slice(0, 10), notes: rcvNotes, createdBy: profile?.email || "",
       lines: validLines,
     };
 
@@ -925,11 +982,60 @@ export default function App() {
         <div style={{ position: "fixed", inset: 0, background: "#12121c", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }}>
           <div style={{ textAlign: "center", color: "#888" }}>
             <Loader2 size={40} style={{ color: "#6366f1", marginBottom: 12, animation: "spin 1s linear infinite" }} />
-            <p style={{ fontSize: 16, margin: 0 }}>Loading inventory...</p>
+            <p style={{ fontSize: 16, margin: 0 }}>Loading...</p>
             <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
           </div>
         </div>
       )}
+
+      {/* Login / Signup Screen */}
+      {!loading && !authUser && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+          <div style={{ background: "#1e1e2e", borderRadius: 16, padding: 32, width: "90%", maxWidth: 400, border: "1px solid #333" }}>
+            <div style={{ textAlign: "center", marginBottom: 24 }}>
+              <Package size={40} style={{ color: "#6366f1", marginBottom: 8 }} />
+              <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Dumpling Factory</h1>
+              <p style={{ margin: "4px 0 0", color: "#666", fontSize: 13 }}>Inventory Management System</p>
+            </div>
+
+            <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
+              <button onClick={() => { setAuthScreen("login"); setAuthError(""); }} style={{ flex: 1, padding: "8px", borderRadius: 6, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 13, background: authScreen === "login" ? "#6366f1" : "#2a2a3a", color: authScreen === "login" ? "#fff" : "#888" }}>Log In</button>
+              <button onClick={() => { setAuthScreen("signup"); setAuthError(""); }} style={{ flex: 1, padding: "8px", borderRadius: 6, border: "none", cursor: "pointer", fontWeight: 600, fontSize: 13, background: authScreen === "signup" ? "#6366f1" : "#2a2a3a", color: authScreen === "signup" ? "#fff" : "#888" }}>Sign Up</button>
+            </div>
+
+            {authError && <div style={{ background: "#2a1a1a", border: "1px solid #ef444433", borderRadius: 8, padding: "8px 12px", marginBottom: 12, fontSize: 13, color: "#ef4444" }}>{authError}</div>}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {authScreen === "signup" && (
+                <div>
+                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Your Name</label>
+                  <input value={authName} onChange={e => setAuthName(e.target.value)} placeholder="e.g. Annie" style={IS} />
+                </div>
+              )}
+              <div>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Email</label>
+                <input type="email" value={authEmail} onChange={e => setAuthEmail(e.target.value)} placeholder="you@meimeidumpling.com" style={IS} onKeyDown={e => e.key === "Enter" && (authScreen === "login" ? handleLogin() : null)} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Password</label>
+                <input type="password" value={authPass} onChange={e => setAuthPass(e.target.value)} placeholder="••••••••" style={IS} onKeyDown={e => e.key === "Enter" && (authScreen === "login" ? handleLogin() : null)} />
+              </div>
+              {authScreen === "signup" && (
+                <div>
+                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Invite Code</label>
+                  <input value={authInvite} onChange={e => setAuthInvite(e.target.value)} placeholder="Get this from your admin" style={IS} />
+                </div>
+              )}
+              <button onClick={authScreen === "login" ? handleLogin : handleSignup} disabled={authLoading} style={{ ...B1, width: "100%", justifyContent: "center", padding: "12px", marginTop: 4, opacity: authLoading ? 0.6 : 1 }}>
+                {authLoading ? <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> : (authScreen === "login" ? <><Lock size={16} /> Log In</> : <><KeyRound size={16} /> Create Account</>)}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====== MAIN APP (only when authenticated) ====== */}
+      {!loading && authUser && (<>
 
       {/* Toast */}
       {toast && <div style={{ position: "fixed", top: 20, right: 20, background: toast.t === "error" ? "#dc2626" : "#16a34a", color: "#fff", padding: "12px 20px", borderRadius: 8, fontSize: 14, zIndex: 2000, display: "flex", alignItems: "center", gap: 8, boxShadow: "0 4px 20px rgba(0,0,0,0.4)" }}><CheckCircle size={16} />{toast.msg}</div>}
@@ -940,9 +1046,18 @@ export default function App() {
           <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}><Package size={26} style={{ color: "#6366f1" }} /> Dumpling Factory</h1>
           <p style={{ margin: "2px 0 0", color: "#555", fontSize: 12 }}>Production Inventory • BOM • Purchasing</p>
         </div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           <label style={B2}><Upload size={14} /> Import CSV<input type="file" accept=".csv" onChange={importCSV} style={{ display: "none" }} /></label>
           <button onClick={exportCSV} style={B2}><Download size={14} /> Export</button>
+          <div style={{ height: 20, width: 1, background: "#333", margin: "0 4px" }} />
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ fontSize: 12, color: "#888", textAlign: "right" }}>
+              <div style={{ color: "#ccc", fontWeight: 500 }}>{profile?.name || profile?.email}</div>
+              <div style={{ fontSize: 10, color: isAdmin ? "#f59e0b" : "#666" }}>{isAdmin ? "Admin" : "User"}</div>
+            </div>
+            <button onClick={() => { setNewPw(""); setNewPwConfirm(""); setPwModal(true); }} style={{ ...B2, padding: "6px 8px" }} title="Change Password"><KeyRound size={14} /></button>
+            <button onClick={handleLogout} style={{ ...B2, padding: "6px 8px", borderColor: "#ef444444", color: "#ef4444" }} title="Log Out"><LogOut size={14} /></button>
+          </div>
         </div>
       </div>
 
@@ -963,6 +1078,7 @@ export default function App() {
         {tabBtn("pos", "Purchase Orders", <FileText size={14} />)}
         {tabBtn("receiving", "Receiving", <PackageCheck size={14} />)}
         {tabBtn("production", "Production", <Hammer size={14} />)}
+        {isAdmin && tabBtn("users", "Users", <Users size={14} />)}
       </div>
 
       {/* Filters */}
@@ -1020,9 +1136,9 @@ export default function App() {
                           <td style={{ ...TD, fontSize: 12 }}>{p.supplier}</td>
                           <td style={TD}>
                             <div style={{ display: "flex", gap: 4 }}>
-                              <button onClick={() => openEdit(hasBom ? "assembly" : "part", p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6366f1", padding: 3 }} title="Edit"><Edit2 size={14} /></button>
-                              {!hasBom && <button onClick={() => { setEditItem(p); setForm({ ...p, category: LEVELS[getLevel(p.id)]?.cat || p.category }); setBomForm([]); setModal("assembly"); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#f59e0b", padding: 3 }} title="Add BOM"><Layers size={14} /></button>}
-                              <button onClick={() => setDelConfirm(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }} title="Delete"><Trash2 size={14} /></button>
+                              <button onClick={() => openEdit(hasBom ? "assembly" : "part", p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6366f1", padding: 3, opacity: (hasBom && !isAdmin) ? 0.3 : 1 }} title="Edit" disabled={hasBom && !isAdmin}><Edit2 size={14} /></button>
+                              {!hasBom && isAdmin && <button onClick={() => { setEditItem(p); setForm({ ...p, category: LEVELS[getLevel(p.id)]?.cat || p.category }); setBomForm([]); setModal("assembly"); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#f59e0b", padding: 3 }} title="Add BOM"><Layers size={14} /></button>}
+                              {isAdmin && <button onClick={() => setDelConfirm(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }} title="Delete"><Trash2 size={14} /></button>}
                             </div>
                           </td>
                         </tr>
@@ -1427,6 +1543,61 @@ export default function App() {
         </div>
       </Modal>
 
+      {/* ================== USERS TAB (Admin only) ================== */}
+      {tab === "users" && isAdmin && (() => {
+        if (allProfiles.length === 0) { fetchProfiles().then(p => setAllProfiles(p)).catch(() => {}); }
+        return (
+          <div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+              <Stat icon={<Users size={18} />} label="Total Users" value={allProfiles.length} accent="#6366f1" />
+              <Stat icon={<KeyRound size={18} />} label="Admins" value={allProfiles.filter(p => p.role === "admin").length} accent="#f59e0b" />
+            </div>
+
+            {/* Invite Code */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 4 }}>Invite Code</div>
+                <div style={{ fontSize: 12, color: "#888" }}>Give this to new team members so they can sign up</div>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input id="inviteCodeInput" defaultValue="" placeholder="Loading..." style={{ ...IS, width: 180, fontFamily: "monospace", fontSize: 14, textAlign: "center" }}
+                  onFocus={async (e) => { if (!e.target.dataset.loaded) { try { const code = await getInviteCode(); e.target.value = code; e.target.dataset.loaded = "1"; } catch {} } }}
+                />
+                <button onClick={async () => { const input = document.getElementById("inviteCodeInput"); if (input?.value) { try { await setInviteCode(input.value); show("Invite code updated"); } catch (e) { show(e.message, "error"); } } }} style={B1}>Save</button>
+              </div>
+            </div>
+
+            {/* User list */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+              <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Team Members</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>{["Email", "Name", "Role", "Joined", "Actions"].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
+                  <tbody>
+                    {allProfiles.map(p => (
+                      <tr key={p.id}>
+                        <td style={{ ...TD, fontWeight: 500 }}>{p.email}</td>
+                        <td style={TD}>
+                          <input defaultValue={p.name || ""} onBlur={async (e) => { if (e.target.value !== (p.name || "")) { try { await updateProfile(p.id, { name: e.target.value }); setAllProfiles(prev => prev.map(x => x.id === p.id ? { ...x, name: e.target.value } : x)); show("Name updated"); } catch (err) { show(err.message, "error"); } } }} style={{ ...IS, padding: "4px 8px", fontSize: 13 }} />
+                        </td>
+                        <td style={TD}>
+                          <select value={p.role} onChange={async (e) => { try { await updateProfile(p.id, { role: e.target.value }); setAllProfiles(prev => prev.map(x => x.id === p.id ? { ...x, role: e.target.value } : x)); if (p.id === profile?.id) setProfile(prev => ({ ...prev, role: e.target.value })); show("Role updated"); } catch (err) { show(err.message, "error"); } }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 13, background: p.role === "admin" ? "#2a2a1a" : "#16161e", color: p.role === "admin" ? "#f59e0b" : "#ccc" }}>
+                            <option value="user">User</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                        </td>
+                        <td style={{ ...TD, fontSize: 12, color: "#888" }}>{p.createdAt ? new Date(p.createdAt).toLocaleDateString() : "—"}</td>
+                        <td style={{ ...TD, fontSize: 12, color: "#555" }}>{p.id === profile?.id ? "(you)" : ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ================== MANUAL PO MODAL ================== */}
       <Modal open={manualPOModal} onClose={() => setManualPOModal(false)} title="Create Purchase Order" wide>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
@@ -1727,6 +1898,20 @@ export default function App() {
           <button onClick={() => { del(delConfirm); setDelConfirm(null); }} style={{ ...B1, background: "#dc2626" }}>Delete</button>
         </div>
       </Modal>
+
+      {/* Change Password Modal */}
+      <Modal open={pwModal} onClose={() => setPwModal(false)} title="Change Password">
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>New Password (min 6 chars)</label><input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} style={IS} /></div>
+          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Confirm Password</label><input type="password" value={newPwConfirm} onChange={e => setNewPwConfirm(e.target.value)} style={IS} /></div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
+          <button onClick={() => setPwModal(false)} style={B2}>Cancel</button>
+          <button onClick={handleChangePassword} style={B1}>Update Password</button>
+        </div>
+      </Modal>
+
+      </>)}
     </div>
   );
 }
