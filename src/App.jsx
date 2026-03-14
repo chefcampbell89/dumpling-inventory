@@ -978,10 +978,6 @@ export default function App() {
         </div>
       )}
 
-          }
-        </div>
-      )}
-
       {/* ================== RECEIVING TAB ================== */}
       {tab === "receiving" && (
         <div>
