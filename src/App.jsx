@@ -502,62 +502,93 @@ export default function App() {
   // ---- PRODUCTION ----
   const prodAssemblyItem = useMemo(() => assemblies.find(a => a.id === prodAssembly), [assemblies, prodAssembly]);
 
+  // prodConsume is { [partId]: true/false } — true means "consume this item from inventory"
   const initConsume = useCallback((assemblyId) => {
+    // Default: check the direct children (consume sub-assemblies as whole items)
     const asm = assemblies.find(a => a.id === assemblyId);
     if (!asm || !asm.bom) return {};
     const state = {};
-    for (const line of asm.bom) {
-      const child = allItems.find(i => i.id === line.partId);
-      state[line.partId] = (child?.bom && child.bom.length > 0) ? "check" : "check";
-    }
+    for (const line of asm.bom) { state[line.partId] = true; }
     return state;
-  }, [assemblies, allItems]);
+  }, [assemblies]);
 
-  const toggleConsumeMode = (itemId) => {
+  // When checking a sub-assembly, uncheck all its descendants
+  // When unchecking a sub-assembly, check all its direct children
+  const toggleConsume = (itemId) => {
     setProdConsume(prev => {
       const next = { ...prev };
-      if (prev[itemId] === "expand") {
-        // Collapse back — remove children, set to check
-        const item = allItems.find(i => i.id === itemId);
+      const wasChecked = !!prev[itemId];
+      const item = allItems.find(i => i.id === itemId);
+
+      if (wasChecked) {
+        // Unchecking — drill down: uncheck this, check its direct children
+        next[itemId] = false;
         if (item?.bom) {
-          for (const l of item.bom) { delete next[l.partId]; }
+          for (const l of item.bom) { next[l.partId] = true; }
         }
-        next[itemId] = "check";
       } else {
-        // Expand — add children as checked, set this to expand
-        const item = allItems.find(i => i.id === itemId);
+        // Checking — roll up: check this, uncheck all descendants
+        next[itemId] = true;
         if (item?.bom) {
-          for (const l of item.bom) { next[l.partId] = "check"; }
+          const uncheckDescendants = (bom) => {
+            for (const l of bom) {
+              next[l.partId] = false;
+              const child = allItems.find(i => i.id === l.partId);
+              if (child?.bom) uncheckDescendants(child.bom);
+            }
+          };
+          uncheckDescendants(item.bom);
         }
-        next[itemId] = "expand";
       }
       return next;
     });
   };
 
+  // Collect all checked items with their quantities
   const getConsumedItems = useCallback((bom, multiplier) => {
     const result = [];
     for (const line of bom) {
       const item = allItems.find(i => i.id === line.partId);
       if (!item) continue;
       const totalQty = line.qty * multiplier;
-      const mode = prodConsume[item.id];
-      if (mode === "expand" && item.bom) {
-        result.push(...getConsumedItems(item.bom, totalQty));
-      } else {
+      if (prodConsume[item.id]) {
+        // This item is checked — consume it directly
         result.push({ partId: item.id, name: item.name, qty: totalQty, unit: item.unit, currentQty: item.qty });
+      } else if (item.bom && item.bom.length > 0) {
+        // Not checked but has children — recurse
+        result.push(...getConsumedItems(item.bom, totalQty));
       }
+      // If no children and not checked, it's a gap (validation will catch it)
     }
     return result;
+  }, [allItems, prodConsume]);
+
+  // Validate that every leaf in the tree is covered
+  const getValidationErrors = useCallback((bom, multiplier) => {
+    const errors = [];
+    for (const line of bom) {
+      const item = allItems.find(i => i.id === line.partId);
+      if (!item) { errors.push(`${line.partId} not found`); continue; }
+      if (prodConsume[item.id]) continue; // checked, we're good
+      if (item.bom && item.bom.length > 0) {
+        // Not checked — children must cover it
+        errors.push(...getValidationErrors(item.bom, line.qty * multiplier));
+      } else {
+        // Raw material not checked — gap
+        errors.push(`${item.name} is not checked`);
+      }
+    }
+    return errors;
   }, [allItems, prodConsume]);
 
   const submitProduction = async () => {
     if (!prodAssemblyItem) { show("Select an assembly", "error"); return; }
     if (prodQty <= 0) { show("Qty must be > 0", "error"); return; }
+    const validationErrors = getValidationErrors(prodAssemblyItem.bom, prodQty);
+    if (validationErrors.length > 0) { show("Not all materials are accounted for: " + validationErrors[0], "error"); return; }
     const consumed = getConsumedItems(prodAssemblyItem.bom, prodQty);
     if (consumed.length === 0) { show("Nothing to consume", "error"); return; }
 
-    // Check for insufficient stock
     const shortages = consumed.filter(c => c.qty > c.currentQty);
     if (shortages.length > 0) {
       const names = shortages.map(s => `${s.name} (need ${s.qty.toFixed(2)}, have ${s.currentQty})`).join(", ");
@@ -571,7 +602,6 @@ export default function App() {
       notes: prodNotes, createdBy: "", consumed,
     };
 
-    // Deduct consumed items
     const updParts = [...parts];
     const updAsm = [...assemblies];
     for (const c of consumed) {
@@ -581,7 +611,6 @@ export default function App() {
       if (ai >= 0) { updAsm[ai] = { ...updAsm[ai], qty: updAsm[ai].qty - c.qty }; try { await updateItemQty(c.partId, updAsm[ai].qty); } catch (e) { console.warn(e.message); } }
     }
 
-    // Increase produced assembly qty
     const prodIdx = updAsm.findIndex(a => a.id === prodAssemblyItem.id);
     if (prodIdx >= 0) { updAsm[prodIdx] = { ...updAsm[prodIdx], qty: updAsm[prodIdx].qty + prodQty }; try { await updateItemQty(prodAssemblyItem.id, updAsm[prodIdx].qty); } catch (e) { console.warn(e.message); } }
 
@@ -600,30 +629,55 @@ export default function App() {
         if (!item) return <div key={i} style={{ color: "#ef4444", fontSize: 12 }}>⚠ {line.partId} not found</div>;
         const lvl = getLevel(item.id);
         const hasBom = item.bom && item.bom.length > 0;
-        const mode = prodConsume[item.id] || "check";
-        const isExpanded = mode === "expand";
+        const isChecked = !!prodConsume[item.id];
         const totalNeeded = line.qty * multiplier;
         const sufficient = item.qty >= totalNeeded;
+        // Check if any descendant is checked (meaning user drilled down)
+        const anyChildChecked = hasBom && item.bom.some(l => prodConsume[l.partId]);
+        const showChildren = hasBom && !isChecked;
+
         return (
           <div key={`${item.id}-${depth}-${i}`} style={{ marginBottom: 2 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 4px", borderRadius: 4, background: isExpanded ? "transparent" : (mode === "check" ? "#1a2a1a" : "transparent") }}>
-              {hasBom && (
-                <button onClick={() => toggleConsumeMode(item.id)} style={{ background: "none", border: "1px solid #444", borderRadius: 4, cursor: "pointer", color: isExpanded ? "#f59e0b" : "#22c55e", padding: "2px 6px", fontSize: 11, minWidth: 60 }}>
-                  {isExpanded ? "Expand ▼" : "Use ✓"}
-                </button>
-              )}
-              {!hasBom && <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: "#22c55e", marginLeft: 4, marginRight: 4 }} />}
-              <span style={{ color: LEVELS[lvl]?.color || "#888", fontSize: 11, fontFamily: "monospace" }}>{item.id}</span>
-              <span style={{ fontSize: 13, color: "#ccc" }}>{item.name}</span>
-              {!isExpanded && (
+            <div
+              onClick={() => toggleConsume(item.id)}
+              style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", borderRadius: 6, cursor: "pointer",
+                background: isChecked ? "#1a2a1a" : "transparent",
+                border: isChecked ? "1px solid #2a4a2a" : "1px solid transparent",
+              }}
+            >
+              {/* Checkbox */}
+              <div style={{
+                width: 18, height: 18, borderRadius: 4, flexShrink: 0,
+                border: isChecked ? "2px solid #22c55e" : "2px solid #555",
+                background: isChecked ? "#22c55e" : "transparent",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {isChecked && <span style={{ color: "#000", fontSize: 12, fontWeight: 700 }}>✓</span>}
+              </div>
+
+              <span style={{ color: LEVELS[lvl]?.color || "#888", fontSize: 11, fontFamily: "monospace", minWidth: 100 }}>{item.id}</span>
+              <span style={{ fontSize: 13, color: isChecked ? "#e0e0e0" : "#888", fontWeight: isChecked ? 500 : 400 }}>{item.name}</span>
+
+              {isChecked && (
                 <>
                   <span style={{ fontSize: 12, color: "#888" }}>× {totalNeeded.toFixed(3)} {item.unit}</span>
-                  <span style={{ fontSize: 11, color: sufficient ? "#22c55e" : "#ef4444", marginLeft: 4 }}>(have {item.qty})</span>
+                  <span style={{ fontSize: 11, color: sufficient ? "#22c55e" : "#ef4444", fontWeight: 600 }}>
+                    ({item.qty} in stock{!sufficient ? " ⚠" : ""})
+                  </span>
                 </>
               )}
-              {isExpanded && <span style={{ fontSize: 11, color: "#f59e0b" }}>→ consuming children instead</span>}
+
+              {!isChecked && hasBom && (
+                <span style={{ fontSize: 11, color: "#f59e0b", fontStyle: "italic" }}>↓ using components below</span>
+              )}
+
+              {!isChecked && !hasBom && (
+                <span style={{ fontSize: 11, color: "#ef4444" }}>⚠ not checked — will not be consumed</span>
+              )}
             </div>
-            {isExpanded && hasBom && renderConsumptionTree(item.bom, totalNeeded, depth + 1)}
+
+            {showChildren && renderConsumptionTree(item.bom, totalNeeded, depth + 1)}
           </div>
         );
       })}
@@ -1327,7 +1381,7 @@ export default function App() {
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 4 }}>Materials to Consume</div>
             <div style={{ fontSize: 12, color: "#888", marginBottom: 10 }}>
-              Click <strong style={{ color: "#22c55e" }}>Use ✓</strong> to consume an item directly, or <strong style={{ color: "#f59e0b" }}>Expand ▼</strong> to drill into its sub-components instead.
+              <strong style={{ color: "#22c55e" }}>✓ Checked</strong> = consume from inventory. Click a checked sub-assembly to <strong style={{ color: "#f59e0b" }}>uncheck it</strong> and select its individual components instead.
             </div>
             <div style={{ border: "1px solid #2a2a3a", borderRadius: 8, padding: 12, background: "#16161e", maxHeight: 400, overflow: "auto" }}>
               {renderConsumptionTree(prodAssemblyItem.bom, prodQty)}
@@ -1337,20 +1391,27 @@ export default function App() {
 
         {prodAssemblyItem && (() => {
           const consumed = getConsumedItems(prodAssemblyItem.bom, prodQty);
+          const valErrors = getValidationErrors(prodAssemblyItem.bom, prodQty);
           const shortages = consumed.filter(c => c.qty > c.currentQty);
           return (
             <>
-              {shortages.length > 0 && (
+              {valErrors.length > 0 && (
                 <div style={{ background: "#2a1a1a", border: "1px solid #ef444433", borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}>
-                  <div style={{ fontSize: 12, color: "#ef4444", fontWeight: 600, marginBottom: 4 }}>⚠ Insufficient Stock</div>
-                  {shortages.map((s, i) => (
-                    <div key={i} style={{ fontSize: 12, color: "#f87171" }}>{s.name}: need {s.qty.toFixed(3)}, have {s.currentQty}</div>
-                  ))}
+                  <div style={{ fontSize: 12, color: "#ef4444", fontWeight: 600, marginBottom: 4 }}>⚠ Incomplete — some materials are not checked:</div>
+                  {valErrors.map((e, i) => <div key={i} style={{ fontSize: 12, color: "#f87171" }}>{e}</div>)}
                 </div>
               )}
-              <div style={{ fontSize: 12, color: "#888", marginBottom: 12 }}>
-                Will consume {consumed.length} items totaling {consumed.reduce((s, c) => s + c.qty, 0).toFixed(2)} units
-              </div>
+              {valErrors.length === 0 && shortages.length > 0 && (
+                <div style={{ background: "#2a2a1a", border: "1px solid #f59e0b33", borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, color: "#f59e0b", fontWeight: 600, marginBottom: 4 }}>⚠ Insufficient Stock (will go negative)</div>
+                  {shortages.map((s, i) => <div key={i} style={{ fontSize: 12, color: "#fbbf24" }}>{s.name}: need {s.qty.toFixed(3)}, have {s.currentQty}</div>)}
+                </div>
+              )}
+              {valErrors.length === 0 && (
+                <div style={{ fontSize: 12, color: "#22c55e", marginBottom: 12, fontWeight: 500 }}>
+                  ✓ Will consume {consumed.length} items totaling {consumed.reduce((s, c) => s + c.qty, 0).toFixed(2)} units
+                </div>
+              )}
             </>
           );
         })()}
@@ -1362,7 +1423,7 @@ export default function App() {
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button onClick={() => setProdModal(false)} style={B2}>Cancel</button>
-          <button onClick={submitProduction} style={{ ...B1, background: "#8b5cf6" }}><Hammer size={14} /> Run Production</button>
+          <button onClick={submitProduction} disabled={!prodAssemblyItem || prodQty <= 0 || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)} style={{ ...B1, background: "#8b5cf6", opacity: (!prodAssemblyItem || prodQty <= 0 || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}><Hammer size={14} /> Run Production</button>
         </div>
       </Modal>
 
