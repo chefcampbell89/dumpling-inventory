@@ -363,15 +363,27 @@ export default function App() {
   // ---- Auth handlers ----
   const handleLogin = async () => {
     setAuthLoading(true); setAuthError("");
-    console.log("LOGIN ATTEMPT:", authEmail);
     try {
       const data = await signIn(authEmail, authPass);
-      console.log("LOGIN RESULT:", data);
+      setAuthUser(data.user);
+      try { const p = await getProfile(data.user.id); setProfile(p); } catch { setProfile({ id: data.user.id, email: data.user.email, name: "", role: "user" }); }
       setAuthEmail(""); setAuthPass("");
-    } catch (e) {
-      console.log("LOGIN ERROR:", e.message);
-      setAuthError(e.message);
-    }
+      // Load app data
+      const [dbItems, dbBom, dbVendors, dbOrders, dbPOs] = await Promise.all([
+        fetchItems(), fetchBomLines(), fetchVendors(), fetchOrders(), fetchPurchaseOrders(),
+      ]);
+      fetchReceipts().then(r => setReceipts(r)).catch(() => {});
+      fetchProductionRuns().then(r => setProdRuns(r)).catch(() => {});
+      const assemblyIds = new Set(dbBom.map((b) => b.assemblyId));
+      const rawMats = dbItems.filter((i) => !assemblyIds.has(i.id));
+      const asms = dbItems.filter((i) => assemblyIds.has(i.id)).map((a) => ({
+        ...a, bom: dbBom.filter((b) => b.assemblyId === a.id).map((b) => ({ partId: b.partId, qty: b.qty })),
+      }));
+      if (dbItems.length > 0) { setParts(rawMats); setAssemblies(asms); }
+      if (dbVendors.length > 0) setVendors(dbVendors);
+      if (dbOrders.length > 0) setOrders(dbOrders);
+      if (dbPOs.length > 0) setPOs(dbPOs);
+    } catch (e) { setAuthError(e.message); }
     finally { setAuthLoading(false); }
   };
 
@@ -383,6 +395,8 @@ export default function App() {
       const data = await signUp(authEmail, authPass);
       if (data.user) {
         try { await updateProfile(data.user.id, { name: authName }); } catch {}
+        setAuthUser(data.user);
+        setProfile({ id: data.user.id, email: authEmail, name: authName, role: "user" });
       }
     } catch (e) { setAuthError(e.message); }
     finally { setAuthLoading(false); }
@@ -390,6 +404,7 @@ export default function App() {
 
   const handleLogout = async () => {
     await signOut();
+    setAuthUser(null); setProfile(null);
   };
 
   const handleChangePassword = async () => {
