@@ -1,4 +1,4 @@
-// APP VERSION: v73
+// APP VERSION: v74
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -370,16 +370,15 @@ export default function App() {
       setAuthUser(data.user);
       try { const p = await getProfile(data.user.id); setProfile(p); } catch { setProfile({ id: data.user.id, email: data.user.email, name: "", role: "user" }); }
       setAuthEmail(""); setAuthPass("");
-      // Load app data
       const [dbItems, dbBom, dbVendors, dbOrders, dbPOs] = await Promise.all([
         fetchItems(), fetchBomLines(), fetchVendors(), fetchOrders(), fetchPurchaseOrders(),
       ]);
       fetchReceipts().then(r => setReceipts(r)).catch(() => {});
       fetchProductionRuns().then(r => setProdRuns(r)).catch(() => {});
-      const assemblyIds = new Set(dbBom.map((b) => b.assemblyId));
-      const rawMats = dbItems.filter((i) => !assemblyIds.has(i.id));
-      const asms = dbItems.filter((i) => assemblyIds.has(i.id)).map((a) => ({
-        ...a, bom: dbBom.filter((b) => b.assemblyId === a.id).map((b) => ({ partId: b.partId, qty: b.qty })),
+      const assemblyIds = new Set(dbBom.map(b => b.assemblyId));
+      const rawMats = dbItems.filter(i => !assemblyIds.has(i.id));
+      const asms = dbItems.filter(i => assemblyIds.has(i.id)).map(a => ({
+        ...a, bom: dbBom.filter(b => b.assemblyId === a.id).map(b => ({ partId: b.partId, qty: b.qty })),
       }));
       if (dbItems.length > 0) { setParts(rawMats); setAssemblies(asms); }
       if (dbVendors.length > 0) setVendors(dbVendors);
