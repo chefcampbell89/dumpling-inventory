@@ -167,3 +167,42 @@ export async function bulkInsertItems(items) {
     if (error) throw error
   }
 }
+
+// ---- RECEIPTS ----
+
+export async function fetchReceipts() {
+  const { data: rcpts, error: rErr } = await supabase.from('receipts').select('*').order('created_at', { ascending: false })
+  if (rErr) throw rErr
+  const { data: lines, error: lErr } = await supabase.from('receipt_lines').select('*')
+  if (lErr) throw lErr
+  return rcpts.map(r => ({
+    id: r.id, poId: r.po_id, type: r.receipt_type, date: r.receipt_date,
+    notes: r.notes, createdBy: r.created_by, createdAt: r.created_at,
+    lines: lines.filter(l => l.receipt_id === r.id).map(l => ({
+      partId: l.part_id, name: l.part_name, qtyExpected: Number(l.qty_expected),
+      qtyReceived: Number(l.qty_received), unit: l.unit,
+    })),
+  }))
+}
+
+export async function createReceipt(receipt) {
+  const { error: rErr } = await supabase.from('receipts').insert({
+    id: receipt.id, po_id: receipt.poId || null, receipt_type: receipt.type,
+    receipt_date: receipt.date, notes: receipt.notes, created_by: receipt.createdBy || '',
+  })
+  if (rErr) throw rErr
+  if (receipt.lines.length > 0) {
+    const { error: lErr } = await supabase.from('receipt_lines').insert(
+      receipt.lines.map(l => ({
+        receipt_id: receipt.id, part_id: l.partId, part_name: l.name,
+        qty_expected: l.qtyExpected, qty_received: l.qtyReceived, unit: l.unit,
+      }))
+    )
+    if (lErr) throw lErr
+  }
+}
+
+export async function updateItemQty(id, newQty) {
+  const { error } = await supabase.from('items').update({ qty: newQty }).eq('id', id)
+  if (error) throw error
+}
