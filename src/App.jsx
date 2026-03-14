@@ -364,11 +364,8 @@ export default function App() {
   const handleLogin = async () => {
     setAuthLoading(true); setAuthError("");
     try {
-      const data = await signIn(authEmail, authPass);
-      setAuthUser(data.user);
-      try { const p = await getProfile(data.user.id); setProfile(p); } catch { setProfile({ id: data.user.id, email: data.user.email, name: "", role: "user" }); }
+      await signIn(authEmail, authPass);
       setAuthEmail(""); setAuthPass("");
-      window.location.reload();
     } catch (e) { setAuthError(e.message); }
     finally { setAuthLoading(false); }
   };
@@ -381,9 +378,6 @@ export default function App() {
       const data = await signUp(authEmail, authPass);
       if (data.user) {
         try { await updateProfile(data.user.id, { name: authName }); } catch {}
-        setAuthUser(data.user);
-        setProfile({ id: data.user.id, email: authEmail, name: authName, role: "user" });
-        window.location.reload();
       }
     } catch (e) { setAuthError(e.message); }
     finally { setAuthLoading(false); }
@@ -391,8 +385,6 @@ export default function App() {
 
   const handleLogout = async () => {
     await signOut();
-    setAuthUser(null); setProfile(null);
-    window.location.reload();
   };
 
   const handleChangePassword = async () => {
