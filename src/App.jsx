@@ -5,13 +5,14 @@ import {
   fetchVendors, upsertVendor, deleteVendor as dbDeleteVendor,
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
+  fetchReceipts, createReceipt, updateItemQty,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
 import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
-  ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2,
+  ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck,
 } from "lucide-react";
 
 // ============================================================
@@ -30,6 +31,7 @@ const LEVEL_KEYS = [100, 200, 250, 300, 400, 500];
 const COSTING = ["FIFO", "FEFO - Batch"];
 const PO_STATUSES = ["Draft", "Sent", "Confirmed", "Received", "Cancelled"];
 const ORD_STATUSES = ["Pending", "Confirmed", "In Production", "Fulfilled", "Cancelled"];
+const RECEIPT_TYPES = ["PO Receipt", "Vendor delivery (no PO)", "Inventory adjustment", "Return from production", "Found/count correction"];
 
 function getLevel(id) {
   const m = id.match(/^(\d+)-/);
@@ -284,6 +286,14 @@ export default function App() {
   const [vendors, setVendors] = useState(SEED_VENDORS);
   const [orders, setOrders] = useState(SEED_ORDERS);
   const [pos, setPOs] = useState([]);
+  const [receipts, setReceipts] = useState([]);
+  const [rcvModal, setRcvModal] = useState(false);
+  const [rcvMode, setRcvMode] = useState("po");
+  const [rcvPO, setRcvPO] = useState("");
+  const [rcvLines, setRcvLines] = useState([]);
+  const [rcvType, setRcvType] = useState("PO Receipt");
+  const [rcvNotes, setRcvNotes] = useState("");
+  const [rcvPoAction, setRcvPoAction] = useState("received");
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState("All");
   const [stockFilter, setStockFilter] = useState("All");
@@ -407,7 +417,7 @@ export default function App() {
     setModal(type);
   };
 
-  const openEdit = (type, item) => { setEditItem(item); setForm({ ...item }); if (item.bom) setBomForm([...item.bom]); setModal(type); };
+  const openEdit = (type, item) => { setEditItem(item); setForm({ ...item }); setBomForm(item.bom ? item.bom.map(b => ({...b})) : []); setModal(type); };
 
   const save = async () => {
     if (modal === "part") {
@@ -421,8 +431,16 @@ export default function App() {
       const cleanBom = bomForm.filter((b) => b.partId && b.qty > 0);
       const obj = { ...form, avgCost: Number(form.avgCost), qty: Number(form.qty), minStock: Number(form.minStock), bom: cleanBom };
       try { await upsertItem(obj); await setBomForAssembly(obj.id, cleanBom); } catch (e) { console.warn("DB save failed:", e.message); }
-      if (editItem) setAssemblies((p) => p.map((x) => (x.id === editItem.id ? obj : x)));
-      else setAssemblies((p) => [...p, obj]);
+      // If converting from raw material to assembly, move it
+      const wasRawMaterial = parts.some((p) => p.id === editItem?.id);
+      if (wasRawMaterial) {
+        setParts((p) => p.filter((x) => x.id !== editItem.id));
+        setAssemblies((p) => [...p, obj]);
+      } else if (editItem) {
+        setAssemblies((p) => p.map((x) => (x.id === editItem.id ? obj : x)));
+      } else {
+        setAssemblies((p) => [...p, obj]);
+      }
     } else if (modal === "order") {
       if (!form.customer || !form.item) { show("Customer & item required", "error"); return; }
       const obj = { ...form, qty: Number(form.qty) };
@@ -469,6 +487,73 @@ export default function App() {
     w.document.write(`<html><head><title>PO ${po.id}</title><style>body{font-family:Arial,sans-serif;padding:40px;color:#222}table{width:100%;border-collapse:collapse;margin:20px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:13px}th{background:#f5f5f5}.total{text-align:right;font-size:16px;font-weight:bold;margin-top:10px}</style></head><body><h1>PURCHASE ORDER ${po.id}</h1><p>Date: ${po.date} | Status: ${po.status}</p><div style="display:flex;justify-content:space-between;margin:20px 0"><div><strong>${po.vendor}</strong><br>${v?.address || ""}<br>${v?.contact || ""} ${v?.email || ""} ${v?.phone || ""}</div><div style="text-align:right"><strong>Terms:</strong> ${po.paymentTerms || "N/A"}<br><strong>Lead:</strong> ${po.leadDays || "?"} days</div></div><table><thead><tr><th>Part ID</th><th>Description</th><th>Qty</th><th>Unit</th><th>Cost</th><th>Total</th></tr></thead><tbody>${po.lines.map((l) => `<tr><td>${l.partId}</td><td>${l.name}</td><td>${l.qty}</td><td>${l.unit}</td><td>$${l.unitCost.toFixed(2)}</td><td>$${l.total.toFixed(2)}</td></tr>`).join("")}</tbody></table><div class="total">TOTAL: $${po.total.toFixed(2)}</div></body></html>`);
     w.document.close();
     w.print();
+  };
+
+  // ---- RECEIVING ----
+  const openReceiveFromPO = (poId) => {
+    const po = pos.find(p => p.id === poId);
+    if (!po) return;
+    setRcvMode("po");
+    setRcvPO(poId);
+    setRcvType("PO Receipt");
+    setRcvPoAction("received");
+    setRcvNotes("");
+    setRcvLines(po.lines.map(l => ({ partId: l.partId, name: l.name, qtyExpected: l.qty, qtyReceived: l.qty, unit: l.unit })));
+    setRcvModal(true);
+  };
+
+  const openReceiveManual = () => {
+    setRcvMode("manual");
+    setRcvPO("");
+    setRcvType("Vendor delivery (no PO)");
+    setRcvPoAction("");
+    setRcvNotes("");
+    setRcvLines([]);
+    setRcvModal(true);
+  };
+
+  const addManualRcvLine = () => {
+    setRcvLines(prev => [...prev, { partId: "", name: "", qtyExpected: 0, qtyReceived: 0, unit: "" }]);
+  };
+
+  const submitReceipt = async () => {
+    if (rcvMode === "manual" && !rcvNotes.trim()) { show("Notes/reason required for manual receipts", "error"); return; }
+    const validLines = rcvLines.filter(l => l.partId && l.qtyReceived > 0);
+    if (validLines.length === 0) { show("No items to receive", "error"); return; }
+
+    const receiptId = `RCV-${new Date().toISOString().slice(0,10)}-${String(receipts.length + 1).padStart(3, "0")}`;
+    const receipt = {
+      id: receiptId, poId: rcvMode === "po" ? rcvPO : null, type: rcvType,
+      date: new Date().toISOString().slice(0, 10), notes: rcvNotes, createdBy: "",
+      lines: validLines,
+    };
+
+    // Update local inventory quantities
+    const updatedParts = [...parts];
+    for (const line of validLines) {
+      const idx = updatedParts.findIndex(p => p.id === line.partId);
+      if (idx >= 0) {
+        updatedParts[idx] = { ...updatedParts[idx], qty: updatedParts[idx].qty + line.qtyReceived };
+        try { await updateItemQty(line.partId, updatedParts[idx].qty); } catch (e) { console.warn("Qty update failed:", e.message); }
+      }
+    }
+    setParts(updatedParts);
+
+    // Update PO status if receiving from PO
+    if (rcvMode === "po" && rcvPO && rcvPoAction) {
+      const newStatus = rcvPoAction === "received" ? "Received" : rcvPoAction === "keep" ? undefined : undefined;
+      if (newStatus) {
+        setPOs(prev => prev.map(p => p.id === rcvPO ? { ...p, status: newStatus } : p));
+        try { await updatePOStatus(rcvPO, newStatus); } catch (e) { console.warn("PO status update failed:", e.message); }
+      }
+    }
+
+    // Save receipt
+    setReceipts(prev => [{ ...receipt, createdAt: new Date().toISOString() }, ...prev]);
+    try { await createReceipt(receipt); } catch (e) { console.warn("Receipt save failed:", e.message); }
+
+    show(`Received ${validLines.length} items (${receiptId})`);
+    setRcvModal(false);
   };
 
   const renderBom = (bom, depth = 0) => (
@@ -656,6 +741,7 @@ export default function App() {
         {tabBtn("vendors", "Vendors", <Building2 size={14} />)}
         {tabBtn("mrp", "Purchase Needs", <ClipboardList size={14} />)}
         {tabBtn("pos", "Purchase Orders", <FileText size={14} />)}
+        {tabBtn("receiving", "Receiving", <PackageCheck size={14} />)}
       </div>
 
       {/* Filters */}
@@ -679,6 +765,7 @@ export default function App() {
         </>}
         {tab === "orders" && <button onClick={() => openAdd("order")} style={B1}><Plus size={14} /> Order</button>}
         {tab === "vendors" && <button onClick={() => openAdd("vendor")} style={B1}><Plus size={14} /> Vendor</button>}
+        {tab === "receiving" && <button onClick={openReceiveManual} style={B1}><Plus size={14} /> Manual Receipt</button>}
       </div>
 
       {/* ================== INVENTORY TABLE ================== */}
@@ -710,8 +797,9 @@ export default function App() {
                           <td style={{ ...TD, fontSize: 12 }}>{p.supplier}</td>
                           <td style={TD}>
                             <div style={{ display: "flex", gap: 4 }}>
-                              <button onClick={() => openEdit(hasBom ? "assembly" : "part", p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6366f1", padding: 3 }}><Edit2 size={14} /></button>
-                              <button onClick={() => setDelConfirm(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>
+                              <button onClick={() => openEdit(hasBom ? "assembly" : "part", p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6366f1", padding: 3 }} title="Edit"><Edit2 size={14} /></button>
+                              {!hasBom && <button onClick={() => { setEditItem(p); setForm({ ...p, category: LEVELS[getLevel(p.id)]?.cat || p.category }); setBomForm([]); setModal("assembly"); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#f59e0b", padding: 3 }} title="Add BOM"><Layers size={14} /></button>}
+                              <button onClick={() => setDelConfirm(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }} title="Delete"><Trash2 size={14} /></button>
                             </div>
                           </td>
                         </tr>
@@ -856,6 +944,7 @@ export default function App() {
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                         <span style={{ fontSize: 18, fontWeight: 700, color: "#f59e0b" }}>${po.total.toFixed(2)}</span>
                         <button onClick={(e) => { e.stopPropagation(); printPO(po); }} style={{ ...B2, padding: "5px 10px" }}><Printer size={13} /></button>
+                        {po.status !== "Received" && po.status !== "Cancelled" && <button onClick={(e) => { e.stopPropagation(); openReceiveFromPO(po.id); }} style={{ ...B2, padding: "5px 10px", borderColor: "#22c55e", color: "#22c55e" }}><PackageCheck size={13} /></button>}
                         <select value={po.status} onClick={(e) => e.stopPropagation()} onChange={async (e) => { e.stopPropagation(); const ns = e.target.value; setPOs((p) => p.map((x) => x.id === po.id ? { ...x, status: ns } : x)); try { await updatePOStatus(po.id, ns); } catch (err) { console.warn(err); } }} style={{ ...IS, width: "auto", minWidth: 90, padding: "4px 8px", fontSize: 12 }}>
                           {PO_STATUSES.map((s) => <option key={s}>{s}</option>)}
                         </select>
@@ -888,6 +977,189 @@ export default function App() {
           }
         </div>
       )}
+
+          }
+        </div>
+      )}
+
+      {/* ================== RECEIVING TAB ================== */}
+      {tab === "receiving" && (
+        <div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            <Stat icon={<PackageCheck size={18} />} label="Total Receipts" value={receipts.length} accent="#22c55e" />
+            <Stat icon={<FileText size={18} />} label="From POs" value={receipts.filter(r => r.poId).length} accent="#6366f1" />
+            <Stat icon={<ClipboardList size={18} />} label="Manual" value={receipts.filter(r => !r.poId).length} accent="#f59e0b" />
+          </div>
+
+          {/* Quick receive from open POs */}
+          {pos.filter(p => p.status !== "Received" && p.status !== "Cancelled").length > 0 && (
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
+              <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Open POs Ready to Receive</div>
+              <div style={{ padding: "8px" }}>
+                {pos.filter(p => p.status !== "Received" && p.status !== "Cancelled").map(po => (
+                  <div key={po.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", borderBottom: "1px solid #1a1a2a" }}>
+                    <div>
+                      <span style={{ fontFamily: "monospace", fontWeight: 700, color: "#e0e0e0", marginRight: 12 }}>{po.id}</span>
+                      <span style={{ color: "#888", fontSize: 13 }}>{po.vendor} • {po.lines.length} items • ${po.total.toFixed(2)}</span>
+                    </div>
+                    <button onClick={() => openReceiveFromPO(po.id)} style={{ ...B1, padding: "6px 14px", background: "#22c55e" }}><PackageCheck size={14} /> Receive</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Receipt history */}
+          <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+            <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Receipt History</div>
+            {receipts.length === 0 ? (
+              <div style={{ padding: 40, textAlign: "center", color: "#555" }}>
+                <PackageCheck size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
+                <p style={{ margin: 0 }}>No receipts yet. Receive against a PO or create a manual receipt.</p>
+              </div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}>
+                  <thead><tr>
+                    {["Receipt ID", "Date", "Type", "PO #", "Items", "Notes", ""].map(h => <th key={h} style={TH}>{h}</th>)}
+                  </tr></thead>
+                  <tbody>
+                    {receipts.map(r => {
+                      const isExp = expanded[`rcv-${r.id}`];
+                      return (
+                        <React.Fragment key={r.id}>
+                          <tr>
+                            <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#22c55e", cursor: "pointer" }} onClick={() => tog(`rcv-${r.id}`)}>
+                              {isExp ? <ChevronDown size={12} style={{ marginRight: 4 }} /> : <ChevronRight size={12} style={{ marginRight: 4 }} />}
+                              {r.id}
+                            </td>
+                            <td style={{ ...TD, fontSize: 12, color: "#888" }}>{r.date}</td>
+                            <td style={TD}><span style={{ background: r.poId ? "#6366f122" : "#f59e0b22", color: r.poId ? "#6366f1" : "#f59e0b", padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{r.type}</span></td>
+                            <td style={{ ...TD, fontFamily: "monospace", fontSize: 12 }}>{r.poId || "—"}</td>
+                            <td style={{ ...TD, fontSize: 12 }}>{r.lines.length} items, {r.lines.reduce((s, l) => s + l.qtyReceived, 0)} units</td>
+                            <td style={{ ...TD, fontSize: 12, color: "#888", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.notes || "—"}</td>
+                            <td style={{ ...TD, fontSize: 11, color: "#666" }}>{r.createdBy || ""}</td>
+                          </tr>
+                          {isExp && (
+                            <tr><td colSpan={7} style={{ ...TD, background: "#16161e", paddingLeft: 40 }}>
+                              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                                <thead><tr>{["Part ID", "Name", "Expected", "Received", "Unit"].map(h => <th key={h} style={{ ...TH, fontSize: 10 }}>{h}</th>)}</tr></thead>
+                                <tbody>{r.lines.map((l, i) => (
+                                  <tr key={i}>
+                                    <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#6366f1" }}>{l.partId}</td>
+                                    <td style={{ ...TD, fontSize: 12 }}>{l.name}</td>
+                                    <td style={{ ...TD, fontSize: 12, color: "#888" }}>{l.qtyExpected}</td>
+                                    <td style={{ ...TD, fontSize: 12, fontWeight: 600, color: l.qtyReceived < l.qtyExpected ? "#f59e0b" : "#22c55e" }}>{l.qtyReceived}</td>
+                                    <td style={{ ...TD, fontSize: 12, color: "#888" }}>{l.unit}</td>
+                                  </tr>
+                                ))}</tbody>
+                              </table>
+                            </td></tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ================== RECEIVING MODAL ================== */}
+      <Modal open={rcvModal} onClose={() => setRcvModal(false)} title={rcvMode === "po" ? `Receive Against ${rcvPO}` : "Manual Receipt"} wide>
+        <div style={{ marginBottom: 16 }}>
+          {rcvMode === "po" ? (
+            <div style={{ display: "flex", gap: 12, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ fontSize: 13, color: "#888" }}>PO: <strong style={{ color: "#e0e0e0" }}>{rcvPO}</strong></div>
+              <div style={{ fontSize: 13, color: "#888" }}>Vendor: <strong style={{ color: "#e0e0e0" }}>{pos.find(p => p.id === rcvPO)?.vendor || ""}</strong></div>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: "#888" }}>After receiving:</span>
+                <select value={rcvPoAction} onChange={e => setRcvPoAction(e.target.value)} style={{ ...IS, width: "auto", minWidth: 160 }}>
+                  <option value="received">Mark PO as Received</option>
+                  <option value="keep">Keep PO Open (partial)</option>
+                </select>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+              <div>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Receipt Type *</label>
+                <select value={rcvType} onChange={e => setRcvType(e.target.value)} style={IS}>
+                  {RECEIPT_TYPES.filter(t => t !== "PO Receipt").map(t => <option key={t}>{t}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Reason / Notes * <span style={{ color: "#ef4444" }}>(required)</span></label>
+                <input value={rcvNotes} onChange={e => setRcvNotes(e.target.value)} placeholder="Why is this being received without a PO?" style={{ ...IS, borderColor: !rcvNotes.trim() ? "#ef4444" : "#333" }} />
+              </div>
+            </div>
+          )}
+
+          {rcvMode === "po" && (
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes (optional)</label>
+              <input value={rcvNotes} onChange={e => setRcvNotes(e.target.value)} placeholder="Delivery notes, condition, etc." style={IS} />
+            </div>
+          )}
+
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Line Items</div>
+          {rcvMode === "manual" && (
+            <div style={{ marginBottom: 12 }}>
+              <button onClick={addManualRcvLine} style={B2}><Plus size={14} /> Add Item</button>
+            </div>
+          )}
+
+          <div style={{ overflowX: "auto", border: "1px solid #2a2a3a", borderRadius: 8 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                {rcvMode === "manual" ? ["Item", "Qty Received", "Unit", ""].map(h => <th key={h} style={TH}>{h}</th>) : ["Part ID", "Name", "Ordered", "Receiving", "Unit"].map(h => <th key={h} style={TH}>{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {rcvLines.length === 0 ? <tr><td colSpan={5} style={{ ...TD, textAlign: "center", color: "#555", padding: 20 }}>No items. {rcvMode === "manual" ? "Click Add Item above." : ""}</td></tr> :
+                rcvLines.map((line, i) => (
+                  <tr key={i}>
+                    {rcvMode === "manual" ? (
+                      <>
+                        <td style={TD}>
+                          <select value={line.partId} onChange={e => { const p = parts.find(x => x.id === e.target.value); setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, partId: e.target.value, name: p?.name || "", unit: p?.unit || "" } : l)); }} style={{ ...IS, fontSize: 12 }}>
+                            <option value="">Select item...</option>
+                            {parts.map(p => <option key={p.id} value={p.id}>[{p.id}] {p.name}</option>)}
+                          </select>
+                        </td>
+                        <td style={TD}><input type="number" step="any" min="0" value={line.qtyReceived} onChange={e => setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, qtyReceived: Number(e.target.value) } : l))} style={{ ...IS, width: 80, fontSize: 12 }} /></td>
+                        <td style={{ ...TD, fontSize: 12, color: "#888" }}>{line.unit}</td>
+                        <td style={TD}><button onClick={() => setRcvLines(prev => prev.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Minus size={14} /></button></td>
+                      </>
+                    ) : (
+                      <>
+                        <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#6366f1" }}>{line.partId}</td>
+                        <td style={{ ...TD, fontSize: 12 }}>{line.name}</td>
+                        <td style={{ ...TD, fontSize: 12, color: "#888" }}>{line.qtyExpected}</td>
+                        <td style={TD}><input type="number" step="any" min="0" value={line.qtyReceived} onChange={e => setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, qtyReceived: Number(e.target.value) } : l))} style={{ ...IS, width: 80, fontSize: 12, color: line.qtyReceived < line.qtyExpected ? "#f59e0b" : "#22c55e" }} /></td>
+                        <td style={{ ...TD, fontSize: 12, color: "#888" }}>{line.unit}</td>
+                      </>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "#888" }}>
+            {rcvLines.filter(l => l.qtyReceived > 0).length} items, {rcvLines.reduce((s, l) => s + (l.qtyReceived || 0), 0)} total units
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setRcvModal(false)} style={B2}>Cancel</button>
+            <button onClick={submitReceipt} style={{ ...B1, background: "#22c55e" }}>
+              <PackageCheck size={14} /> Confirm Receipt
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {/* ================== MODALS ================== */}
 
