@@ -413,6 +413,48 @@ export default function App() {
     try { await changePassword(newPw); show("Password changed!"); setPwModal(false); setNewPw(""); setNewPwConfirm(""); } catch (e) { show(e.message, "error"); }
   };
 
+  // ---- ORDER FULFILLMENT ----
+  const shipOrderLine = async (order) => {
+    const item = allItems.find(i => i.id === order.item);
+    if (item && item.qty < order.qty) {
+      if (!window.confirm(`Warning: ${item.name} has ${item.qty} in stock but order needs ${order.qty}. Inventory will go negative. Continue?`)) return;
+    }
+
+    // Deduct inventory
+    if (item) {
+      const newQty = item.qty - order.qty;
+      const isPart = parts.some(p => p.id === item.id);
+      if (isPart) setParts(prev => prev.map(p => p.id === item.id ? { ...p, qty: newQty } : p));
+      else setAssemblies(prev => prev.map(a => a.id === item.id ? { ...a, qty: newQty } : a));
+      try { await updateItemQty(item.id, newQty); } catch (e) { console.warn("Qty update failed:", e.message); }
+    }
+
+    // Mark order as fulfilled
+    const updated = { ...order, status: "Fulfilled" };
+    setOrders(prev => prev.map(o => o.id === order.id ? updated : o));
+    try { await upsertOrder(updated); } catch (e) { console.warn("Order update failed:", e.message); }
+    show(`Shipped ${order.qty} × ${item?.name || order.item}`);
+  };
+
+  const shipAllLines = async (lines) => {
+    const unshipped = lines.filter(o => o.status !== "Fulfilled" && o.status !== "Cancelled");
+    if (unshipped.length === 0) { show("All lines already shipped", "error"); return; }
+
+    // Check stock for all lines
+    const warnings = [];
+    for (const o of unshipped) {
+      const item = allItems.find(i => i.id === o.item);
+      if (item && item.qty < o.qty) warnings.push(`${item.name}: need ${o.qty}, have ${item.qty}`);
+    }
+    if (warnings.length > 0) {
+      if (!window.confirm(`Warning — insufficient stock:\n${warnings.join("\n")}\n\nInventory will go negative. Continue?`)) return;
+    }
+
+    for (const o of unshipped) {
+      await shipOrderLine(o);
+    }
+  };
+
   // ---- Derived ----
   const allItems = useMemo(() => [...parts, ...assemblies], [parts, assemblies]);
   const gi = useCallback((id) => allItems.find((i) => i.id === id), [allItems]);
@@ -440,7 +482,26 @@ export default function App() {
     return d;
   }, [tab, parts, assemblies, search, levelFilter, stockFilter]);
 
-  const viewOrders = useMemo(() => { if (!search) return orders; const s = search.toLowerCase(); return orders.filter((o) => o.customer.toLowerCase().includes(s) || o.id.toLowerCase().includes(s)); }, [orders, search]);
+  const viewOrders = useMemo(() => {
+    // Group orders by customer+date (orders from Google Forms share a group ID prefix)
+    if (!search) return orders;
+    const s = search.toLowerCase();
+    return orders.filter((o) => o.customer.toLowerCase().includes(s) || o.id.toLowerCase().includes(s) || o.status.toLowerCase().includes(s));
+  }, [orders, search]);
+
+  // Group orders by customer+date for display
+  const groupedOrders = useMemo(() => {
+    const src = viewOrders;
+    const groups = {};
+    for (const o of src) {
+      // Group by customer + date
+      const key = `${o.customer}|||${o.date}`;
+      if (!groups[key]) groups[key] = { customer: o.customer, date: o.date, lines: [], ids: [] };
+      groups[key].lines.push(o);
+      groups[key].ids.push(o.id);
+    }
+    return Object.values(groups).sort((a, b) => b.date.localeCompare(a.date));
+  }, [viewOrders]);
   const viewVendors = useMemo(() => { if (!search) return vendors; const s = search.toLowerCase(); return vendors.filter((v) => v.name.toLowerCase().includes(s)); }, [vendors, search]);
 
   const stats = useMemo(() => {
@@ -1170,30 +1231,108 @@ export default function App() {
 
       {/* ================== ORDERS TABLE ================== */}
       {tab === "orders" && (
-        <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
-              <thead><tr>{["Order", "Customer", "Item", "Qty", "Date", "Status", "Notes", ""].map((h) => <th key={h} style={TH}>{h}</th>)}</tr></thead>
-              <tbody>
-                {viewOrders.length === 0 ? <tr><td colSpan={8} style={{ ...TD, textAlign: "center", color: "#555", padding: 32 }}>No orders</td></tr> :
-                  viewOrders.map((o) => { const it = gi(o.item); return (
-                    <tr key={o.id}>
-                      <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#8b8bf5" }}>{o.id}</td>
-                      <td style={{ ...TD, fontWeight: 500 }}>{o.customer}</td>
-                      <td style={{ ...TD, fontSize: 12 }}>{it ? `${it.name} (${o.item})` : o.item}</td>
-                      <td style={{ ...TD, fontWeight: 600 }}>{o.qty}</td>
-                      <td style={{ ...TD, fontSize: 12, color: "#888" }}>{o.date}</td>
-                      <td style={TD}><span style={{ background: sC(o.status) + "22", color: sC(o.status), padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{o.status}</span></td>
-                      <td style={{ ...TD, fontSize: 12, color: "#888", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.notes}</td>
-                      <td style={TD}><div style={{ display: "flex", gap: 4 }}>
-                        <button onClick={() => openEdit("order", o)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6366f1", padding: 3 }}><Edit2 size={14} /></button>
-                        <button onClick={() => setDelConfirm(o.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>
-                      </div></td>
-                    </tr>
-                  ); })}
-              </tbody>
-            </table>
+        <div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            <Stat icon={<ShoppingCart size={18} />} label="Total Orders" value={orders.length} accent="#6366f1" />
+            <Stat icon={<ClipboardList size={18} />} label="Pending" value={orders.filter(o => o.status === "Pending").length} accent="#f59e0b" />
+            <Stat icon={<PackageCheck size={18} />} label="Fulfilled" value={orders.filter(o => o.status === "Fulfilled").length} accent="#22c55e" />
           </div>
+
+          {groupedOrders.length === 0 ? (
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: 40, textAlign: "center", color: "#555" }}>
+              <ShoppingCart size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
+              <p style={{ margin: 0 }}>No orders found</p>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {groupedOrders.map((group, gi) => {
+                const gKey = `ord-${group.customer}-${group.date}`;
+                const isExp = expanded[gKey];
+                const allFulfilled = group.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
+                const totalItems = group.lines.reduce((s, o) => s + o.qty, 0);
+                const unshippedCount = group.lines.filter(o => o.status !== "Fulfilled" && o.status !== "Cancelled").length;
+                const statuses = [...new Set(group.lines.map(o => o.status))];
+                const notes = group.lines.find(o => o.notes)?.notes || "";
+
+                return (
+                  <div key={gKey} style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+                    <div onClick={() => tog(gKey)} style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, cursor: "pointer" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        {isExp ? <ChevronDown size={16} style={{ color: "#888" }} /> : <ChevronRight size={16} style={{ color: "#888" }} />}
+                        <div>
+                          <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 15 }}>{group.customer}</div>
+                          <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
+                            {group.date} • {group.lines.length} line{group.lines.length > 1 ? "s" : ""} • {totalItems} total units
+                            {notes && <span style={{ marginLeft: 8, color: "#666" }}>— {notes.slice(0, 60)}{notes.length > 60 ? "..." : ""}</span>}
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        {statuses.map(s => (
+                          <span key={s} style={{ background: sC(s) + "22", color: sC(s), padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{s}</span>
+                        ))}
+                        {!allFulfilled && (
+                          <button onClick={(e) => { e.stopPropagation(); shipAllLines(group.lines); }} style={{ ...B1, padding: "6px 14px", background: "#22c55e", fontSize: 12 }}>
+                            <PackageCheck size={13} /> Ship All ({unshippedCount})
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {isExp && (
+                      <div style={{ borderTop: "1px solid #2a2a3a" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead><tr>
+                            {["Order ID", "Item", "Qty", "Status", "Notes", ""].map(h => <th key={h} style={TH}>{h}</th>)}
+                          </tr></thead>
+                          <tbody>
+                            {group.lines.map(o => {
+                              const it = gi(o.item);
+                              const isFulfilled = o.status === "Fulfilled" || o.status === "Cancelled";
+                              const stockOk = it ? it.qty >= o.qty : false;
+                              return (
+                                <tr key={o.id} style={{ opacity: isFulfilled ? 0.5 : 1 }}>
+                                  <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#8b8bf5" }}>{o.id}</td>
+                                  <td style={TD}>
+                                    <div style={{ fontWeight: 500 }}>{it?.name || o.item}</div>
+                                    <div style={{ fontSize: 11, color: "#666" }}>{o.item}{it ? ` • ${it.qty} in stock` : ""}</div>
+                                  </td>
+                                  <td style={{ ...TD, fontWeight: 600, fontSize: 15 }}>{o.qty}</td>
+                                  <td style={TD}>
+                                    <select value={o.status} onClick={e => e.stopPropagation()} onChange={async (e) => {
+                                      const ns = e.target.value;
+                                      const updated = { ...o, status: ns };
+                                      setOrders(prev => prev.map(x => x.id === o.id ? updated : x));
+                                      try { await upsertOrder(updated); } catch (err) { console.warn(err); }
+                                    }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 12, background: sC(o.status) + "11", color: sC(o.status), borderColor: sC(o.status) + "44" }}>
+                                      {ORD_STATUSES.map(s => <option key={s}>{s}</option>)}
+                                    </select>
+                                  </td>
+                                  <td style={{ ...TD, fontSize: 12, color: "#888", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.notes || "—"}</td>
+                                  <td style={TD}>
+                                    <div style={{ display: "flex", gap: 4 }}>
+                                      {!isFulfilled && (
+                                        <button onClick={(e) => { e.stopPropagation(); shipOrderLine(o); }} style={{ ...B2, padding: "4px 10px", borderColor: "#22c55e44", color: "#22c55e", fontSize: 11 }}>
+                                          <PackageCheck size={12} /> Ship
+                                        </button>
+                                      )}
+                                      {isFulfilled && <span style={{ fontSize: 11, color: "#22c55e" }}>✓ Shipped</span>}
+                                      <button onClick={(e) => { e.stopPropagation(); openEdit("order", o); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#6366f1", padding: 3 }}><Edit2 size={14} /></button>
+                                      {isAdmin && <button onClick={(e) => { e.stopPropagation(); setDelConfirm(o.id); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
