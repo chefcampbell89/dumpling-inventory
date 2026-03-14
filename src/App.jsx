@@ -363,10 +363,15 @@ export default function App() {
   // ---- Auth handlers ----
   const handleLogin = async () => {
     setAuthLoading(true); setAuthError("");
+    console.log("LOGIN ATTEMPT:", authEmail);
     try {
-      await signIn(authEmail, authPass);
+      const data = await signIn(authEmail, authPass);
+      console.log("LOGIN RESULT:", data);
       setAuthEmail(""); setAuthPass("");
-    } catch (e) { setAuthError(e.message); }
+    } catch (e) {
+      console.log("LOGIN ERROR:", e.message);
+      setAuthError(e.message);
+    }
     finally { setAuthLoading(false); }
   };
 
