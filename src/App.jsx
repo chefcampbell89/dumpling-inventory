@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
   fetchBomLines, setBomForAssembly,
@@ -40,52 +40,173 @@ function getLevel(id) {
 // SAMPLE / SEED DATA (used as fallback if Supabase is empty)
 // ============================================================
 
+const R = (id,name,cost,unit,supplier="",minStock=0,qty=0) => ({id,name,category:"Raw Material",type:"Stock",costing:"FIFO",location:"Dumpling Factory",supplier,supplierCode:"",avgCost:cost,unit,minStock,qty,notes:"",status:"Active"});
 const SEED_PARTS = [
-  { id: "100-Baking Soda", name: "Baking Soda", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "Baldor Boston, LLC", supplierCode: "", avgCost: 38.71, unit: "24 LB", minStock: 2, qty: 10, notes: "", status: "Active" },
-  { id: "100-Blk Pepper 5 LB", name: "Black Pepper", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "Chef's Warehouse", supplierCode: "SPP150", avgCost: 46.05, unit: "5 LB", minStock: 2, qty: 8, notes: "", status: "Active" },
-  { id: "100-Blk Pepper 5LB Jug", name: "Black Pepper", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "Chef's Warehouse", supplierCode: "SPP150", avgCost: 46.05, unit: "5 LB Jug", minStock: 1, qty: 3, notes: "", status: "Active" },
-  { id: "100-Cabot Shredded Cheddar 5 LB", name: "Cabot Shredded Cheddar", category: "Raw Material", type: "Stock", costing: "FIFO", location: "", supplier: "Baldor Boston, LLC", supplierCode: "", avgCost: 34.60, unit: "5 LB", minStock: 5, qty: 20, notes: "", status: "Active" },
-  { id: "100-Cabot Shredded Sharp Cheddar", name: "Cabot Shredded Sharp Cheddar", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "Baldor Boston, LLC", supplierCode: "", avgCost: 41.87, unit: "5 LB", minStock: 5, qty: 15, notes: "", status: "Active" },
-  { id: "100-Cabot Unsalted Butter 36 LB Case", name: "Cabot Unsalted Butter", category: "Raw Material", type: "Stock", costing: "FIFO", location: "", supplier: "Baldor Boston, LLC", supplierCode: "", avgCost: 99.07, unit: "36 LB Case", minStock: 2, qty: 6, notes: "", status: "Active" },
-  { id: "100-Carrots 50 LB", name: "Carrots", category: "Raw Material", type: "Stock", costing: "FIFO", location: "", supplier: "Baldor Boston, LLC", supplierCode: "", avgCost: 47.50, unit: "50 LB", minStock: 2, qty: 8, notes: "", status: "Active" },
-  { id: "100-CB Retail bag", name: "CB Retail bag", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "ePac", supplierCode: "", avgCost: 0.40, unit: "Item", minStock: 500, qty: 2000, notes: "", status: "Active" },
-  { id: "100-CH Retail bag", name: "CH Retail bag", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "ePac", supplierCode: "", avgCost: 0.41, unit: "Item", minStock: 500, qty: 1800, notes: "", status: "Active" },
-  { id: "100-Chang Shing Pressed Tofu 30 LB", name: "Pressed Tofu", category: "Raw Material", type: "Stock", costing: "FIFO", location: "", supplier: "Chang Shing", supplierCode: "", avgCost: 55.00, unit: "30 LB", minStock: 3, qty: 10, notes: "", status: "Active" },
-  { id: "100-King Arthur Special Patent", name: "King Arthur Special Patent Flour", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 25.21, unit: "50 LB", minStock: 5, qty: 12, notes: "", status: "Active" },
-  { id: "100-Dried Chives 4oz", name: "Dried Chives", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 12.99, unit: "4oz", minStock: 5, qty: 15, notes: "", status: "Active" },
-  { id: "100-Kosher Salt Case 9X3", name: "Kosher Salt", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 80.27, unit: "Case 9X3", minStock: 1, qty: 4, notes: "", status: "Active" },
-  { id: "100-Vegetable Oil 2x17.5 LE", name: "Vegetable Oil", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 37.99, unit: "2x17.5 LE", minStock: 2, qty: 6, notes: "", status: "Active" },
-  { id: "100-Yellow American Cheese", name: "Yellow American Cheese, Deli", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 16.47, unit: "LB", minStock: 20, qty: 50, notes: "", status: "Active" },
-  { id: "100-Fried Shallots Case", name: "Fried Shallots", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 106.58, unit: "Case", minStock: 2, qty: 5, notes: "", status: "Active" },
-  { id: "100-Garlic Powder 5 LB", name: "Garlic Powder", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 32.25, unit: "5 LB", minStock: 2, qty: 6, notes: "", status: "Active" },
-  { id: "100-Green Cabbage 50 LB", name: "Green Cabbage", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 28.05, unit: "50 LB", minStock: 3, qty: 8, notes: "", status: "Active" },
-  { id: "100-Ground Beef 10 LB", name: "Ground Beef", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 69.90, unit: "10 LB", minStock: 10, qty: 30, notes: "", status: "Active" },
-  { id: "100-Onion Powder 5 LB", name: "Onion Powder", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 30.76, unit: "5 LB", minStock: 2, qty: 5, notes: "", status: "Active" },
-  { id: "100-Onions (uncured) 20LB", name: "Onions (uncured)", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 12.41, unit: "20 LB", minStock: 5, qty: 15, notes: "", status: "Active" },
-  { id: "100-Food Svc Bag Roll", name: "Food Svc Bag Roll", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 203.00, unit: "Roll", minStock: 2, qty: 5, notes: "", status: "Active" },
-  { id: "100-Food Svc Case 25X", name: "Food Svc Case 25X", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 25.75, unit: "Case", minStock: 10, qty: 40, notes: "", status: "Active" },
-  { id: "100-Retail Case", name: "Retail Case", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 1.20, unit: "Item", minStock: 50, qty: 200, notes: "", status: "Active" },
+  R("100-Baking Soda","Baking Soda",38.71,"24 LB","Baldor Boston, LLC",2,10),
+  R("100-Blk Pepper 5 LB","Black Pepper",46.05,"5 LB","Chef's Warehouse",2,8),
+  R("100-Blk Pepper 5LB Jug","Black Pepper Jug",46.05,"5 LB Jug","Chef's Warehouse",1,3),
+  R("100-Cabot Shredded Cheddar 5 LB","Cabot Shredded Cheddar",34.5964,"5 LB","Baldor Boston, LLC",5,20),
+  R("100-Cabot Shredded Sharp Cheddar","Cabot Shredded Sharp Cheddar",41.87,"5 LB","Baldor Boston, LLC",5,15),
+  R("100-Cabot Unsalted Butter 36 LB Case","Cabot Unsalted Butter",99.0666,"36 LB Case","Baldor Boston, LLC",2,6),
+  R("100-Carrots 50 LB","Carrots",47.5,"50 LB","Baldor Boston, LLC",2,8),
+  R("100-CB Retail bag","CB Retail bag",0.4035,"Item","ePac",500,2000),
+  R("100-CH Retail bag","CH Retail bag",0.4069,"Item","ePac",500,1800),
+  R("100-GC Retail bag","GC Retail bag",0.403,"Item","ePac",500,1500),
+  R("100-LG Retail bag","LG Retail bag",0.4028,"Item","ePac",500,1500),
+  R("100-TM Retail bag","TM Retail bag",0.4045,"Item","ePac",500,1500),
+  R("100-Chang Shing Pressed Tofu 30 LB bucket","Pressed Tofu",55,"30 LB","Chang Shing",3,10),
+  R("100-King Arthur Special Patent AP Flour 50lbs","King Arthur Special Patent AP Flour",25.2071,"50 LB","",5,12),
+  R("100-Dried Chives 4oz","Dried Chives",12.99,"4oz","",5,15),
+  R("100-Kosher Salt Case 9X3","Kosher Salt",80.2651,"Case 9X3","",1,4),
+  R("100-Vegetable Oil 2x17.5 LB","Vegetable Oil",37.99,"2x17.5 LB","",2,6),
+  R("100-Yellow American Cheese, Unsliced 5 LB","Yellow American Cheese, Unsliced",16.4686,"5 LB","",10,30),
+  R("100-Fried Shallots Case","Fried Shallots",106.58,"Case","",2,5),
+  R("100-Garlic Powder 5 LB","Garlic Powder",32.25,"5 LB","",2,6),
+  R("100-Green Cabbage 50 LB","Green Cabbage",28.0533,"50 LB","",3,8),
+  R("100-Ground Beef 10 LB","Ground Beef",69.9,"10 LB","",10,30),
+  R("100-Onion Powder 5 LB","Onion Powder",30.76,"5 LB","",2,5),
+  R("100-Onions (uncured) 20LB","Onions (uncured)",12.4128,"20 LB","",5,15),
+  R("100-Food Svc Bag Roll","Food Svc Bag Roll",203,"Roll","",2,5),
+  R("100-Food Svc Case 25X","Food Svc Case 25X",25.75,"Case","",10,40),
+  R("100-Retail Case","Retail Case",1.2,"Item","",50,200),
+  R("100-Turmeric 5 LB","Turmeric",17.33,"5 LB","",2,5),
+  R("100-Garlic Peeled 5 LB","Peeled Garlic",18.75,"5 LB","",5,15),
+  R("100-Potatoes 50 LB","Yukon B Potatoes",25.5435,"50 LB","",3,8),
+  R("100-Scallions 48 Ct. Case","Scallions",90.7518,"Case","",2,5),
+  R("100-Spirulina","Spirulina",39.97,"Unit","",2,4),
+  R("100-Duck Fat 7.5 LB","Duck Fat",50.2309,"7.5 LB","",2,5),
+  R("100-Ginger 5 LB","Ginger",13.1667,"5 LB","",5,15),
+  R("100-Ground Chicken 10 LB","Ground Chicken",36,"10 LB","",10,25),
+  R("100-Shao Xing Cooking Wine","Shao Xing Cooking Wine",5,"Bottle","",5,10),
+  R("100-Soy Sauce","Soy Sauce",42.75,"Bottle","",3,8),
+  R("100-Zenzhu Vermicelli Case","Vermicelli",67.9,"Case","",2,5),
+  R("100-Chopped Lemongrass Case","Chopped Lemongrass",108,"Case","",2,4),
+  R("100-Ground Pork 10 LB","Ground Pork",10.172,"10 LB","",10,30),
+  R("100-Olive Nation LG Flavor Oil - Natural 1Gal","Lemongrass Extract",146.99,"1 Gal","",1,3),
+  R("100-Domino Granulated Sugar 50 LB","Granulated Sugar",42,"50 LB","",1,3),
+  R("100-Pacific Vegetable Stock 32 oz","Pacific Vegetable Stock",4.67,"32 oz","",5,10),
+  R("100-Deli Container 12oz Case","Deli Container 12oz",29.49,"Case","",3,8),
+  R("100-Dried Parsley 5LB","Dried Parsley",12.25,"5 LB","",2,5),
+  R("100-Holland Windmill Potato Starch 50 LB","Potato Starch",56.5,"50 LB","",2,4),
+  R("100-Erawan Rice Flour 24 x 1 LB","Rice Flour",28.791,"24x1 LB","",2,4),
+  R("100-Tapioca Starch 50 LB","Tapioca Starch",39.95,"50 LB","",2,4),
+  R("100-Cilantro 1 LB","Cilantro",10,"1 LB","",10,20),
+  R("100-Corn Starch 24x1lb case","Corn Starch",50.2,"24x1lb Case","",2,4),
+  R("100-Dried Shiitake 5 LB","Dried Shiitake",46.5,"5 LB","",3,6),
+  R("100-Curio Five Spice Blend 25LB","Curio Five Spice",750,"25 LB","",1,2),
+  R("100-Rice Wine Vinegar","Rice Wine Vinegar",10.75,"Bottle","",3,6),
+  R("100-Kadoya Sesame Oil Case","Sesame Oil",213.95,"Case","",1,3),
 ];
 
+const A = (id,name,cat,unit,cost,loc,notes,bom) => ({id,name,category:cat,type:"Stock",costing:cat==="Raw Material"?"FIFO":"FEFO - Batch",location:loc||"Dumpling Factory",supplier:"",supplierCode:"",avgCost:cost,unit,minStock:0,qty:0,notes:notes||"",status:"Active",bom});
 const SEED_ASSEMBLIES = [
-  { id: "200-CB Dough", name: "CB Dough", category: "Sub-Recipe", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "Batch", minStock: 0, qty: 0, notes: "Sub-recipe for CB dough", status: "Active",
-    bom: [{ partId: "100-King Arthur Special Patent", qty: 0.5 }, { partId: "100-Dried Chives 4oz", qty: 0.084 }, { partId: "100-Kosher Salt Case 9X3", qty: 0.009 }, { partId: "100-Vegetable Oil 2x17.5 LE", qty: 0.007 }] },
-  { id: "200-CB Fill", name: "CB Fill", category: "Sub-Recipe", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "Batch", minStock: 0, qty: 0, notes: "Sub-recipe for CB filling", status: "Active",
-    bom: [{ partId: "100-Yellow American Cheese", qty: 1.1 }, { partId: "100-Fried Shallots Case", qty: 1.1 }, { partId: "100-Garlic Powder 5 LB", qty: 0.007 }, { partId: "100-Green Cabbage 50 LB", qty: 0.13 }, { partId: "100-Ground Beef 10 LB", qty: 1.5 }, { partId: "100-Kosher Salt Case 9X3", qty: 0.011 }, { partId: "100-Onion Powder 5 LB", qty: 0.02 }, { partId: "100-Onions (uncured) 20LB", qty: 0.106 }] },
-  { id: "250-CB Batch", name: "CB Batch", category: "WIP", type: "Stock", costing: "FEFO - Batch", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 202.81, unit: "1 Batch", minStock: 2, qty: 5, notes: "~432 pieces per batch", status: "Active",
-    bom: [{ partId: "200-CB Dough", qty: 1 }, { partId: "200-CB Fill", qty: 1 }] },
-  { id: "300-CB Bin", name: "CB Bin", category: "Bulk Storage", type: "Stock", costing: "FEFO - Batch", location: "Dumpling Factory: Walk-in Freezer", supplier: "", supplierCode: "", avgCost: 68.95, unit: "432 pieces", minStock: 3, qty: 8, notes: "0.34 of a batch per bin", status: "Active",
-    bom: [{ partId: "250-CB Batch", qty: 0.34 }] },
-  { id: "400-CB Catering Pieces", name: "CB Catering (Pieces)", category: "Retail Unit", type: "Stock", costing: "FEFO - Batch", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "Each", minStock: 0, qty: 0, notes: "", status: "Active",
-    bom: [{ partId: "300-CB Bin", qty: 0.0024 }] },
-  { id: "400-CB Catering Tray", name: "CB Catering Tray", category: "Retail Unit", type: "Stock", costing: "FEFO - Batch", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "Each", minStock: 0, qty: 0, notes: "", status: "Active",
-    bom: [{ partId: "300-CB Bin", qty: 0.11 }] },
-  { id: "400-CB Food Service Case", name: "CB Food Service Case", category: "Retail Unit", type: "Stock", costing: "FEFO - Batch", location: "Dumpling Factory: Walk-in Freezer", supplier: "", supplierCode: "", avgCost: 60.43, unit: "200 pcs", minStock: 5, qty: 15, notes: "", status: "Active",
-    bom: [{ partId: "300-CB Bin", qty: 0.5 }, { partId: "100-Food Svc Bag Roll", qty: 0.001 }, { partId: "100-Food Svc Case 25X", qty: 0.04 }] },
-  { id: "400-CB Pack", name: "CB Pack", category: "Retail Unit", type: "Stock", costing: "FEFO - Batch", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 2.70, unit: "14 oz", minStock: 20, qty: 30, notes: "Retail 14oz pack", status: "Active",
-    bom: [{ partId: "300-CB Bin", qty: 0.0333 }, { partId: "100-CB Retail bag", qty: 1 }] },
-  { id: "500-CB Retail Case", name: "CB Retail Case", category: "Retail Case", type: "Stock", costing: "FEFO - Batch", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "Case", minStock: 5, qty: 10, notes: "12 packs per case", status: "Active",
-    bom: [{ partId: "400-CB Pack", qty: 12 }, { partId: "100-Retail Case", qty: 1 }] },
+  // ---- CB (Cheeseburger) ----
+  A("200-CB Dough","CB Dough","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-King Arthur Special Patent AP Flour 50lbs",qty:0.5},{partId:"100-Dried Chives 4oz",qty:0.084},{partId:"100-Kosher Salt Case 9X3",qty:0.009},{partId:"100-Vegetable Oil 2x17.5 LB",qty:0.007}]),
+  A("200-CB Fill","CB Fill","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-Yellow American Cheese, Unsliced 5 LB",qty:1.1},{partId:"100-Fried Shallots Case",qty:1.1},{partId:"100-Garlic Powder 5 LB",qty:0.007},{partId:"100-Green Cabbage 50 LB",qty:0.13},{partId:"100-Ground Beef 10 LB",qty:1.5},{partId:"100-Kosher Salt Case 9X3",qty:0.011},{partId:"100-Onion Powder 5 LB",qty:0.02},{partId:"100-Onions (uncured) 20LB",qty:0.106}]),
+  A("250-CB Batch","CB Batch","WIP","1 Batch",202.81,"Dumpling Factory","~432 pcs/batch",
+    [{partId:"200-CB Dough",qty:1},{partId:"200-CB Fill",qty:1}]),
+  A("300-CB Bin","CB Bin","Bulk Storage","432 pieces",68.95,"Dumpling Factory: Walk-in Freezer","0.34 batch/bin",
+    [{partId:"250-CB Batch",qty:0.34}]),
+  A("400-CB Catering Pieces","CB Catering (Pieces)","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-CB Bin",qty:0.0024}]),
+  A("400-CB Catering Tray","CB Catering Tray","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-CB Bin",qty:0.11}]),
+  A("400-CB Food Service Case","CB Food Service Case","Retail Unit","200 pcs",60.43,"Dumpling Factory: Walk-in Freezer","",
+    [{partId:"300-CB Bin",qty:0.5},{partId:"100-Food Svc Bag Roll",qty:0.001},{partId:"100-Food Svc Case 25X",qty:0.04}]),
+  A("400-CB Pack","CB Pack","Retail Unit","14 oz",2.70,"Dumpling Factory","Retail 14oz",
+    [{partId:"300-CB Bin",qty:0.0333},{partId:"100-CB Retail bag",qty:1}]),
+  A("500-CB Retail Case","CB Retail Case","Retail Case","Case",0,"Dumpling Factory","12 packs/case",
+    [{partId:"400-CB Pack",qty:12},{partId:"100-Retail Case",qty:1}]),
+
+  // ---- CH (Cheddar Potato) ----
+  A("200-CH Dough","CH Dough","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-King Arthur Special Patent AP Flour 50lbs",qty:0.556},{partId:"100-Kosher Salt Case 9X3",qty:0.01},{partId:"100-Turmeric 5 LB",qty:0.028},{partId:"100-Vegetable Oil 2x17.5 LB",qty:0.004}]),
+  A("200-CH Fill","CH Fill","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-Blk Pepper 5 LB",qty:0.029},{partId:"100-Cabot Shredded Cheddar 5 LB",qty:1},{partId:"100-Cabot Unsalted Butter 36 LB Case",qty:0.139},{partId:"100-Garlic Peeled 5 LB",qty:0.11},{partId:"100-Kosher Salt Case 9X3",qty:0.012},{partId:"100-Potatoes 50 LB",qty:0.5},{partId:"100-Scallions 48 Ct. Case",qty:0.017}]),
+  A("250-CH Batch","CH Batch","WIP","1 Batch",100.59,"Dumpling Factory","",
+    [{partId:"200-CH Dough",qty:1},{partId:"200-CH Fill",qty:1}]),
+  A("300-CH Bin","CH Bin","Bulk Storage","432 pieces",40.24,"Dumpling Factory: Walk-in Freezer","0.4 batch/bin",
+    [{partId:"250-CH Batch",qty:0.4}]),
+  A("400-CH Catering Pieces","CH Catering (Pieces)","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-CH Bin",qty:0.0024}]),
+  A("400-CH Catering Tray","CH Catering Tray","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-CH Bin",qty:0.11}]),
+  A("400-CH Food Service Case","CH Food Service Case","Retail Unit","200 pcs",0,"Dumpling Factory: Walk-in Freezer","",
+    [{partId:"300-CH Bin",qty:0.5},{partId:"100-Food Svc Bag Roll",qty:0.001},{partId:"100-Food Svc Case 25X",qty:0.04}]),
+  A("400-CH Pack","CH Pack","Retail Unit","14 oz",0,"Dumpling Factory","",
+    [{partId:"300-CH Bin",qty:0.0333},{partId:"100-CH Retail bag",qty:1}]),
+  A("500-CH Retail Case","CH Retail Case","Retail Case","Case",0,"Dumpling Factory","12 packs/case",
+    [{partId:"400-CH Pack",qty:12},{partId:"100-Retail Case",qty:1}]),
+
+  // ---- GC (Ginger Chicken) ----
+  A("200-GC Dough","GC Dough","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-King Arthur Special Patent AP Flour 50lbs",qty:0.423},{partId:"100-Kosher Salt Case 9X3",qty:0.008},{partId:"100-Spirulina",qty:0.025},{partId:"100-Vegetable Oil 2x17.5 LB",qty:0.009}]),
+  A("200-GC Fill","GC Fill","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-Green Cabbage 50 LB",qty:0.08},{partId:"100-Duck Fat 7.5 LB",qty:0.187},{partId:"100-Garlic Peeled 5 LB",qty:0.079},{partId:"100-Ginger 5 LB",qty:0.115},{partId:"100-Ground Chicken 10 LB",qty:2},{partId:"100-Kosher Salt Case 9X3",qty:0.009},{partId:"100-Onions (uncured) 20LB",qty:0.026},{partId:"100-Shao Xing Cooking Wine",qty:0.291},{partId:"100-Soy Sauce",qty:0.02},{partId:"100-Zenzhu Vermicelli Case",qty:0.045}]),
+  A("250-GC Batch","GC Batch","WIP","1 Batch",105.42,"Dumpling Factory","",
+    [{partId:"200-GC Dough",qty:1},{partId:"200-GC Fill",qty:1}]),
+  A("300-GC Bin","GC Bin","Bulk Storage","432 pieces",40.26,"Dumpling Factory: Walk-in Freezer","0.38 batch/bin",
+    [{partId:"250-GC Batch",qty:0.38}]),
+  A("400-GC Catering Pieces","GC Catering (Pieces)","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-GC Bin",qty:0.0024}]),
+  A("400-GC Catering Tray","GC Catering Tray","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-GC Bin",qty:0.11}]),
+  A("400-GC Food Service Case","GC Food Service Case","Retail Unit","200 pcs",0,"Dumpling Factory: Walk-in Freezer","",
+    [{partId:"100-Food Svc Bag Roll",qty:0.001},{partId:"100-Food Svc Case 25X",qty:1},{partId:"300-GC Bin",qty:0.5}]),
+  A("400-GC Pack","GC Pack","Retail Unit","14 oz",0,"Dumpling Factory","",
+    [{partId:"300-GC Bin",qty:0.0333},{partId:"100-GC Retail bag",qty:1}]),
+  A("500-GC Retail Case","GC Retail Case","Retail Case","Case",0,"Dumpling Factory","12 packs/case",
+    [{partId:"400-GC Pack",qty:12},{partId:"100-Retail Case",qty:1}]),
+
+  // ---- LG (Lemongrass Pork) ----
+  A("200-LG Dough","LG Dough","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-King Arthur Special Patent AP Flour 50lbs",qty:0.529},{partId:"100-Kosher Salt Case 9X3",qty:0.01},{partId:"100-Vegetable Oil 2x17.5 LB",qty:0.009}]),
+  A("200-LG Fill","LG Fill","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-Green Cabbage 50 LB",qty:0.176},{partId:"100-Chopped Lemongrass Case",qty:0.03},{partId:"100-Garlic Peeled 5 LB",qty:0.108},{partId:"100-Ginger 5 LB",qty:0.108},{partId:"100-Ground Pork 10 LB",qty:2},{partId:"100-Kosher Salt Case 9X3",qty:0.011},{partId:"100-Olive Nation LG Flavor Oil - Natural 1Gal",qty:0.017},{partId:"100-Scallions 48 Ct. Case",qty:0.101},{partId:"100-Soy Sauce",qty:0.024},{partId:"100-Domino Granulated Sugar 50 LB",qty:0.011}]),
+  A("200-LG Fill Vegetable Stock","LG Fill Vegetable Stock","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-Pacific Vegetable Stock 32 oz",qty:1.103}]),
+  A("250-LG Batch","LG Batch","WIP","1 Batch",146.63,"Dumpling Factory","",
+    [{partId:"200-LG Dough",qty:1},{partId:"200-LG Fill",qty:1}]),
+  A("300-LG Bin","LG Bin","Bulk Storage","432 pieces",47.67,"Dumpling Factory: Walk-in Freezer","0.333 batch/bin",
+    [{partId:"250-LG Batch",qty:0.333}]),
+  A("300-LG Class Fill Pint","LG Class Fill Pint","Bulk Storage","1 Batch",0,"Dumpling Factory","",
+    [{partId:"100-Deli Container 12oz Case",qty:0.005},{partId:"200-LG Fill",qty:0.03333}]),
+  A("400-LG Catering Pieces","LG Catering (Pieces)","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-LG Bin",qty:0.0024}]),
+  A("400-LG Catering Tray","LG Catering Tray","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-LG Bin",qty:0.11}]),
+  A("400-LG Food Service Case","LG Food Service Case","Retail Unit","200 pcs",0,"Dumpling Factory: Walk-in Freezer","",
+    [{partId:"100-Food Svc Bag Roll",qty:0.001},{partId:"100-Food Svc Case 25X",qty:1},{partId:"300-LG Bin",qty:0.5}]),
+  A("400-LG Pack","LG Pack","Retail Unit","14 oz",0,"Dumpling Factory","",
+    [{partId:"300-LG Bin",qty:0.0333},{partId:"100-LG Retail bag",qty:1}]),
+  A("500-LG Retail Case","LG Retail Case","Retail Case","Case",0,"Dumpling Factory","12 packs/case",
+    [{partId:"400-LG Pack",qty:12},{partId:"100-Retail Case",qty:1}]),
+
+  // ---- TM (Tofu Mushroom) ----
+  A("200-TM Dough","TM Dough","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-Baking Soda",qty:0.007},{partId:"100-Dried Parsley 5LB",qty:0.011},{partId:"100-Holland Windmill Potato Starch 50 LB",qty:0.159},{partId:"100-Erawan Rice Flour 24 x 1 LB",qty:0.11},{partId:"100-Kosher Salt Case 9X3",qty:0.008},{partId:"100-Tapioca Starch 50 LB",qty:0.106},{partId:"100-Vegetable Oil 2x17.5 LB",qty:0.036}]),
+  A("200-TM Fill","TM Fill","Sub-Recipe","Batch",0,"Dumpling Factory","",
+    [{partId:"100-Green Cabbage 50 LB",qty:0.144},{partId:"100-Carrots 50 LB",qty:0.045},{partId:"100-Cilantro 1 LB",qty:0.331},{partId:"100-Corn Starch 24x1lb case",qty:0.014},{partId:"100-Dried Shiitake 5 LB",qty:0.171},{partId:"100-Curio Five Spice Blend 25LB",qty:0.004},{partId:"100-Ginger 5 LB",qty:0.082},{partId:"100-Chang Shing Pressed Tofu 30 LB bucket",qty:0.367},{partId:"100-Rice Wine Vinegar",qty:0.128},{partId:"100-Kosher Salt Case 9X3",qty:0.009},{partId:"100-Kadoya Sesame Oil Case",qty:0.008},{partId:"100-Soy Sauce",qty:0.018},{partId:"100-Domino Granulated Sugar 50 LB",qty:0.008}]),
+  A("250-TM Batch","TM Batch","WIP","1 Batch",96,"Dumpling Factory","",
+    [{partId:"200-TM Dough",qty:1},{partId:"200-TM Fill",qty:1}]),
+  A("300-TM Bin","TM Bin","Bulk Storage","400 pcs",31.59,"Dumpling Factory: Walk-in Freezer","0.35 batch/bin",
+    [{partId:"250-TM Batch",qty:0.35}]),
+  A("400-TM Catering Pieces","TM Catering (Pieces)","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-TM Bin",qty:0.0024}]),
+  A("400-TM Catering Tray","TM Catering Tray","Retail Unit","Each",0,"Dumpling Factory","",
+    [{partId:"300-TM Bin",qty:0.11}]),
+  A("400-TM Food Service Case","TM Food Service Case","Retail Unit","200 pcs",0,"Dumpling Factory: Walk-in Freezer","",
+    [{partId:"100-Food Svc Bag Roll",qty:0.001},{partId:"100-Food Svc Case 25X",qty:1},{partId:"300-TM Bin",qty:0.5}]),
+  A("400-TM Pack","TM Pack","Retail Unit","14 oz",0,"Dumpling Factory","",
+    [{partId:"300-TM Bin",qty:0.0333},{partId:"100-TM Retail bag",qty:1}]),
+  A("500-TM Retail Case","TM Retail Case","Retail Case","Case",0,"Dumpling Factory","12 packs/case",
+    [{partId:"400-TM Pack",qty:12},{partId:"100-Retail Case",qty:1}]),
+
+  // ---- Misc sub-assemblies ----
+  A("200-Deli Container 12oz","Deli Container 12oz","Sub-Recipe","Each",0,"Dumpling Factory","",
+    [{partId:"100-Deli Container 12oz Case",qty:0.15}]),
 ];
 
 const SEED_VENDORS = [
@@ -98,8 +219,12 @@ const SEED_VENDORS = [
 const SEED_ORDERS = [
   { id: "ORD-001", customer: "Green Grocer Market", item: "400-CB Pack", qty: 48, date: "2026-03-10", status: "Pending", notes: "Weekly standing order" },
   { id: "ORD-002", customer: "Dumpling Festival", item: "400-CB Food Service Case", qty: 10, date: "2026-03-15", status: "Confirmed", notes: "Event — deliver by 8am" },
-  { id: "ORD-003", customer: "Happy Belly Restaurant", item: "400-CB Food Service Case", qty: 4, date: "2026-03-12", status: "Fulfilled", notes: "" },
+  { id: "ORD-003", customer: "Happy Belly Restaurant", item: "400-LG Food Service Case", qty: 4, date: "2026-03-12", status: "Fulfilled", notes: "" },
   { id: "ORD-004", customer: "Whole Foods Northeast", item: "500-CB Retail Case", qty: 20, date: "2026-03-18", status: "Pending", notes: "New account trial" },
+  { id: "ORD-005", customer: "Whole Foods Northeast", item: "500-CH Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial" },
+  { id: "ORD-006", customer: "Whole Foods Northeast", item: "500-GC Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial" },
+  { id: "ORD-007", customer: "Whole Foods Northeast", item: "500-LG Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial" },
+  { id: "ORD-008", customer: "Whole Foods Northeast", item: "500-TM Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial" },
 ];
 
 // ============================================================
@@ -171,6 +296,9 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [delConfirm, setDelConfirm] = useState(null);
+  const [importData, setImportData] = useState(null);
+  const [importMapping, setImportMapping] = useState({});
+  const [importMode, setImportMode] = useState("append");
 
   // ---- Load from Supabase on mount ----
   useEffect(() => {
@@ -368,44 +496,105 @@ export default function App() {
     </div>
   );
 
-  // ---- CSV Import ----
+  // ---- CSV IMPORT WITH PREVIEW ----
+  const APP_FIELDS = [
+    { key: "id", label: "ProductCode (ID)", required: true },
+    { key: "name", label: "Name", required: true },
+    { key: "category", label: "Category" },
+    { key: "type", label: "Type" },
+    { key: "costing", label: "Costing Method" },
+    { key: "location", label: "Location" },
+    { key: "supplier", label: "Supplier" },
+    { key: "supplierCode", label: "Supplier Product Code" },
+    { key: "avgCost", label: "Average Cost", numeric: true },
+    { key: "unit", label: "Unit of Measure" },
+    { key: "minStock", label: "Min Before Reorder", numeric: true },
+    { key: "qty", label: "Qty On Hand", numeric: true },
+    { key: "notes", label: "Notes" },
+    { key: "status", label: "Status" },
+  ];
+
+  const HEADER_ALIASES = {
+    productcode: "id", sku: "id", "product code": "id", id: "id",
+    name: "name", "part name": "name", description: "name",
+    category: "category",
+    type: "type",
+    costingmethod: "costing", "costing method": "costing",
+    defaultlocation: "location", "default location": "location", location: "location", bin: "location",
+    lastsuppliedby: "supplier", "last supplied by": "supplier", supplier: "supplier", vendor: "supplier",
+    supplierproductcode: "supplierCode", "supplier product code": "supplierCode",
+    "averagecost (last 3 orders)": "avgCost", averagecost: "avgCost", avgcost: "avgCost", cost: "avgCost", "average cost": "avgCost", "supplier price": "avgCost", supplierprice: "avgCost",
+    defaultunitofmeasure: "unit", "default unit of measure": "unit", unit: "unit", uom: "unit",
+    minimumbeforereorder: "minStock", "minimum before reorder": "minStock", minstock: "minStock", min: "minStock",
+    qty: "qty", quantity: "qty", "on hand": "qty",
+    notes: "notes",
+    status: "status",
+  };
+
   const importCSV = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const r = new FileReader();
-    r.onload = (ev) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
       try {
-        const lines = ev.target.result.split("\n").filter((l) => l.trim());
-        if (lines.length < 2) { show("No rows", "error"); return; }
-        const hdr = lines[0].split(",").map((h) => h.replace(/"/g, "").trim().toLowerCase());
-        const np = [];
+        const text = ev.target.result;
+        const lines = text.split("\n").filter((l) => l.trim());
+        if (lines.length < 2) { show("CSV has no data rows", "error"); return; }
+        const rawHeaders = lines[0].split(",").map((h) => h.replace(/"/g, "").trim());
+        const rows = [];
         for (let i = 1; i < lines.length; i++) {
-          const cols = lines[i].match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g)?.map((c) => c.replace(/^"|"$/g, "").trim());
+          const cols = lines[i].match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g)?.map((c) => c.replace(/^"|"$/g, "").trim());
           if (!cols || cols.length < 2) continue;
-          const g = (k) => { const idx = hdr.indexOf(k); return idx >= 0 && cols[idx] ? cols[idx] : ""; };
-          const id = g("productcode") || g("id") || g("sku") || `100-Import-${i}`;
-          if (allItems.find((x) => x.id === id)) continue;
-          np.push({
-            id, name: g("name") || cols[1] || "", category: g("category") || "Raw Material",
-            type: g("type") || "Stock", costing: g("costingmethod") || g("costing method") || "FIFO",
-            location: g("defaultlocation") || g("default location") || "",
-            supplier: g("lastsuppliedby") || g("last supplied by") || g("supplier") || "",
-            supplierCode: g("supplierproductcode") || g("supplier product code") || "",
-            avgCost: Number(g("averagecost (last 3 orders)") || g("averagecost") || g("avgcost") || g("cost") || 0),
-            unit: g("defaultunitofmeasure") || g("default unit of measure") || g("unit") || "",
-            minStock: Number(g("minimumbeforereorder") || g("minimum before reorder") || g("minstock") || g("min") || 0),
-            qty: 0, notes: "", status: g("status") || "Active",
-          });
+          const row = {};
+          rawHeaders.forEach((h, idx) => { row[h] = cols[idx] || ""; });
+          rows.push(row);
         }
-        if (np.length) {
-          setParts((p) => [...p, ...np]);
-          bulkInsertItems(np).catch((e) => console.warn("Bulk insert failed:", e.message));
-          show(`Imported ${np.length} items`);
-        } else show("No new items", "error");
-      } catch { show("Import failed", "error"); }
+        if (rows.length === 0) { show("No valid rows found", "error"); return; }
+        const autoMap = {};
+        rawHeaders.forEach((h) => {
+          const normalized = h.toLowerCase().trim();
+          if (HEADER_ALIASES[normalized]) { autoMap[h] = HEADER_ALIASES[normalized]; }
+        });
+        setImportData({ headers: rawHeaders, rows, fileName: file.name });
+        setImportMapping(autoMap);
+        setImportMode("append");
+      } catch { show("Failed to read CSV", "error"); }
     };
-    r.readAsText(file);
+    reader.readAsText(file);
     e.target.value = "";
+  };
+
+  const executeImport = () => {
+    if (!importData) return;
+    const { rows } = importData;
+    const mapping = importMapping;
+    const idCol = Object.entries(mapping).find(([_, v]) => v === "id")?.[0];
+    const nameCol = Object.entries(mapping).find(([_, v]) => v === "name")?.[0];
+    if (!idCol || !nameCol) { show("ProductCode and Name must be mapped", "error"); return; }
+    const newItems = [];
+    const existingIds = new Set(allItems.map((i) => i.id));
+    for (const row of rows) {
+      const item = { id: "", name: "", category: "Raw Material", type: "Stock", costing: "FIFO", location: "", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active" };
+      for (const [csvCol, appField] of Object.entries(mapping)) {
+        if (!appField || appField === "skip") continue;
+        const val = row[csvCol] || "";
+        const fieldDef = APP_FIELDS.find((f) => f.key === appField);
+        if (fieldDef?.numeric) { item[appField] = Number(val.replace(/[^0-9.\-]/g, "")) || 0; }
+        else { item[appField] = val; }
+      }
+      if (!item.id || !item.name) continue;
+      if (importMode === "append" && existingIds.has(item.id)) continue;
+      if (importMode === "overwrite") existingIds.add(item.id);
+      newItems.push(item);
+    }
+    if (newItems.length === 0) { show(importMode === "append" ? "No new items (all IDs already exist)" : "No valid items found", "error"); setImportData(null); return; }
+    if (importMode === "overwrite") {
+      const overwriteIds = new Set(newItems.map((i) => i.id));
+      setParts((prev) => [...prev.filter((p) => !overwriteIds.has(p.id)), ...newItems]);
+    } else { setParts((prev) => [...prev, ...newItems]); }
+    bulkInsertItems(newItems).catch((e) => console.warn("Bulk insert failed:", e.message));
+    show(`Imported ${newItems.length} items (${importMode})`);
+    setImportData(null);
   };
 
   const exportCSV = () => {
@@ -780,6 +969,55 @@ export default function App() {
           <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>{editItem ? "Update" : "Add"}</button></div>
+      </Modal>
+
+      {/* CSV Import Preview */}
+      <Modal open={importData !== null} onClose={() => setImportData(null)} title={`Import CSV — ${importData?.fileName || ""}`} wide>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <span style={{ fontSize: 13, color: "#ccc" }}>{importData?.rows.length || 0} rows found</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 12, color: "#888" }}>Mode:</span>
+              <select value={importMode} onChange={(e) => setImportMode(e.target.value)} style={{ ...IS, width: "auto", minWidth: 140 }}>
+                <option value="append">Append (skip existing IDs)</option>
+                <option value="overwrite">Overwrite (replace matching IDs)</option>
+              </select>
+            </div>
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Column Mapping</div>
+          <div style={{ fontSize: 12, color: "#888", marginBottom: 12 }}>Match your CSV columns to inventory fields. Unmapped columns will be skipped.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "6px 12px", alignItems: "center", marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: "#666", fontWeight: 600 }}>YOUR CSV COLUMN</div>
+            <div></div>
+            <div style={{ fontSize: 11, color: "#666", fontWeight: 600 }}>MAPS TO</div>
+            {importData?.headers.map((h) => (
+              <React.Fragment key={h}>
+                <div style={{ fontSize: 13, color: "#e0e0e0", padding: "4px 8px", background: "#16161e", borderRadius: 4, fontFamily: "monospace" }}>{h}</div>
+                <div style={{ color: "#555", fontSize: 13 }}>→</div>
+                <select value={importMapping[h] || "skip"} onChange={(e) => setImportMapping((prev) => ({ ...prev, [h]: e.target.value }))} style={{ ...IS, padding: "6px 10px", fontSize: 13, background: importMapping[h] && importMapping[h] !== "skip" ? "#1a2a1a" : "#16161e", borderColor: importMapping[h] && importMapping[h] !== "skip" ? "#2a4a2a" : "#333" }}>
+                  <option value="skip">— Skip this column —</option>
+                  {APP_FIELDS.map((f) => (<option key={f.key} value={f.key}>{f.label}{f.required ? " *" : ""}</option>))}
+                </select>
+              </React.Fragment>
+            ))}
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Preview (first 5 rows)</div>
+          <div style={{ overflowX: "auto", border: "1px solid #2a2a3a", borderRadius: 8, marginBottom: 16 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead><tr>{APP_FIELDS.filter((f) => Object.values(importMapping).includes(f.key)).map((f) => (<th key={f.key} style={{ ...TH, fontSize: 10, padding: "6px 8px" }}>{f.label}</th>))}</tr></thead>
+              <tbody>{importData?.rows.slice(0, 5).map((row, i) => (<tr key={i}>{APP_FIELDS.filter((f) => Object.values(importMapping).includes(f.key)).map((f) => { const csvCol = Object.entries(importMapping).find(([_, v]) => v === f.key)?.[0]; return <td key={f.key} style={{ ...TD, fontSize: 12, padding: "6px 8px", color: row[csvCol] ? "#ccc" : "#555" }}>{row[csvCol] || "—"}</td>; })}</tr>))}</tbody>
+            </table>
+          </div>
+          {!Object.values(importMapping).includes("id") && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 8 }}>⚠ ProductCode (ID) must be mapped</div>}
+          {!Object.values(importMapping).includes("name") && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 8 }}>⚠ Name must be mapped</div>}
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "#888" }}>{Object.values(importMapping).filter((v) => v && v !== "skip").length} of {importData?.headers.length || 0} columns mapped</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setImportData(null)} style={B2}>Cancel</button>
+            <button onClick={executeImport} disabled={!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name")} style={{ ...B1, opacity: (!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name")) ? 0.4 : 1 }}>Import {importData?.rows.length || 0} Rows</button>
+          </div>
+        </div>
       </Modal>
 
       {/* Delete Confirm */}
