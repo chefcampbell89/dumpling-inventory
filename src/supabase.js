@@ -206,3 +206,38 @@ export async function updateItemQty(id, newQty) {
   const { error } = await supabase.from('items').update({ qty: newQty }).eq('id', id)
   if (error) throw error
 }
+
+// ---- PRODUCTION RUNS ----
+
+export async function fetchProductionRuns() {
+  const { data: runs, error: rErr } = await supabase.from('production_runs').select('*').order('created_at', { ascending: false })
+  if (rErr) throw rErr
+  const { data: consumed, error: cErr } = await supabase.from('production_consumed').select('*')
+  if (cErr) throw cErr
+  return runs.map(r => ({
+    id: r.id, assemblyId: r.assembly_id, assemblyName: r.assembly_name,
+    qtyProduced: Number(r.qty_produced), date: r.run_date, notes: r.notes,
+    createdBy: r.created_by, createdAt: r.created_at,
+    consumed: consumed.filter(c => c.run_id === r.id).map(c => ({
+      partId: c.part_id, name: c.part_name, qty: Number(c.qty_consumed), unit: c.unit,
+    })),
+  }))
+}
+
+export async function createProductionRun(run) {
+  const { error: rErr } = await supabase.from('production_runs').insert({
+    id: run.id, assembly_id: run.assemblyId, assembly_name: run.assemblyName,
+    qty_produced: run.qtyProduced, run_date: run.date, notes: run.notes,
+    created_by: run.createdBy || '',
+  })
+  if (rErr) throw rErr
+  if (run.consumed.length > 0) {
+    const { error: cErr } = await supabase.from('production_consumed').insert(
+      run.consumed.map(c => ({
+        run_id: run.id, part_id: c.partId, part_name: c.name,
+        qty_consumed: c.qty, unit: c.unit,
+      }))
+    )
+    if (cErr) throw cErr
+  }
+}
