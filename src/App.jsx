@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
   fetchBomLines, setBomForAssembly,
@@ -164,9 +164,7 @@ const SEED_ASSEMBLIES = [
   A("200-LG Dough","LG Dough","Sub-Recipe","Batch",0,"Dumpling Factory","",
     [{partId:"100-King Arthur Special Patent AP Flour 50lbs",qty:0.529},{partId:"100-Kosher Salt Case 9X3",qty:0.01},{partId:"100-Vegetable Oil 2x17.5 LB",qty:0.009}]),
   A("200-LG Fill","LG Fill","Sub-Recipe","Batch",0,"Dumpling Factory","",
-    [{partId:"100-Green Cabbage 50 LB",qty:0.176},{partId:"100-Chopped Lemongrass Case",qty:0.03},{partId:"100-Garlic Peeled 5 LB",qty:0.108},{partId:"100-Ginger 5 LB",qty:0.108},{partId:"100-Ground Pork 10 LB",qty:2},{partId:"100-Kosher Salt Case 9X3",qty:0.011},{partId:"100-Olive Nation LG Flavor Oil - Natural 1Gal",qty:0.017},{partId:"100-Scallions 48 Ct. Case",qty:0.101},{partId:"100-Soy Sauce",qty:0.024},{partId:"100-Domino Granulated Sugar 50 LB",qty:0.011}]),
-  A("200-LG Fill Vegetable Stock","LG Fill Vegetable Stock","Sub-Recipe","Batch",0,"Dumpling Factory","",
-    [{partId:"100-Pacific Vegetable Stock 32 oz",qty:1.103}]),
+    [{partId:"100-Green Cabbage 50 LB",qty:0.176},{partId:"100-Chopped Lemongrass Case",qty:0.03},{partId:"100-Garlic Peeled 5 LB",qty:0.108},{partId:"100-Ginger 5 LB",qty:0.108},{partId:"100-Ground Pork 10 LB",qty:2},{partId:"100-Kosher Salt Case 9X3",qty:0.011},{partId:"100-Olive Nation LG Flavor Oil - Natural 1Gal",qty:0.017},{partId:"100-Scallions 48 Ct. Case",qty:0.101},{partId:"100-Soy Sauce",qty:0.024},{partId:"100-Domino Granulated Sugar 50 LB",qty:0.011},{partId:"100-Pacific Vegetable Stock 32 oz",qty:1.103}]),
   A("250-LG Batch","LG Batch","WIP","1 Batch",146.63,"Dumpling Factory","",
     [{partId:"200-LG Dough",qty:1},{partId:"200-LG Fill",qty:1}]),
   A("300-LG Bin","LG Bin","Bulk Storage","432 pieces",47.67,"Dumpling Factory: Walk-in Freezer","0.333 batch/bin",
