@@ -6,13 +6,14 @@ import {
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
+  fetchProductionRuns, createProductionRun,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
 import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
-  ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck,
+  ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer,
 } from "lucide-react";
 
 // ============================================================
@@ -297,6 +298,12 @@ export default function App() {
   const [manualPOModal, setManualPOModal] = useState(false);
   const [manualPOForm, setManualPOForm] = useState({ vendor: "", notes: "" });
   const [manualPOLines, setManualPOLines] = useState([]);
+  const [prodRuns, setProdRuns] = useState([]);
+  const [prodModal, setProdModal] = useState(false);
+  const [prodAssembly, setProdAssembly] = useState("");
+  const [prodQty, setProdQty] = useState(1);
+  const [prodNotes, setProdNotes] = useState("");
+  const [prodConsume, setProdConsume] = useState({});
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState("All");
   const [stockFilter, setStockFilter] = useState("All");
@@ -491,6 +498,137 @@ export default function App() {
     w.document.close();
     w.print();
   };
+
+  // ---- PRODUCTION ----
+  const prodAssemblyItem = useMemo(() => assemblies.find(a => a.id === prodAssembly), [assemblies, prodAssembly]);
+
+  const initConsume = useCallback((assemblyId) => {
+    const asm = assemblies.find(a => a.id === assemblyId);
+    if (!asm || !asm.bom) return {};
+    const state = {};
+    for (const line of asm.bom) {
+      const child = allItems.find(i => i.id === line.partId);
+      state[line.partId] = (child?.bom && child.bom.length > 0) ? "check" : "check";
+    }
+    return state;
+  }, [assemblies, allItems]);
+
+  const toggleConsumeMode = (itemId) => {
+    setProdConsume(prev => {
+      const next = { ...prev };
+      if (prev[itemId] === "expand") {
+        // Collapse back — remove children, set to check
+        const item = allItems.find(i => i.id === itemId);
+        if (item?.bom) {
+          for (const l of item.bom) { delete next[l.partId]; }
+        }
+        next[itemId] = "check";
+      } else {
+        // Expand — add children as checked, set this to expand
+        const item = allItems.find(i => i.id === itemId);
+        if (item?.bom) {
+          for (const l of item.bom) { next[l.partId] = "check"; }
+        }
+        next[itemId] = "expand";
+      }
+      return next;
+    });
+  };
+
+  const getConsumedItems = useCallback((bom, multiplier) => {
+    const result = [];
+    for (const line of bom) {
+      const item = allItems.find(i => i.id === line.partId);
+      if (!item) continue;
+      const totalQty = line.qty * multiplier;
+      const mode = prodConsume[item.id];
+      if (mode === "expand" && item.bom) {
+        result.push(...getConsumedItems(item.bom, totalQty));
+      } else {
+        result.push({ partId: item.id, name: item.name, qty: totalQty, unit: item.unit, currentQty: item.qty });
+      }
+    }
+    return result;
+  }, [allItems, prodConsume]);
+
+  const submitProduction = async () => {
+    if (!prodAssemblyItem) { show("Select an assembly", "error"); return; }
+    if (prodQty <= 0) { show("Qty must be > 0", "error"); return; }
+    const consumed = getConsumedItems(prodAssemblyItem.bom, prodQty);
+    if (consumed.length === 0) { show("Nothing to consume", "error"); return; }
+
+    // Check for insufficient stock
+    const shortages = consumed.filter(c => c.qty > c.currentQty);
+    if (shortages.length > 0) {
+      const names = shortages.map(s => `${s.name} (need ${s.qty.toFixed(2)}, have ${s.currentQty})`).join(", ");
+      if (!window.confirm(`Warning: insufficient stock for: ${names}. Inventory will go negative. Continue?`)) return;
+    }
+
+    const runId = `PROD-${new Date().toISOString().slice(0, 10)}-${String(prodRuns.length + 1).padStart(3, "0")}`;
+    const run = {
+      id: runId, assemblyId: prodAssemblyItem.id, assemblyName: prodAssemblyItem.name,
+      qtyProduced: prodQty, date: new Date().toISOString().slice(0, 10),
+      notes: prodNotes, createdBy: "", consumed,
+    };
+
+    // Deduct consumed items
+    const updParts = [...parts];
+    const updAsm = [...assemblies];
+    for (const c of consumed) {
+      const pi = updParts.findIndex(p => p.id === c.partId);
+      if (pi >= 0) { updParts[pi] = { ...updParts[pi], qty: updParts[pi].qty - c.qty }; try { await updateItemQty(c.partId, updParts[pi].qty); } catch (e) { console.warn(e.message); } }
+      const ai = updAsm.findIndex(a => a.id === c.partId);
+      if (ai >= 0) { updAsm[ai] = { ...updAsm[ai], qty: updAsm[ai].qty - c.qty }; try { await updateItemQty(c.partId, updAsm[ai].qty); } catch (e) { console.warn(e.message); } }
+    }
+
+    // Increase produced assembly qty
+    const prodIdx = updAsm.findIndex(a => a.id === prodAssemblyItem.id);
+    if (prodIdx >= 0) { updAsm[prodIdx] = { ...updAsm[prodIdx], qty: updAsm[prodIdx].qty + prodQty }; try { await updateItemQty(prodAssemblyItem.id, updAsm[prodIdx].qty); } catch (e) { console.warn(e.message); } }
+
+    setParts(updParts);
+    setAssemblies(updAsm);
+    setProdRuns(prev => [{ ...run, createdAt: new Date().toISOString() }, ...prev]);
+    try { await createProductionRun(run); } catch (e) { console.warn("Production save failed:", e.message); }
+    show(`Produced ${prodQty} × ${prodAssemblyItem.name} (${runId})`);
+    setProdModal(false);
+  };
+
+  const renderConsumptionTree = (bom, multiplier, depth = 0) => (
+    <div style={{ marginLeft: depth * 24 }}>
+      {bom.map((line, i) => {
+        const item = allItems.find(x => x.id === line.partId);
+        if (!item) return <div key={i} style={{ color: "#ef4444", fontSize: 12 }}>⚠ {line.partId} not found</div>;
+        const lvl = getLevel(item.id);
+        const hasBom = item.bom && item.bom.length > 0;
+        const mode = prodConsume[item.id] || "check";
+        const isExpanded = mode === "expand";
+        const totalNeeded = line.qty * multiplier;
+        const sufficient = item.qty >= totalNeeded;
+        return (
+          <div key={`${item.id}-${depth}-${i}`} style={{ marginBottom: 2 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 4px", borderRadius: 4, background: isExpanded ? "transparent" : (mode === "check" ? "#1a2a1a" : "transparent") }}>
+              {hasBom && (
+                <button onClick={() => toggleConsumeMode(item.id)} style={{ background: "none", border: "1px solid #444", borderRadius: 4, cursor: "pointer", color: isExpanded ? "#f59e0b" : "#22c55e", padding: "2px 6px", fontSize: 11, minWidth: 60 }}>
+                  {isExpanded ? "Expand ▼" : "Use ✓"}
+                </button>
+              )}
+              {!hasBom && <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: "#22c55e", marginLeft: 4, marginRight: 4 }} />}
+              <span style={{ color: LEVELS[lvl]?.color || "#888", fontSize: 11, fontFamily: "monospace" }}>{item.id}</span>
+              <span style={{ fontSize: 13, color: "#ccc" }}>{item.name}</span>
+              {!isExpanded && (
+                <>
+                  <span style={{ fontSize: 12, color: "#888" }}>× {totalNeeded.toFixed(3)} {item.unit}</span>
+                  <span style={{ fontSize: 11, color: sufficient ? "#22c55e" : "#ef4444", marginLeft: 4 }}>(have {item.qty})</span>
+                </>
+              )}
+              {isExpanded && <span style={{ fontSize: 11, color: "#f59e0b" }}>→ consuming children instead</span>}
+            </div>
+            {isExpanded && hasBom && renderConsumptionTree(item.bom, totalNeeded, depth + 1)}
+          </div>
+        );
+      })}
+    </div>
+  );
 
   const openManualPO = () => {
     setManualPOForm({ vendor: "", notes: "" });
@@ -770,6 +908,7 @@ export default function App() {
         {tabBtn("mrp", "Purchase Needs", <ClipboardList size={14} />)}
         {tabBtn("pos", "Purchase Orders", <FileText size={14} />)}
         {tabBtn("receiving", "Receiving", <PackageCheck size={14} />)}
+        {tabBtn("production", "Production", <Hammer size={14} />)}
       </div>
 
       {/* Filters */}
@@ -795,6 +934,7 @@ export default function App() {
         {tab === "vendors" && <button onClick={() => openAdd("vendor")} style={B1}><Plus size={14} /> Vendor</button>}
         {tab === "receiving" && <button onClick={openReceiveManual} style={B1}><Plus size={14} /> Manual Receipt</button>}
         {tab === "pos" && <button onClick={openManualPO} style={B1}><Plus size={14} /> Create PO</button>}
+        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdModal(true); }} style={B1}><Hammer size={14} /> Run Production</button>}
       </div>
 
       {/* ================== INVENTORY TABLE ================== */}
@@ -1091,6 +1231,140 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ================== PRODUCTION TAB ================== */}
+      {tab === "production" && (
+        <div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            <Stat icon={<Hammer size={18} />} label="Total Runs" value={prodRuns.length} accent="#8b5cf6" />
+            <Stat icon={<Layers size={18} />} label="This Week" value={prodRuns.filter(r => { const d = new Date(r.date); const now = new Date(); const weekAgo = new Date(now - 7 * 86400000); return d >= weekAgo; }).length} accent="#6366f1" />
+          </div>
+
+          <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+            <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Production Log</div>
+            {prodRuns.length === 0 ? (
+              <div style={{ padding: 40, textAlign: "center", color: "#555" }}>
+                <Hammer size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
+                <p style={{ margin: 0 }}>No production runs recorded yet.</p>
+              </div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}>
+                  <thead><tr>
+                    {["Run ID", "Date", "Assembly", "Qty", "Items Consumed", "Notes", ""].map(h => <th key={h} style={TH}>{h}</th>)}
+                  </tr></thead>
+                  <tbody>
+                    {prodRuns.map(r => {
+                      const isExp = expanded[`prod-${r.id}`];
+                      return (
+                        <React.Fragment key={r.id}>
+                          <tr>
+                            <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#8b5cf6", cursor: "pointer" }} onClick={() => tog(`prod-${r.id}`)}>
+                              {isExp ? <ChevronDown size={12} style={{ marginRight: 4 }} /> : <ChevronRight size={12} style={{ marginRight: 4 }} />}
+                              {r.id}
+                            </td>
+                            <td style={{ ...TD, fontSize: 12, color: "#888" }}>{r.date}</td>
+                            <td style={TD}>
+                              <span style={{ fontWeight: 500 }}>{r.assemblyName}</span>
+                              <span style={{ color: "#888", fontSize: 11, marginLeft: 6 }}>({r.assemblyId})</span>
+                            </td>
+                            <td style={{ ...TD, fontWeight: 600, color: "#22c55e" }}>+{r.qtyProduced}</td>
+                            <td style={{ ...TD, fontSize: 12 }}>{r.consumed.length} items</td>
+                            <td style={{ ...TD, fontSize: 12, color: "#888", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.notes || "—"}</td>
+                            <td style={{ ...TD, fontSize: 11, color: "#666" }}>{r.createdBy || ""}</td>
+                          </tr>
+                          {isExp && (
+                            <tr><td colSpan={7} style={{ ...TD, background: "#16161e", paddingLeft: 40 }}>
+                              <div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>CONSUMED</div>
+                              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                                <thead><tr>{["Part ID", "Name", "Qty Used", "Unit"].map(h => <th key={h} style={{ ...TH, fontSize: 10 }}>{h}</th>)}</tr></thead>
+                                <tbody>{r.consumed.map((c, i) => (
+                                  <tr key={i}>
+                                    <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#6366f1" }}>{c.partId}</td>
+                                    <td style={{ ...TD, fontSize: 12 }}>{c.name}</td>
+                                    <td style={{ ...TD, fontSize: 12, fontWeight: 600, color: "#ef4444" }}>-{c.qty.toFixed(3)}</td>
+                                    <td style={{ ...TD, fontSize: 12, color: "#888" }}>{c.unit}</td>
+                                  </tr>
+                                ))}</tbody>
+                              </table>
+                            </td></tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ================== PRODUCTION MODAL ================== */}
+      <Modal open={prodModal} onClose={() => setProdModal(false)} title="Run Production" wide>
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, marginBottom: 16 }}>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
+            <select value={prodAssembly} onChange={e => { setProdAssembly(e.target.value); setProdConsume(initConsume(e.target.value)); }} style={IS}>
+              <option value="">Select assembly...</option>
+              {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity *</label>
+            <input type="number" step="any" min="0" value={prodQty} onChange={e => setProdQty(Number(e.target.value))} style={IS} />
+          </div>
+        </div>
+
+        {prodAssemblyItem && (
+          <div style={{ marginBottom: 12, padding: "8px 12px", background: "#16161e", borderRadius: 6, fontSize: 12, color: "#888", display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <span>Current stock: <strong style={{ color: "#e0e0e0" }}>{prodAssemblyItem.qty} {prodAssemblyItem.unit}</strong></span>
+            <span>After production: <strong style={{ color: "#22c55e" }}>{prodAssemblyItem.qty + prodQty} {prodAssemblyItem.unit}</strong></span>
+          </div>
+        )}
+
+        {prodAssemblyItem && prodAssemblyItem.bom && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 4 }}>Materials to Consume</div>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 10 }}>
+              Click <strong style={{ color: "#22c55e" }}>Use ✓</strong> to consume an item directly, or <strong style={{ color: "#f59e0b" }}>Expand ▼</strong> to drill into its sub-components instead.
+            </div>
+            <div style={{ border: "1px solid #2a2a3a", borderRadius: 8, padding: 12, background: "#16161e", maxHeight: 400, overflow: "auto" }}>
+              {renderConsumptionTree(prodAssemblyItem.bom, prodQty)}
+            </div>
+          </div>
+        )}
+
+        {prodAssemblyItem && (() => {
+          const consumed = getConsumedItems(prodAssemblyItem.bom, prodQty);
+          const shortages = consumed.filter(c => c.qty > c.currentQty);
+          return (
+            <>
+              {shortages.length > 0 && (
+                <div style={{ background: "#2a1a1a", border: "1px solid #ef444433", borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, color: "#ef4444", fontWeight: 600, marginBottom: 4 }}>⚠ Insufficient Stock</div>
+                  {shortages.map((s, i) => (
+                    <div key={i} style={{ fontSize: 12, color: "#f87171" }}>{s.name}: need {s.qty.toFixed(3)}, have {s.currentQty}</div>
+                  ))}
+                </div>
+              )}
+              <div style={{ fontSize: 12, color: "#888", marginBottom: 12 }}>
+                Will consume {consumed.length} items totaling {consumed.reduce((s, c) => s + c.qty, 0).toFixed(2)} units
+              </div>
+            </>
+          );
+        })()}
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes (optional)</label>
+          <input value={prodNotes} onChange={e => setProdNotes(e.target.value)} placeholder="Batch notes, operator, etc." style={IS} />
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={() => setProdModal(false)} style={B2}>Cancel</button>
+          <button onClick={submitProduction} style={{ ...B1, background: "#8b5cf6" }}><Hammer size={14} /> Run Production</button>
+        </div>
+      </Modal>
 
       {/* ================== MANUAL PO MODAL ================== */}
       <Modal open={manualPOModal} onClose={() => setManualPOModal(false)} title="Create Purchase Order" wide>
