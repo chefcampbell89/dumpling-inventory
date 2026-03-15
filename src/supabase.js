@@ -216,7 +216,7 @@ export async function fetchProductionRuns() {
   return runs.map(r => ({
     id: r.id, assemblyId: r.assembly_id, assemblyName: r.assembly_name,
     qtyProduced: Number(r.qty_produced), date: r.run_date, notes: r.notes,
-    createdBy: r.created_by, createdAt: r.created_at,
+    createdBy: r.created_by, createdAt: r.created_at, lotNumber: r.lot_number || "",
     consumed: consumed.filter(c => c.run_id === r.id).map(c => ({
       partId: c.part_id, name: c.part_name, qty: Number(c.qty_consumed), unit: c.unit,
     })),
@@ -227,7 +227,7 @@ export async function createProductionRun(run) {
   const { error: rErr } = await supabase.from("production_runs").insert({
     id: run.id, assembly_id: run.assemblyId, assembly_name: run.assemblyName,
     qty_produced: run.qtyProduced, run_date: run.date, notes: run.notes,
-    created_by: run.createdBy || "",
+    created_by: run.createdBy || "", lot_number: run.lotNumber || "",
   })
   if (rErr) throw rErr
   if (run.consumed.length > 0) {
@@ -296,4 +296,39 @@ export async function setInviteCode(code) {
 export async function changePassword(newPassword) {
   const { error } = await supabase.auth.updateUser({ password: newPassword })
   if (error) throw error
+}
+
+// -- INVENTORY LOTS --
+
+export async function fetchInventoryLots() {
+  const { data, error } = await supabase.from("inventory_lots").select("*").order("production_date")
+  if (error) throw error
+  return data.map(r => ({
+    id: r.id, itemId: r.item_id, lotNumber: r.lot_number,
+    qty: Number(r.qty), productionDate: r.production_date,
+    sourceRunId: r.source_run_id, createdAt: r.created_at,
+  }))
+}
+
+export async function adjustLotQty(itemId, lotNumber, delta, productionDate, sourceRunId) {
+  const { data: existing, error: fetchErr } = await supabase.from("inventory_lots")
+    .select("*").eq("item_id", itemId).eq("lot_number", lotNumber).maybeSingle()
+  if (fetchErr) throw fetchErr
+
+  if (existing) {
+    const newQty = Math.max(0, Number(existing.qty) + delta)
+    if (newQty <= 0) {
+      const { error } = await supabase.from("inventory_lots").delete().eq("id", existing.id)
+      if (error) throw error
+    } else {
+      const { error } = await supabase.from("inventory_lots").update({ qty: newQty }).eq("id", existing.id)
+      if (error) throw error
+    }
+  } else if (delta > 0) {
+    const { error } = await supabase.from("inventory_lots").insert({
+      item_id: itemId, lot_number: lotNumber, qty: delta,
+      production_date: productionDate || null, source_run_id: sourceRunId || null,
+    })
+    if (error) throw error
+  }
 }
