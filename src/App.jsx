@@ -1171,7 +1171,7 @@ export default function App() {
   };
 
   const tabBtn = (k, lbl, ico) => (
-    <button onClick={() => { setTab(k); setSearch(""); setLevelFilter("All"); setStockFilter("All"); }}
+    <button onClick={() => { setTab(k); setSearch(""); setLevelFilter([]); setStockFilter("All"); setSortCol(null); }}
       style={{ ...B2, background: tab === k ? "#6366f1" : "#2a2a3a", color: tab === k ? "#fff" : "#ccc", borderColor: tab === k ? "#6366f1" : "#333" }}>{ico}{lbl}</button>
   );
 
