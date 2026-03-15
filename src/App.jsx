@@ -1,4 +1,4 @@
-// APP VERSION: v83
+// APP VERSION: v84
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -293,7 +293,6 @@ export default function App() {
   const [authInvite, setAuthInvite] = useState("");
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
-  const [debugInfo, setDebugInfo] = useState("init");
   const [allProfiles, setAllProfiles] = useState([]);
   const [pwModal, setPwModal] = useState(false);
   const [newPw, setNewPw] = useState("");
@@ -1070,7 +1069,7 @@ export default function App() {
               <Package size={40} style={{ color: "#6366f1", marginBottom: 8 }} />
               <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Dumpling Factory</h1>
               <p style={{ margin: "4px 0 0", color: "#666", fontSize: 13 }}>Inventory Management System</p>
-              <p style={{ margin: "8px 0 0", color: "#555", fontSize: 10, fontFamily: "monospace" }}>v83 | {debugInfo}</p>
+              <p style={{ margin: "8px 0 0", color: "#555", fontSize: 10, fontFamily: "monospace" }}>v84</p>
             </div>
 
             <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
@@ -1118,7 +1117,7 @@ export default function App() {
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}><Package size={26} style={{ color: "#6366f1" }} /> Dumpling Factory v80</h1>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}><Package size={26} style={{ color: "#6366f1" }} /> Dumpling Factory</h1>
           <p style={{ margin: "2px 0 0", color: "#555", fontSize: 12 }}>Production Inventory • BOM • Purchasing</p>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
