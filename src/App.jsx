@@ -1,4 +1,4 @@
-// APP VERSION: v91
+// APP VERSION: v93
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -10,7 +10,7 @@ import {
   fetchProductionRuns, createProductionRun,
   fetchInventoryLots, adjustLotQty,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles,
-  getInviteCode, setInviteCode, changePassword, supabase,
+  getInviteCode, setInviteCode, getLocations, saveLocations, changePassword, supabase,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
@@ -18,7 +18,7 @@ import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
   ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
-  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown,
+  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, MapPin,
 } from "lucide-react";
 
 // ============================================================
@@ -378,6 +378,9 @@ export default function App() {
   const [adjItem, setAdjItem] = useState(null);
   const [adjQty, setAdjQty] = useState(0);
   const [adjNotes, setAdjNotes] = useState("");
+  const [locations, setLocations] = useState(["Dumpling Factory", "Dumpling Factory: Walk-in Freezer", "Dumpling Factory: Dry Storage"]);
+  const [locModal, setLocModal] = useState(false);
+  const [locEdit, setLocEdit] = useState("");
 
   // ---- Helper: load all data from Supabase ----
   const loadAllData = useCallback(async () => {
@@ -398,6 +401,7 @@ export default function App() {
       fetchReceipts().then(r => setReceipts(r)).catch(() => {});
       fetchProductionRuns().then(r => setProdRuns(r)).catch(() => {});
       fetchInventoryLots().then(r => setLots(r)).catch(() => {});
+      getLocations().then(r => { if (r && r.length > 0) setLocations(r); }).catch(() => {});
     } catch (err) {
       console.warn("Supabase load failed, using seed data:", err.message);
     }
@@ -622,6 +626,39 @@ export default function App() {
     };
   }, [orders]);
 
+  // Unified transaction log from existing data
+  const transactionLog = useMemo(() => {
+    const entries = [];
+
+    // Production runs
+    for (const r of prodRuns) {
+      entries.push({
+        date: r.date, time: r.createdAt || r.date, type: "Production",
+        desc: `Produced ${r.qtyProduced} x ${r.assemblyName}`,
+        lot: r.lotNumber || "", user: r.createdBy || "",
+        detail: r.consumed.map(c => `-${c.qty.toFixed(3)} ${c.name}`).join(", "),
+        color: "#8b5cf6",
+      });
+    }
+
+    // Receipts (PO receipts, adjustments, manual)
+    for (const r of receipts) {
+      const totalUnits = r.lines.reduce((s, l) => s + (l.qtyReceived || 0), 0);
+      const isAdj = r.type === "Inventory adjustment";
+      entries.push({
+        date: r.date, time: r.createdAt || r.date, type: isAdj ? "Adjustment" : "Receipt",
+        desc: isAdj ? r.notes || "Inventory adjustment" : `${r.type}: ${r.lines.length} items, ${totalUnits} units`,
+        lot: "", user: r.createdBy || "",
+        detail: r.lines.map(l => `${l.name}: ${l.qtyReceived} ${l.unit}`).join(", "),
+        color: isAdj ? "#f59e0b" : "#22c55e",
+      });
+    }
+
+    // Sort newest first
+    entries.sort((a, b) => (b.time || b.date || "").localeCompare(a.time || a.date || ""));
+    return entries;
+  }, [prodRuns, receipts]);
+
   const stats = useMemo(() => {
     const low = allItems.filter((i) => i.minStock > 0 && i.qty <= i.minStock).length;
     const rawVal = parts.reduce((s, p) => s + p.qty * p.avgCost, 0);
@@ -747,6 +784,30 @@ export default function App() {
     setVendors((p) => p.filter((x) => x.id !== id));
     setPOs((p) => p.filter((x) => x.id !== id));
     show("Deleted");
+  };
+
+  const delOrderGroup = async (group) => {
+    if (!window.confirm(`Delete entire order for ${group.customer} (${group.date})? This removes all ${group.lines.length} line(s).`)) return;
+    for (const o of group.lines) {
+      try { await dbDeleteOrder(o.id); } catch (e) { console.warn(e.message); }
+    }
+    const ids = new Set(group.lines.map(o => o.id));
+    setOrders(prev => prev.filter(o => !ids.has(o.id)));
+    show(`Deleted order for ${group.customer}`);
+  };
+
+  const addLocation = async (name) => {
+    const trimmed = name.trim();
+    if (!trimmed || locations.includes(trimmed)) return;
+    const updated = [...locations, trimmed].sort();
+    setLocations(updated);
+    try { await saveLocations(updated); } catch (e) { console.warn("Save locations failed:", e.message); }
+  };
+
+  const removeLocation = async (name) => {
+    const updated = locations.filter(l => l !== name);
+    setLocations(updated);
+    try { await saveLocations(updated); } catch (e) { console.warn("Save locations failed:", e.message); }
   };
 
   const openAdjust = (item) => { setAdjItem(item); setAdjQty(item.qty); setAdjNotes(""); setAdjModal(true); };
@@ -1103,7 +1164,7 @@ export default function App() {
   };
 
   const addManualRcvLine = () => {
-    setRcvLines(prev => [...prev, { partId: "", name: "", qtyExpected: 0, qtyReceived: 0, unit: "" }]);
+    setRcvLines(prev => [...prev, { partId: "", name: "", qtyExpected: 0, qtyReceived: 0, unit: "", location: "" }]);
   };
 
   const submitReceipt = async () => {
@@ -1370,6 +1431,7 @@ export default function App() {
               <div style={{ fontSize: 10, color: isAdmin ? "#f59e0b" : "#666" }}>{isAdmin ? "Admin" : "User"}</div>
             </div>
             <button onClick={() => { setNewPw(""); setNewPwConfirm(""); setPwModal(true); }} style={{ ...B2, padding: "6px 8px" }} title="Change Password"><KeyRound size={14} /></button>
+            {isAdmin && <button onClick={() => { setLocEdit(""); setLocModal(true); }} style={{ ...B2, padding: "6px 8px" }} title="Manage Locations"><MapPin size={14} /></button>}
             <button onClick={handleLogout} style={{ ...B2, padding: "6px 8px", borderColor: "#ef444444", color: "#ef4444" }} title="Log Out"><LogOut size={14} /></button>
           </div>
         </div>
@@ -1380,7 +1442,7 @@ export default function App() {
         <Stat icon={<Package size={18} />} label="Total SKUs" value={stats.total} accent="#6366f1" />
         <Stat icon={<AlertTriangle size={18} />} label="Low Stock" value={stats.low} accent={stats.low > 0 ? "#ef4444" : "#22c55e"} />
         <Stat icon={<DollarSign size={18} />} label="Raw Material Value" value={`$${stats.rawVal.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`} accent="#22c55e" />
-        <Stat icon={<ShoppingCart size={18} />} label="Open Orders" value={stats.open} accent="#ec4899" />
+        <Stat icon={<ShoppingCart size={18} />} label="Open Orders" value={orderStats.pending} accent="#ec4899" />
       </div>
 
       {/* Tab Bar */}
@@ -1393,6 +1455,7 @@ export default function App() {
         {tabBtn("pos", "Purchase Orders", <FileText size={14} />)}
         {tabBtn("receiving", "Receiving", <PackageCheck size={14} />)}
         {tabBtn("production", "Production", <Hammer size={14} />)}
+        {tabBtn("log", "Transaction Log", <ScrollText size={14} />)}
         {isAdmin && tabBtn("users", "Users", <Users size={14} />)}
       </div>
 
@@ -1611,6 +1674,9 @@ export default function App() {
                           <button onClick={(e) => { e.stopPropagation(); shipAllLines(group.lines); }} style={{ ...B1, padding: "6px 14px", background: "#22c55e", fontSize: 12 }}>
                             <PackageCheck size={13} /> Ship All ({unshippedCount})
                           </button>
+                        )}
+                        {isAdmin && (
+                          <button onClick={(e) => { e.stopPropagation(); delOrderGroup(group); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }} title="Delete Order"><Trash2 size={14} /></button>
                         )}
                       </div>
                     </div>
@@ -2058,6 +2124,56 @@ export default function App() {
         </div>
       </Modal>
 
+      {/* ================== TRANSACTION LOG ================== */}
+      {tab === "log" && (
+        <div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            <Stat icon={<ScrollText size={18} />} label="Total Transactions" value={transactionLog.length} accent="#6366f1" />
+            <Stat icon={<Hammer size={18} />} label="Production Runs" value={transactionLog.filter(e => e.type === "Production").length} accent="#8b5cf6" />
+            <Stat icon={<PackageCheck size={18} />} label="Receipts" value={transactionLog.filter(e => e.type === "Receipt").length} accent="#22c55e" />
+            <Stat icon={<Edit2 size={18} />} label="Adjustments" value={transactionLog.filter(e => e.type === "Adjustment").length} accent="#f59e0b" />
+          </div>
+
+          <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 800 }}>
+                <thead><tr>
+                  {["Date", "Type", "Description", "Lot #", "Detail", "User"].map(h => <th key={h} style={TH}>{h}</th>)}
+                </tr></thead>
+                <tbody>
+                  {transactionLog.length === 0 ? (
+                    <tr><td colSpan={6} style={{ ...TD, textAlign: "center", color: "#555", padding: 32 }}>
+                      <ScrollText size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
+                      <p style={{ margin: 0 }}>No transactions recorded yet.</p>
+                    </td></tr>
+                  ) : (
+                    transactionLog.filter(e => {
+                      if (!search) return true;
+                      const s = search.toLowerCase();
+                      return e.desc.toLowerCase().includes(s) || e.user.toLowerCase().includes(s) || e.type.toLowerCase().includes(s) || (e.lot || "").toLowerCase().includes(s) || (e.detail || "").toLowerCase().includes(s);
+                    }).map((e, i) => (
+                      <tr key={i}>
+                        <td style={{ ...TD, fontSize: 12, color: "#888", whiteSpace: "nowrap" }}>{e.date}</td>
+                        <td style={TD}>
+                          <span style={{ background: e.color + "22", color: e.color, padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{e.type}</span>
+                        </td>
+                        <td style={{ ...TD, fontSize: 13 }}>{e.desc}</td>
+                        <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: e.lot ? "#a78bfa" : "#555" }}>{e.lot || "—"}</td>
+                        <td style={{ ...TD, fontSize: 11, color: "#888", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.detail || ""}</td>
+                        <td style={{ ...TD, fontSize: 11, color: "#666" }}>{e.user}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ padding: "8px 14px", borderTop: "1px solid #2a2a3a", color: "#555", fontSize: 11 }}>
+              {transactionLog.length} transactions
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ================== USERS TAB (Admin only) ================== */}
       {tab === "users" && isAdmin && (() => {
         if (allProfiles.length === 0) { fetchProfiles().then(p => setAllProfiles(p)).catch(() => {}); }
@@ -2229,7 +2345,7 @@ export default function App() {
           <div style={{ overflowX: "auto", border: "1px solid #2a2a3a", borderRadius: 8 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                {rcvMode === "manual" ? ["Item", "Qty Received", "Unit", ""].map(h => <th key={h} style={TH}>{h}</th>) : ["Part ID", "Name", "Ordered", "Receiving", "Unit"].map(h => <th key={h} style={TH}>{h}</th>)}
+                {rcvMode === "manual" ? ["Item", "Qty Received", "Unit", "Location", ""].map(h => <th key={h} style={TH}>{h}</th>) : ["Part ID", "Name", "Ordered", "Receiving", "Unit"].map(h => <th key={h} style={TH}>{h}</th>)}
               </tr></thead>
               <tbody>
                 {rcvLines.length === 0 ? <tr><td colSpan={5} style={{ ...TD, textAlign: "center", color: "#555", padding: 20 }}>No items. {rcvMode === "manual" ? "Click Add Item above." : ""}</td></tr> :
@@ -2238,13 +2354,19 @@ export default function App() {
                     {rcvMode === "manual" ? (
                       <>
                         <td style={TD}>
-                          <select value={line.partId} onChange={e => { const p = parts.find(x => x.id === e.target.value); setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, partId: e.target.value, name: p?.name || "", unit: p?.unit || "" } : l)); }} style={{ ...IS, fontSize: 12 }}>
+                          <select value={line.partId} onChange={e => { const p = parts.find(x => x.id === e.target.value); setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, partId: e.target.value, name: p?.name || "", unit: p?.unit || "", location: p?.location || "" } : l)); }} style={{ ...IS, fontSize: 12 }}>
                             <option value="">Select item...</option>
                             {parts.map(p => <option key={p.id} value={p.id}>[{p.id}] {p.name}</option>)}
                           </select>
                         </td>
                         <td style={TD}><input type="number" step="any" min="0" value={line.qtyReceived} onChange={e => setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, qtyReceived: Number(e.target.value) } : l))} style={{ ...IS, width: 80, fontSize: 12 }} /></td>
                         <td style={{ ...TD, fontSize: 12, color: "#888" }}>{line.unit}</td>
+                        <td style={TD}>
+                          <select value={line.location || ""} onChange={e => setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, location: e.target.value } : l))} style={{ ...IS, fontSize: 12, minWidth: 120 }}>
+                            <option value="">Default</option>
+                            {locations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                          </select>
+                        </td>
                         <td style={TD}><button onClick={() => setRcvLines(prev => prev.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Minus size={14} /></button></td>
                       </>
                     ) : (
@@ -2303,7 +2425,7 @@ export default function App() {
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Category</label><input value={form.category || ""} readOnly style={{ ...IS, opacity: 0.6 }} /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Costing Method</label><select value={form.costing || "FIFO"} onChange={(e) => setForm((f) => ({ ...f, costing: e.target.value }))} style={IS}>{COSTING.map((c) => <option key={c}>{c}</option>)}</select></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Unit of Measure</label><input value={form.unit || ""} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} style={IS} /></div>
-              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Location</label><input value={form.location || ""} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Location</label><select value={form.location || ""} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} style={IS}><option value="">Select location...</option>{locations.map(l => <option key={l} value={l}>{l}</option>)}</select></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Qty On Hand</label><input type="number" value={form.qty || 0} onChange={(e) => setForm((f) => ({ ...f, qty: Number(e.target.value) }))} style={IS} /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Min Before Reorder</label><input type="number" value={form.minStock || 0} onChange={(e) => setForm((f) => ({ ...f, minStock: Number(e.target.value) }))} style={IS} /></div>
               {isRaw && <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Avg Cost</label><input type="number" step="0.01" value={form.avgCost || 0} onChange={(e) => setForm((f) => ({ ...f, avgCost: Number(e.target.value) }))} style={IS} /></div>}
@@ -2464,6 +2586,35 @@ export default function App() {
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
           <button onClick={() => setPwModal(false)} style={B2}>Cancel</button>
           <button onClick={handleChangePassword} style={B1}>Update Password</button>
+        </div>
+      </Modal>
+
+      {/* Location Management Modal */}
+      <Modal open={locModal} onClose={() => setLocModal(false)} title="Manage Locations">
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <input value={locEdit} onChange={e => setLocEdit(e.target.value)} placeholder="New location name..." style={{ ...IS, flex: 1 }} onKeyDown={e => { if (e.key === "Enter" && locEdit.trim()) { addLocation(locEdit); setLocEdit(""); } }} />
+            <button onClick={() => { if (locEdit.trim()) { addLocation(locEdit); setLocEdit(""); } }} style={B1}><Plus size={14} /> Add</button>
+          </div>
+          <div style={{ fontSize: 11, color: "#888", marginBottom: 8 }}>{locations.length} locations</div>
+          {locations.length === 0 ? (
+            <p style={{ color: "#555", fontSize: 13 }}>No locations defined yet.</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {locations.map(loc => (
+                <div key={loc} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "#16161e", borderRadius: 6, border: "1px solid #2a2a3a" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <MapPin size={14} style={{ color: "#6366f1" }} />
+                    <span style={{ fontSize: 13, color: "#e0e0e0" }}>{loc}</span>
+                  </div>
+                  <button onClick={() => removeLocation(loc)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }} title="Remove"><Trash2 size={14} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button onClick={() => setLocModal(false)} style={B2}>Close</button>
         </div>
       </Modal>
 
