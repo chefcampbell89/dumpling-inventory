@@ -1,4 +1,4 @@
-// APP VERSION: v88
+// APP VERSION: v90
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -17,6 +17,7 @@ import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
   ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
+  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown,
 } from "lucide-react";
 
 // ============================================================
@@ -277,6 +278,40 @@ function LevelBadge({ level }) {
   return l ? <span style={{ background: l.color + "22", color: l.color, padding: "2px 8px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{level}</span> : <span>{level}</span>;
 }
 
+function MultiSelectDropdown({ options, selected, onChange, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const label = selected.length === 0 ? placeholder : selected.length === options.length ? "All Levels" : selected.map(v => v).join(", ");
+  return (
+    <div style={{ position: "relative", minWidth: 160 }}>
+      <button onClick={() => setOpen(o => !o)} style={{ ...IS, width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", textAlign: "left", background: "#16161e", fontSize: 14, padding: "8px 12px" }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: selected.length === 0 ? "#888" : "#e0e0e0" }}>{label}</span>
+        <ChevronsUpDown size={14} style={{ color: "#666", flexShrink: 0 }} />
+      </button>
+      {open && (
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 900 }} onClick={() => setOpen(false)} />
+          <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "#1e1e2e", border: "1px solid #333", borderRadius: 8, zIndex: 901, padding: 4, boxShadow: "0 8px 24px rgba(0,0,0,0.5)" }}>
+            <button onClick={() => { onChange(selected.length === options.length ? [] : options.map(o => o.value)); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 10px", background: "none", border: "none", cursor: "pointer", color: "#ccc", fontSize: 13, borderRadius: 4 }} onMouseEnter={e => e.currentTarget.style.background = "#2a2a3a"} onMouseLeave={e => e.currentTarget.style.background = "none"}>
+              <div style={{ width: 16, height: 16, borderRadius: 3, border: "1px solid #555", display: "flex", alignItems: "center", justifyContent: "center", background: selected.length === options.length ? "#6366f1" : "transparent" }}>{selected.length === options.length && <Check size={12} style={{ color: "#fff" }} />}</div>
+              All
+            </button>
+            <div style={{ height: 1, background: "#2a2a3a", margin: "2px 0" }} />
+            {options.map(o => {
+              const checked = selected.includes(o.value);
+              return (
+                <button key={o.value} onClick={() => onChange(checked ? selected.filter(v => v !== o.value) : [...selected, o.value])} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 10px", background: "none", border: "none", cursor: "pointer", color: o.color || "#ccc", fontSize: 13, borderRadius: 4 }} onMouseEnter={e => e.currentTarget.style.background = "#2a2a3a"} onMouseLeave={e => e.currentTarget.style.background = "none"}>
+                  <div style={{ width: 16, height: 16, borderRadius: 3, border: `1px solid ${checked ? o.color || "#6366f1" : "#555"}`, display: "flex", alignItems: "center", justifyContent: "center", background: checked ? (o.color || "#6366f1") : "transparent" }}>{checked && <Check size={12} style={{ color: "#fff" }} />}</div>
+                  {o.label}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ============================================================
 // MAIN APP
 // ============================================================
@@ -322,8 +357,10 @@ export default function App() {
   const [prodNotes, setProdNotes] = useState("");
   const [prodConsume, setProdConsume] = useState({});
   const [search, setSearch] = useState("");
-  const [levelFilter, setLevelFilter] = useState("All");
+  const [levelFilter, setLevelFilter] = useState([]);
   const [stockFilter, setStockFilter] = useState("All");
+  const [sortCol, setSortCol] = useState(null);
+  const [sortDir, setSortDir] = useState("asc");
   const [modal, setModal] = useState(null);
   const [editItem, setEditItem] = useState(null);
   const [form, setForm] = useState({});
@@ -334,6 +371,10 @@ export default function App() {
   const [importData, setImportData] = useState(null);
   const [importMapping, setImportMapping] = useState({});
   const [importMode, setImportMode] = useState("append");
+  const [adjModal, setAdjModal] = useState(false);
+  const [adjItem, setAdjItem] = useState(null);
+  const [adjQty, setAdjQty] = useState(0);
+  const [adjNotes, setAdjNotes] = useState("");
 
   // ---- Helper: load all data from Supabase ----
   const loadAllData = useCallback(async () => {
@@ -496,13 +537,35 @@ export default function App() {
   }, [allItems]);
 
   const viewItems = useMemo(() => {
-    let d = tab === "inventory" ? [...parts, ...assemblies] : [];
+    let d = (tab === "inventory" || tab === "items") ? [...parts, ...assemblies] : [];
     if (search) { const s = search.toLowerCase(); d = d.filter((p) => p.name.toLowerCase().includes(s) || p.id.toLowerCase().includes(s) || (p.supplier || "").toLowerCase().includes(s)); }
-    if (levelFilter !== "All") d = d.filter((p) => getLevel(p.id) === Number(levelFilter));
+    if (levelFilter.length > 0) d = d.filter((p) => levelFilter.includes(getLevel(p.id)));
     if (stockFilter === "Low") d = d.filter((p) => p.minStock > 0 && p.qty <= p.minStock);
     if (stockFilter === "OK") d = d.filter((p) => p.minStock === 0 || p.qty > p.minStock);
+    if (sortCol) {
+      const dir = sortDir === "asc" ? 1 : -1;
+      d.sort((a, b) => {
+        let av, bv;
+        switch (sortCol) {
+          case "id": av = a.id; bv = b.id; break;
+          case "name": av = a.name; bv = b.name; break;
+          case "level": av = getLevel(a.id); bv = getLevel(b.id); break;
+          case "costing": av = a.costing || ""; bv = b.costing || ""; break;
+          case "qty": av = a.qty; bv = b.qty; break;
+          case "minStock": av = a.minStock; bv = b.minStock; break;
+          case "unit": av = a.unit || ""; bv = b.unit || ""; break;
+          case "avgCost": av = a.avgCost || 0; bv = b.avgCost || 0; break;
+          case "bomCost": av = a.bom ? bomCost(a.bom) : 0; bv = b.bom ? bomCost(b.bom) : 0; break;
+          case "location": av = a.location || ""; bv = b.location || ""; break;
+          case "supplier": av = a.supplier || ""; bv = b.supplier || ""; break;
+          default: return 0;
+        }
+        if (typeof av === "string") return dir * av.localeCompare(bv);
+        return dir * ((av || 0) - (bv || 0));
+      });
+    }
     return d;
-  }, [tab, parts, assemblies, search, levelFilter, stockFilter]);
+  }, [tab, parts, assemblies, search, levelFilter, stockFilter, sortCol, sortDir, bomCost]);
 
   const viewOrders = useMemo(() => {
     // Group orders by customer+date (orders from Google Forms share a group ID prefix)
@@ -570,10 +633,13 @@ export default function App() {
     return allItems;
   };
 
-  const openAdd = (type) => {
+  const openAdd = (type, initLevel) => {
     setEditItem(null);
-    if (type === "part") setForm({ id: "100-", name: "", category: "Raw Material", type: "Stock", costing: "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active" });
-    else if (type === "assembly") { const lvl = levelFilter !== "All" && Number(levelFilter) >= 200 ? Number(levelFilter) : 200; setForm({ id: `${lvl}-`, name: "", category: LEVELS[lvl]?.cat || "", type: "Stock", costing: lvl >= 250 ? "FEFO - Batch" : "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active" }); setBomForm([]); }
+    if (type === "item") {
+      const lvl = initLevel || 100;
+      setForm({ id: `${lvl}-`, name: "", category: LEVELS[lvl]?.cat || "Raw Material", type: "Stock", costing: lvl >= 250 ? "FEFO - Batch" : "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active" });
+      setBomForm([]);
+    }
     else if (type === "order") setForm({ id: `ORD-${String(orders.length + 1).padStart(3, "0")}`, customer: "", item: "", qty: 0, date: new Date().toISOString().slice(0, 10), status: "Pending", notes: "" });
     else if (type === "vendor") setForm({ id: `V-${String(vendors.length + 1).padStart(3, "0")}`, name: "", contact: "", email: "", phone: "", address: "", paymentTerms: "Net 30", leadDays: 0, notes: "" });
     setModal(type);
@@ -581,27 +647,47 @@ export default function App() {
 
   const openEdit = (type, item) => { setEditItem(item); setForm({ ...item }); setBomForm(item.bom ? item.bom.map(b => ({...b})) : []); setModal(type); };
 
+  const changeItemLevel = (newLvl) => {
+    const oldId = form.id || "";
+    const oldPrefix = oldId.match(/^(\d+)-/);
+    const suffix = oldPrefix ? oldId.slice(oldPrefix[0].length) : oldId;
+    setForm(f => ({
+      ...f,
+      id: `${newLvl}-${suffix}`,
+      category: LEVELS[newLvl]?.cat || f.category,
+      costing: newLvl >= 250 ? "FEFO - Batch" : "FIFO",
+      supplier: newLvl === 100 ? f.supplier : "",
+      supplierCode: newLvl === 100 ? f.supplierCode : "",
+    }));
+    if (newLvl === 100) setBomForm([]);
+  };
+
   const save = async () => {
-    if (modal === "part") {
+    if (modal === "item") {
       if (!form.name || !form.id) { show("Name and ID required", "error"); return; }
-      const obj = { ...form, avgCost: Number(form.avgCost), qty: Number(form.qty), minStock: Number(form.minStock) };
-      try { await upsertItem(obj); } catch (e) { console.warn("DB save failed:", e.message); }
-      if (editItem) setParts((p) => p.map((x) => (x.id === editItem.id ? obj : x)));
-      else setParts((p) => [...p, obj]);
-    } else if (modal === "assembly") {
-      if (!form.name || !form.id) { show("Name and ID required", "error"); return; }
-      const cleanBom = bomForm.filter((b) => b.partId && b.qty > 0);
-      const obj = { ...form, avgCost: Number(form.avgCost), qty: Number(form.qty), minStock: Number(form.minStock), bom: cleanBom };
-      try { await upsertItem(obj); await setBomForAssembly(obj.id, cleanBom); } catch (e) { console.warn("DB save failed:", e.message); }
-      // If converting from raw material to assembly, move it
-      const wasRawMaterial = parts.some((p) => p.id === editItem?.id);
-      if (wasRawMaterial) {
-        setParts((p) => p.filter((x) => x.id !== editItem.id));
-        setAssemblies((p) => [...p, obj]);
-      } else if (editItem) {
-        setAssemblies((p) => p.map((x) => (x.id === editItem.id ? obj : x)));
+      const lvl = getLevel(form.id);
+      const cleanBom = lvl >= 200 ? bomForm.filter((b) => b.partId && b.qty > 0) : [];
+      const isAssembly = cleanBom.length > 0;
+      const obj = { ...form, avgCost: Number(form.avgCost), qty: Number(form.qty), minStock: Number(form.minStock), ...(isAssembly ? { bom: cleanBom } : {}) };
+      if (!isAssembly) { delete obj.bom; }
+      try {
+        await upsertItem(obj);
+        if (isAssembly) await setBomForAssembly(obj.id, cleanBom);
+        else await setBomForAssembly(obj.id, []); // clear BOM if converting to raw
+      } catch (e) { console.warn("DB save failed:", e.message); }
+
+      // Determine where item lives (parts vs assemblies) and handle moves
+      const wasPart = parts.some(p => p.id === editItem?.id);
+      const wasAssembly = assemblies.some(a => a.id === editItem?.id);
+
+      if (isAssembly) {
+        if (wasPart) setParts(p => p.filter(x => x.id !== editItem.id)); // remove from parts
+        if (wasAssembly) setAssemblies(p => p.map(x => x.id === editItem.id ? obj : x));
+        else setAssemblies(p => [...p, obj]);
       } else {
-        setAssemblies((p) => [...p, obj]);
+        if (wasAssembly) setAssemblies(p => p.filter(x => x.id !== editItem.id)); // remove from assemblies
+        if (wasPart) setParts(p => p.map(x => x.id === editItem.id ? obj : x));
+        else setParts(p => [...p, obj]);
       }
     } else if (modal === "order") {
       if (!form.customer || !form.item) { show("Customer & item required", "error"); return; }
@@ -628,6 +714,30 @@ export default function App() {
     setVendors((p) => p.filter((x) => x.id !== id));
     setPOs((p) => p.filter((x) => x.id !== id));
     show("Deleted");
+  };
+
+  const openAdjust = (item) => { setAdjItem(item); setAdjQty(item.qty); setAdjNotes(""); setAdjModal(true); };
+  const submitAdjust = async () => {
+    if (!adjItem) return;
+    const newQty = Number(adjQty);
+    const diff = newQty - adjItem.qty;
+    if (diff === 0) { setAdjModal(false); return; }
+    // Update local state
+    const isPart = parts.some(p => p.id === adjItem.id);
+    if (isPart) setParts(prev => prev.map(p => p.id === adjItem.id ? { ...p, qty: newQty } : p));
+    else setAssemblies(prev => prev.map(a => a.id === adjItem.id ? { ...a, qty: newQty } : a));
+    // Persist qty
+    try { await updateItemQty(adjItem.id, newQty); } catch (e) { console.warn("Qty update failed:", e.message); }
+    // Log as receipt (inventory adjustment)
+    const rcptId = `ADJ-${Date.now()}`;
+    const rcpt = {
+      id: rcptId, poId: null, type: "Inventory adjustment", date: new Date().toISOString().slice(0, 10),
+      notes: `Admin adjustment: ${adjItem.qty} -> ${newQty} (${diff > 0 ? "+" : ""}${diff})${adjNotes ? " | " + adjNotes : ""}`,
+      createdBy: profile?.email || "", lines: [{ partId: adjItem.id, name: adjItem.name, qtyExpected: adjItem.qty, qtyReceived: newQty, unit: adjItem.unit }],
+    };
+    try { await createReceipt(rcpt); setReceipts(prev => [rcpt, ...prev]); } catch (e) { console.warn("Receipt log failed:", e.message); }
+    show(`Adjusted ${adjItem.name}: ${adjItem.qty} -> ${newQty}`);
+    setAdjModal(false);
   };
 
   const genPOs = async () => {
@@ -1168,6 +1278,7 @@ export default function App() {
       {/* Tab Bar */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
         {tabBtn("inventory", "Inventory", <Package size={14} />)}
+        {tabBtn("items", "Item Master", <Layers size={14} />)}
         {tabBtn("orders", "Orders", <ShoppingCart size={14} />)}
         {tabBtn("vendors", "Vendors", <Building2 size={14} />)}
         {tabBtn("mrp", "Purchase Needs", <ClipboardList size={14} />)}
@@ -1184,17 +1295,26 @@ export default function App() {
           <input placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...IS, paddingLeft: 32 }} />
         </div>
         {tab === "inventory" && <>
-          <select value={levelFilter} onChange={(e) => setLevelFilter(e.target.value)} style={{ ...IS, width: "auto", minWidth: 160 }}>
-            <option value="All">All Levels</option>
-            {LEVEL_KEYS.map((k) => <option key={k} value={k}>{LEVELS[k].label}</option>)}
-          </select>
+          <MultiSelectDropdown
+            placeholder="All Levels"
+            options={LEVEL_KEYS.map(k => ({ value: k, label: LEVELS[k].label, color: LEVELS[k].color }))}
+            selected={levelFilter}
+            onChange={setLevelFilter}
+          />
           <select value={stockFilter} onChange={(e) => setStockFilter(e.target.value)} style={{ ...IS, width: "auto", minWidth: 100 }}>
             <option value="All">All Stock</option>
             <option value="Low">Low Stock</option>
             <option value="OK">In Stock</option>
           </select>
-          <button onClick={() => openAdd("part")} style={B2}><Plus size={14} /> Raw Material</button>
-          <button onClick={() => openAdd("assembly")} style={B1}><Plus size={14} /> Assembly</button>
+        </>}
+        {tab === "items" && <>
+          <MultiSelectDropdown
+            placeholder="All Levels"
+            options={LEVEL_KEYS.map(k => ({ value: k, label: LEVELS[k].label, color: LEVELS[k].color }))}
+            selected={levelFilter}
+            onChange={setLevelFilter}
+          />
+          <button onClick={() => openAdd("item")} style={B1}><Plus size={14} /> Add Item</button>
         </>}
         {tab === "orders" && <button onClick={() => openAdd("order")} style={B1}><Plus size={14} /> Order</button>}
         {tab === "vendors" && <button onClick={() => openAdd("vendor")} style={B1}><Plus size={14} /> Vendor</button>}
@@ -1209,7 +1329,14 @@ export default function App() {
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
               <thead><tr>
-                {["", "ProductCode", "Name", "Level", "Costing", "Qty", "Min", "Unit", "Avg Cost", "BOM Cost", "Location", "Supplier", ""].map((h) => <th key={h} style={TH}>{h}</th>)}
+                {[{l:"",k:null},{l:"ProductCode",k:"id"},{l:"Name",k:"name"},{l:"Level",k:"level"},{l:"Costing",k:"costing"},{l:"Qty",k:"qty"},{l:"Min",k:"minStock"},{l:"Unit",k:"unit"},{l:"Avg Cost",k:"avgCost"},{l:"BOM Cost",k:"bomCost"},{l:"Location",k:"location"},{l:"Supplier",k:"supplier"},{l:"",k:null}].map((h,i) => (
+                  <th key={i} style={{ ...TH, cursor: h.k ? "pointer" : "default", userSelect: "none" }} onClick={() => { if (!h.k) return; if (sortCol === h.k) { setSortDir(d => d === "asc" ? "desc" : "asc"); } else { setSortCol(h.k); setSortDir("asc"); } }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      {h.l}
+                      {h.k && (sortCol === h.k ? (sortDir === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />) : <ArrowUpDown size={12} style={{ opacity: 0.3 }} />)}
+                    </div>
+                  </th>
+                ))}
               </tr></thead>
               <tbody>
                 {viewItems.length === 0 ? <tr><td colSpan={13} style={{ ...TD, textAlign: "center", color: "#555", padding: 32 }}>No items found</td></tr> :
@@ -1231,14 +1358,64 @@ export default function App() {
                           <td style={{ ...TD, fontSize: 11, color: "#888", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.location}</td>
                           <td style={{ ...TD, fontSize: 12 }}>{p.supplier}</td>
                           <td style={TD}>
+                            {isAdmin && <button onClick={() => openAdjust(p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#f59e0b", padding: 3 }} title="Adjust Qty"><Edit2 size={14} /></button>}
+                          </td>
+                        </tr>
+                        {hasBom && expanded[p.id] && <tr><td colSpan={13} style={{ ...TD, background: "#16161e", paddingLeft: 48 }}><div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>BILL OF MATERIALS</div>{renderBom(p.bom)}</td></tr>}
+                      </React.Fragment>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ padding: "8px 14px", borderTop: "1px solid #2a2a3a", color: "#555", fontSize: 11, display: "flex", justifyContent: "space-between" }}>
+            <span>{viewItems.length} of {allItems.length} items</span>
+            <span>{LEVEL_KEYS.map((k) => <span key={k} style={{ marginLeft: 12, color: LEVELS[k].color }}>{k}: {allItems.filter((i) => getLevel(i.id) === k).length}</span>)}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ================== ITEM MASTER TABLE ================== */}
+      {tab === "items" && (
+        <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
+              <thead><tr>
+                {[{l:"",k:null},{l:"ProductCode",k:"id"},{l:"Name",k:"name"},{l:"Level",k:"level"},{l:"Category",k:null},{l:"Costing",k:"costing"},{l:"Unit",k:"unit"},{l:"Avg Cost",k:"avgCost"},{l:"BOM Cost",k:"bomCost"},{l:"Supplier",k:"supplier"},{l:"Location",k:"location"},{l:"",k:null}].map((h,i) => (
+                  <th key={i} style={{ ...TH, cursor: h.k ? "pointer" : "default", userSelect: "none" }} onClick={() => { if (!h.k) return; if (sortCol === h.k) { setSortDir(d => d === "asc" ? "desc" : "asc"); } else { setSortCol(h.k); setSortDir("asc"); } }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      {h.l}
+                      {h.k && (sortCol === h.k ? (sortDir === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />) : <ArrowUpDown size={12} style={{ opacity: 0.3 }} />)}
+                    </div>
+                  </th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {viewItems.length === 0 ? <tr><td colSpan={12} style={{ ...TD, textAlign: "center", color: "#555", padding: 32 }}>No items found</td></tr> :
+                  viewItems.map((p) => {
+                    const lvl = getLevel(p.id); const hasBom = p.bom && p.bom.length > 0; const bc = hasBom ? bomCost(p.bom) : null;
+                    return (
+                      <React.Fragment key={p.id}>
+                        <tr>
+                          <td style={TD}>{hasBom && <button onClick={() => tog(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 2 }}>{expanded[p.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>}</td>
+                          <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: LEVELS[lvl]?.color || "#888" }}>{p.id}</td>
+                          <td style={{ ...TD, fontWeight: 500 }}>{p.name}</td>
+                          <td style={TD}><LevelBadge level={lvl} /></td>
+                          <td style={{ ...TD, fontSize: 12, color: "#999" }}>{p.category}</td>
+                          <td style={{ ...TD, fontSize: 11, color: "#888" }}>{p.costing}</td>
+                          <td style={{ ...TD, fontSize: 12, color: "#999" }}>{p.unit}</td>
+                          <td style={{ ...TD, fontSize: 12 }}>{p.avgCost > 0 ? `$${p.avgCost.toFixed(2)}` : ""}</td>
+                          <td style={{ ...TD, fontSize: 12, color: "#f59e0b" }}>{bc !== null ? `$${bc.toFixed(2)}` : ""}</td>
+                          <td style={{ ...TD, fontSize: 12 }}>{p.supplier}</td>
+                          <td style={{ ...TD, fontSize: 11, color: "#888", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.location}</td>
+                          <td style={TD}>
                             <div style={{ display: "flex", gap: 4 }}>
-                              <button onClick={() => openEdit(hasBom ? "assembly" : "part", p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6366f1", padding: 3, opacity: (hasBom && !isAdmin) ? 0.3 : 1 }} title="Edit" disabled={hasBom && !isAdmin}><Edit2 size={14} /></button>
-                              {!hasBom && isAdmin && <button onClick={() => { setEditItem(p); setForm({ ...p, category: LEVELS[getLevel(p.id)]?.cat || p.category }); setBomForm([]); setModal("assembly"); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#f59e0b", padding: 3 }} title="Add BOM"><Layers size={14} /></button>}
+                              <button onClick={() => openEdit("item", p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6366f1", padding: 3 }} title="Edit"><Edit2 size={14} /></button>
                               {isAdmin && <button onClick={() => setDelConfirm(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }} title="Delete"><Trash2 size={14} /></button>}
                             </div>
                           </td>
                         </tr>
-                        {hasBom && expanded[p.id] && <tr><td colSpan={13} style={{ ...TD, background: "#16161e", paddingLeft: 48 }}><div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>BILL OF MATERIALS</div>{renderBom(p.bom)}</td></tr>}
+                        {hasBom && expanded[p.id] && <tr><td colSpan={12} style={{ ...TD, background: "#16161e", paddingLeft: 48 }}><div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>BILL OF MATERIALS</div>{renderBom(p.bom)}</td></tr>}
                       </React.Fragment>
                     );
                   })}
@@ -1937,52 +2114,62 @@ export default function App() {
 
       {/* ================== MODALS ================== */}
 
-      {/* Part Modal */}
-      <Modal open={modal === "part"} onClose={() => setModal(null)} title={editItem ? "Edit Raw Material" : "Add Raw Material"}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>ProductCode</label><input value={form.id || ""} onChange={(e) => setForm((f) => ({ ...f, id: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Name</label><input value={form.name || ""} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Costing Method</label><select value={form.costing || "FIFO"} onChange={(e) => setForm((f) => ({ ...f, costing: e.target.value }))} style={IS}>{COSTING.map((c) => <option key={c}>{c}</option>)}</select></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Unit of Measure</label><input value={form.unit || ""} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Qty On Hand</label><input type="number" value={form.qty || 0} onChange={(e) => setForm((f) => ({ ...f, qty: Number(e.target.value) }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Min Before Reorder</label><input type="number" value={form.minStock || 0} onChange={(e) => setForm((f) => ({ ...f, minStock: Number(e.target.value) }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Avg Cost (last 3 orders)</label><input type="number" step="0.01" value={form.avgCost || 0} onChange={(e) => setForm((f) => ({ ...f, avgCost: Number(e.target.value) }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Supplier</label><select value={form.supplier || ""} onChange={(e) => setForm((f) => ({ ...f, supplier: e.target.value }))} style={IS}><option value="">None</option>{vendors.map((v) => <option key={v.id} value={v.name}>{v.name}</option>)}</select></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Supplier Product Code</label><input value={form.supplierCode || ""} onChange={(e) => setForm((f) => ({ ...f, supplierCode: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Location</label><input value={form.location || ""} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} style={IS} /></div>
-          <div style={{ gridColumn: "1/3" }}><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
-        </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>{editItem ? "Update" : "Add"}</button></div>
-      </Modal>
-
-      {/* Assembly Modal */}
-      <Modal open={modal === "assembly"} onClose={() => setModal(null)} title={editItem ? "Edit Assembly" : "Create Assembly"} wide>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>ProductCode</label><input value={form.id || ""} onChange={(e) => setForm((f) => ({ ...f, id: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Name</label><input value={form.name || ""} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Category</label><select value={form.category || ""} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))} style={IS}>{Object.values(LEVELS).filter((l) => l.cat !== "Raw Material").map((l) => <option key={l.cat} value={l.cat}>{l.cat}</option>)}</select></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Unit</label><input value={form.unit || ""} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Qty On Hand</label><input type="number" value={form.qty || 0} onChange={(e) => setForm((f) => ({ ...f, qty: Number(e.target.value) }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Min Stock</label><input type="number" value={form.minStock || 0} onChange={(e) => setForm((f) => ({ ...f, minStock: Number(e.target.value) }))} style={IS} /></div>
-          <div style={{ gridColumn: "1/3" }}><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Location</label><input value={form.location || ""} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
-        </div>
-        <div style={{ borderTop: "1px solid #2a2a3a", paddingTop: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><h3 style={{ margin: 0, fontSize: 15 }}>Bill of Materials</h3><button onClick={() => setBomForm((p) => [...p, { partId: "", qty: 1 }])} style={B2}><Plus size={14} /> Add Line</button></div>
-          {bomForm.length === 0 && <p style={{ color: "#555", fontSize: 13 }}>No components yet.</p>}
-          {bomForm.map((line, i) => (
-            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-              <select value={line.partId} onChange={(e) => setBomForm((p) => p.map((b, j) => j === i ? { ...b, partId: e.target.value } : b))} style={{ ...IS, flex: 2 }}>
-                <option value="">Select component...</option>
-                {bomItemsForLevel(getLevel(form.id || "200")).map((p) => <option key={p.id} value={p.id}>[{p.id}] {p.name}</option>)}
-              </select>
-              <input type="number" step="any" min="0" placeholder="Qty" value={line.qty} onChange={(e) => setBomForm((p) => p.map((b, j) => j === i ? { ...b, qty: Number(e.target.value) } : b))} style={{ ...IS, flex: 0.5, minWidth: 70 }} />
-              <button onClick={() => setBomForm((p) => p.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 4 }}><Minus size={16} /></button>
+      {/* Unified Item Modal */}
+      <Modal open={modal === "item"} onClose={() => setModal(null)} title={editItem ? "Edit Item" : "Create Item"} wide>
+        {(() => {
+          const formLevel = getLevel(form.id || "100");
+          const isRaw = formLevel === 100;
+          return (<>
+            {/* Level selector */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 6 }}>Item Level</label>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {LEVEL_KEYS.map(k => (
+                  <button key={k} onClick={() => changeItemLevel(k)} style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", border: formLevel === k ? `2px solid ${LEVELS[k].color}` : "1px solid #333", background: formLevel === k ? LEVELS[k].color + "22" : "#16161e", color: formLevel === k ? LEVELS[k].color : "#888" }}>
+                    {LEVELS[k].label}
+                  </button>
+                ))}
+              </div>
             </div>
-          ))}
-          {bomForm.filter((b) => b.partId && b.qty > 0).length > 0 && <div style={{ marginTop: 8, fontSize: 13, color: "#888" }}>BOM Cost: <strong style={{ color: "#22c55e" }}>${bomCost(bomForm.filter((b) => b.partId && b.qty > 0)).toFixed(2)}</strong></div>}
-        </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>{editItem ? "Update" : "Create"}</button></div>
+
+            {/* Core fields */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>ProductCode</label><input value={form.id || ""} onChange={(e) => setForm((f) => ({ ...f, id: e.target.value }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Name</label><input value={form.name || ""} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Category</label><input value={form.category || ""} readOnly style={{ ...IS, opacity: 0.6 }} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Costing Method</label><select value={form.costing || "FIFO"} onChange={(e) => setForm((f) => ({ ...f, costing: e.target.value }))} style={IS}>{COSTING.map((c) => <option key={c}>{c}</option>)}</select></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Unit of Measure</label><input value={form.unit || ""} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Location</label><input value={form.location || ""} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Qty On Hand</label><input type="number" value={form.qty || 0} onChange={(e) => setForm((f) => ({ ...f, qty: Number(e.target.value) }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Min Before Reorder</label><input type="number" value={form.minStock || 0} onChange={(e) => setForm((f) => ({ ...f, minStock: Number(e.target.value) }))} style={IS} /></div>
+              {isRaw && <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Avg Cost</label><input type="number" step="0.01" value={form.avgCost || 0} onChange={(e) => setForm((f) => ({ ...f, avgCost: Number(e.target.value) }))} style={IS} /></div>}
+              {isRaw && <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Supplier</label><select value={form.supplier || ""} onChange={(e) => setForm((f) => ({ ...f, supplier: e.target.value }))} style={IS}><option value="">None</option>{vendors.map((v) => <option key={v.id} value={v.name}>{v.name}</option>)}</select></div>}
+              {isRaw && <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Supplier Product Code</label><input value={form.supplierCode || ""} onChange={(e) => setForm((f) => ({ ...f, supplierCode: e.target.value }))} style={IS} /></div>}
+              <div style={{ gridColumn: "1/-1" }}><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
+            </div>
+
+            {/* BOM section - only for 200+ */}
+            {!isRaw && (
+              <div style={{ borderTop: "1px solid #2a2a3a", paddingTop: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><h3 style={{ margin: 0, fontSize: 15 }}>Bill of Materials</h3><button onClick={() => setBomForm((p) => [...p, { partId: "", qty: 1 }])} style={B2}><Plus size={14} /> Add Line</button></div>
+                {bomForm.length === 0 && <p style={{ color: "#555", fontSize: 13 }}>No components yet. Add lines to define what goes into this item.</p>}
+                {bomForm.map((line, i) => (
+                  <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                    <select value={line.partId} onChange={(e) => setBomForm((p) => p.map((b, j) => j === i ? { ...b, partId: e.target.value } : b))} style={{ ...IS, flex: 2 }}>
+                      <option value="">Select component...</option>
+                      {bomItemsForLevel(formLevel).map((p) => <option key={p.id} value={p.id}>[{p.id}] {p.name}</option>)}
+                    </select>
+                    <input type="number" step="any" min="0" placeholder="Qty" value={line.qty} onChange={(e) => setBomForm((p) => p.map((b, j) => j === i ? { ...b, qty: Number(e.target.value) } : b))} style={{ ...IS, flex: 0.5, minWidth: 70 }} />
+                    <button onClick={() => setBomForm((p) => p.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 4 }}><Minus size={16} /></button>
+                  </div>
+                ))}
+                {bomForm.filter((b) => b.partId && b.qty > 0).length > 0 && <div style={{ marginTop: 8, fontSize: 13, color: "#888" }}>BOM Cost: <strong style={{ color: "#22c55e" }}>${bomCost(bomForm.filter((b) => b.partId && b.qty > 0)).toFixed(2)}</strong></div>}
+              </div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>{editItem ? "Update" : "Create"}</button></div>
+          </>);
+        })()}
       </Modal>
 
       {/* Order Modal */}
@@ -2062,6 +2249,37 @@ export default function App() {
             <button onClick={executeImport} disabled={!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name")} style={{ ...B1, opacity: (!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name")) ? 0.4 : 1 }}>Import {importData?.rows.length || 0} Rows</button>
           </div>
         </div>
+      </Modal>
+
+      {/* Qty Adjustment Modal */}
+      <Modal open={adjModal} onClose={() => setAdjModal(false)} title="Adjust Inventory Quantity">
+        {adjItem && (
+          <div>
+            <div style={{ background: "#16161e", borderRadius: 8, padding: 12, marginBottom: 16 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "#e0e0e0" }}>{adjItem.name}</div>
+              <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>{adjItem.id} &middot; Current Qty: <strong style={{ color: "#22c55e" }}>{adjItem.qty}</strong> {adjItem.unit}</div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>New Quantity</label>
+                <input type="number" value={adjQty} onChange={e => setAdjQty(Number(e.target.value))} style={IS} />
+                {adjQty !== adjItem.qty && (
+                  <div style={{ fontSize: 12, marginTop: 4, color: adjQty > adjItem.qty ? "#22c55e" : "#ef4444" }}>
+                    {adjQty > adjItem.qty ? "+" : ""}{adjQty - adjItem.qty} {adjItem.unit}
+                  </div>
+                )}
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Reason / Notes</label>
+                <input value={adjNotes} onChange={e => setAdjNotes(e.target.value)} placeholder="e.g. cycle count correction" style={IS} />
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
+              <button onClick={() => setAdjModal(false)} style={B2}>Cancel</button>
+              <button onClick={submitAdjust} style={{ ...B1, background: "#f59e0b" }}>Confirm Adjustment</button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       {/* Delete Confirm */}
