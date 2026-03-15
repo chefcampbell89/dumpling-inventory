@@ -293,6 +293,18 @@ export async function setInviteCode(code) {
   if (error) throw error
 }
 
+export async function getLocations() {
+  const { data, error } = await supabase.from("app_settings").select("value").eq("key", "locations").maybeSingle()
+  if (error) throw error
+  if (!data || !data.value) return []
+  try { return JSON.parse(data.value) } catch { return [] }
+}
+
+export async function saveLocations(locs) {
+  const { error } = await supabase.from("app_settings").upsert({ key: "locations", value: JSON.stringify(locs) })
+  if (error) throw error
+}
+
 export async function changePassword(newPassword) {
   const { error } = await supabase.auth.updateUser({ password: newPassword })
   if (error) throw error
