@@ -1,4 +1,4 @@
-// APP VERSION: v80
+// APP VERSION: v81
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1068,7 +1068,7 @@ export default function App() {
           <div style={{ background: "#1e1e2e", borderRadius: 16, padding: 32, width: "90%", maxWidth: 400, border: "1px solid #333" }}>
             <div style={{ textAlign: "center", marginBottom: 24 }}>
               <Package size={40} style={{ color: "#6366f1", marginBottom: 8 }} />
-              <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Dumpling Factoryv80</h1>
+              <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Dumpling Factory</h1>
               <p style={{ margin: "4px 0 0", color: "#666", fontSize: 13 }}>Inventory Management System</p>
               <p style={{ margin: "8px 0 0", color: "#555", fontSize: 10, fontFamily: "monospace" }}>v77 | {debugInfo}</p>
             </div>
@@ -1118,7 +1118,7 @@ export default function App() {
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}><Package size={26} style={{ color: "#6366f1" }} /> Dumpling Factory</h1>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}><Package size={26} style={{ color: "#6366f1" }} /> Dumpling Factory v80</h1>
           <p style={{ margin: "2px 0 0", color: "#555", fontSize: 12 }}>Production Inventory • BOM • Purchasing</p>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
