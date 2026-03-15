@@ -8,65 +8,10 @@ export const supabase = createClient(supabaseUrl, supabaseKey, {
     persistSession: true,
     storageKey: 'dumpling-auth',
     storage: window.localStorage,
+    autoRefreshToken: true,
+    detectSessionInUrl: false,
   }
 })
-
-// ---- AUTH ----
-
-export async function signIn(email, password) {
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-  if (error) throw error
-  return data
-}
-
-export async function signUp(email, password) {
-  const { data, error } = await supabase.auth.signUp({ email, password })
-  if (error) throw error
-  return data
-}
-
-export async function signOut() {
-  const { error } = await supabase.auth.signOut()
-  if (error) throw error
-}
-
-export async function getSession() {
-  const { data: { session } } = await supabase.auth.getSession()
-  return session
-}
-
-export async function getProfile(userId) {
-  const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).single()
-  if (error) throw error
-  return { id: data.id, email: data.email, name: data.name, role: data.role }
-}
-
-export async function updateProfile(userId, updates) {
-  const { error } = await supabase.from('profiles').update(updates).eq('id', userId)
-  if (error) throw error
-}
-
-export async function fetchProfiles() {
-  const { data, error } = await supabase.from('profiles').select('*').order('created_at')
-  if (error) throw error
-  return data.map(r => ({ id: r.id, email: r.email, name: r.name, role: r.role, createdAt: r.created_at }))
-}
-
-export async function getInviteCode() {
-  const { data, error } = await supabase.from('app_settings').select('value').eq('key', 'invite_code').single()
-  if (error) throw error
-  return data.value
-}
-
-export async function setInviteCode(code) {
-  const { error } = await supabase.from('app_settings').upsert({ key: 'invite_code', value: code })
-  if (error) throw error
-}
-
-export async function changePassword(newPassword) {
-  const { error } = await supabase.auth.updateUser({ password: newPassword })
-  if (error) throw error
-}
 
 // ---- ITEMS ----
 
@@ -173,7 +118,6 @@ export async function fetchPurchaseOrders() {
   if (poErr) throw poErr
   const { data: lineData, error: lineErr } = await supabase.from('po_lines').select('*')
   if (lineErr) throw lineErr
-
   return poData.map(po => ({
     id: po.id, vendor: po.vendor_name, vendorId: po.vendor_id,
     date: po.po_date, status: po.status, total: Number(po.total),
@@ -303,4 +247,61 @@ export async function createProductionRun(run) {
     )
     if (cErr) throw cErr
   }
+}
+
+// ---- AUTH ----
+
+export async function signIn(email, password) {
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+  if (error) throw error
+  return data
+}
+
+export async function signUp(email, password) {
+  const { data, error } = await supabase.auth.signUp({ email, password })
+  if (error) throw error
+  return data
+}
+
+export async function signOut() {
+  const { error } = await supabase.auth.signOut()
+  if (error) throw error
+}
+
+export async function getSession() {
+  const { data: { session } } = await supabase.auth.getSession()
+  return session
+}
+
+export async function getProfile(userId) {
+  const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).single()
+  if (error) throw error
+  return { id: data.id, email: data.email, name: data.name, role: data.role }
+}
+
+export async function updateProfile(userId, updates) {
+  const { error } = await supabase.from('profiles').update(updates).eq('id', userId)
+  if (error) throw error
+}
+
+export async function fetchProfiles() {
+  const { data, error } = await supabase.from('profiles').select('*').order('created_at')
+  if (error) throw error
+  return data.map(r => ({ id: r.id, email: r.email, name: r.name, role: r.role, createdAt: r.created_at }))
+}
+
+export async function getInviteCode() {
+  const { data, error } = await supabase.from('app_settings').select('value').eq('key', 'invite_code').single()
+  if (error) throw error
+  return data.value
+}
+
+export async function setInviteCode(code) {
+  const { error } = await supabase.from('app_settings').upsert({ key: 'invite_code', value: code })
+  if (error) throw error
+}
+
+export async function changePassword(newPassword) {
+  const { error } = await supabase.auth.updateUser({ password: newPassword })
+  if (error) throw error
 }
