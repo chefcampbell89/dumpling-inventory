@@ -1,4 +1,4 @@
-// APP VERSION: v90
+// APP VERSION: v91
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -8,6 +8,7 @@ import {
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
   fetchProductionRuns, createProductionRun,
+  fetchInventoryLots, adjustLotQty,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles,
   getInviteCode, setInviteCode, changePassword, supabase,
 } from "./supabase";
@@ -356,6 +357,8 @@ export default function App() {
   const [prodQty, setProdQty] = useState(1);
   const [prodNotes, setProdNotes] = useState("");
   const [prodConsume, setProdConsume] = useState({});
+  const [prodLotNumber, setProdLotNumber] = useState("");
+  const [lots, setLots] = useState([]);
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState([]);
   const [stockFilter, setStockFilter] = useState("All");
@@ -394,6 +397,7 @@ export default function App() {
       if (dbPOs.length > 0) setPOs(dbPOs);
       fetchReceipts().then(r => setReceipts(r)).catch(() => {});
       fetchProductionRuns().then(r => setProdRuns(r)).catch(() => {});
+      fetchInventoryLots().then(r => setLots(r)).catch(() => {});
     } catch (err) {
       console.warn("Supabase load failed, using seed data:", err.message);
     }
@@ -536,6 +540,19 @@ export default function App() {
     return t;
   }, [allItems]);
 
+  // Lots grouped by item, sorted oldest first (FIFO)
+  const lotsByItem = useMemo(() => {
+    const map = {};
+    for (const lot of lots) {
+      if (!map[lot.itemId]) map[lot.itemId] = [];
+      map[lot.itemId].push(lot);
+    }
+    for (const key of Object.keys(map)) {
+      map[key].sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+    }
+    return map;
+  }, [lots]);
+
   const viewItems = useMemo(() => {
     let d = (tab === "inventory" || tab === "items") ? [...parts, ...assemblies] : [];
     if (search) { const s = search.toLowerCase(); d = d.filter((p) => p.name.toLowerCase().includes(s) || p.id.toLowerCase().includes(s) || (p.supplier || "").toLowerCase().includes(s)); }
@@ -588,6 +605,22 @@ export default function App() {
     return Object.values(groups).sort((a, b) => b.date.localeCompare(a.date));
   }, [viewOrders]);
   const viewVendors = useMemo(() => { if (!search) return vendors; const s = search.toLowerCase(); return vendors.filter((v) => v.name.toLowerCase().includes(s)); }, [vendors, search]);
+
+  // Order stats by group (not line items)
+  const orderStats = useMemo(() => {
+    const groups = {};
+    for (const o of orders) {
+      const key = `${o.customer}|||${o.date}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(o);
+    }
+    const gArr = Object.values(groups);
+    return {
+      total: gArr.length,
+      pending: gArr.filter(g => g.some(o => o.status === "Pending" || o.status === "Confirmed")).length,
+      fulfilled: gArr.filter(g => g.every(o => o.status === "Fulfilled" || o.status === "Cancelled")).length,
+    };
+  }, [orders]);
 
   const stats = useMemo(() => {
     const low = allItems.filter((i) => i.minStock > 0 && i.qty <= i.minStock).length;
@@ -764,6 +797,49 @@ export default function App() {
   // ---- PRODUCTION ----
   const prodAssemblyItem = useMemo(() => assemblies.find(a => a.id === prodAssembly), [assemblies, prodAssembly]);
 
+  // Find available lots from 200-level ancestors for lot inheritance
+  const suggestedLots = useMemo(() => {
+    if (!prodAssemblyItem || !prodAssemblyItem.bom) return [];
+    const prodLvl = getLevel(prodAssemblyItem.id);
+    if (prodLvl <= 200) return []; // 200-level = manual entry
+
+    // Find lots from 200-level components in the BOM tree
+    const find200Lots = (bom) => {
+      const result = [];
+      for (const line of bom) {
+        const item = allItems.find(i => i.id === line.partId);
+        if (!item) continue;
+        if (getLevel(item.id) === 200) {
+          const itemLots = (lotsByItem[item.id] || []).filter(l => l.qty > 0);
+          result.push(...itemLots);
+        } else if (item.bom) {
+          result.push(...find200Lots(item.bom));
+        }
+      }
+      return result;
+    };
+
+    // Also check direct BOM components for any level that has lots
+    const findDirectLots = (bom) => {
+      const result = [];
+      for (const line of bom) {
+        const itemLots = (lotsByItem[line.partId] || []).filter(l => l.qty > 0);
+        result.push(...itemLots);
+      }
+      return result;
+    };
+
+    const allLots = [...find200Lots(prodAssemblyItem.bom), ...findDirectLots(prodAssemblyItem.bom)];
+    // Deduplicate by lot number, keep oldest
+    const unique = {};
+    for (const l of allLots) {
+      if (!unique[l.lotNumber] || (l.productionDate || "") < (unique[l.lotNumber].productionDate || "")) {
+        unique[l.lotNumber] = l;
+      }
+    }
+    return Object.values(unique).sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+  }, [prodAssemblyItem, allItems, lotsByItem]);
+
   // prodConsume is { [partId]: true/false } — true means "consume this item from inventory"
   const initConsume = useCallback((assemblyId) => {
     // Default: check the direct children (consume sub-assemblies as whole items)
@@ -858,29 +934,61 @@ export default function App() {
     }
 
     const runId = `PROD-${new Date().toISOString().slice(0, 10)}-${String(prodRuns.length + 1).padStart(3, "0")}`;
+    const runDate = new Date().toISOString().slice(0, 10);
+    const lotNum = prodLotNumber.trim();
     const run = {
       id: runId, assemblyId: prodAssemblyItem.id, assemblyName: prodAssemblyItem.name,
-      qtyProduced: prodQty, date: new Date().toISOString().slice(0, 10),
+      qtyProduced: prodQty, date: runDate, lotNumber: lotNum,
       notes: prodNotes, createdBy: profile?.email || "", consumed,
     };
 
     const updParts = [...parts];
     const updAsm = [...assemblies];
+    const updLots = [...lots];
+
+    // Consume items from inventory and lots
     for (const c of consumed) {
       const pi = updParts.findIndex(p => p.id === c.partId);
       if (pi >= 0) { updParts[pi] = { ...updParts[pi], qty: updParts[pi].qty - c.qty }; try { await updateItemQty(c.partId, updParts[pi].qty); } catch (e) { console.warn(e.message); } }
       const ai = updAsm.findIndex(a => a.id === c.partId);
       if (ai >= 0) { updAsm[ai] = { ...updAsm[ai], qty: updAsm[ai].qty - c.qty }; try { await updateItemQty(c.partId, updAsm[ai].qty); } catch (e) { console.warn(e.message); } }
+
+      // Deduct from lots (FIFO - oldest first)
+      const itemLots = updLots.filter(l => l.itemId === c.partId && l.qty > 0).sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+      let remain = c.qty;
+      for (const lot of itemLots) {
+        if (remain <= 0) break;
+        const deduct = Math.min(lot.qty, remain);
+        lot.qty -= deduct;
+        remain -= deduct;
+        try { await adjustLotQty(c.partId, lot.lotNumber, -deduct, null, null); } catch (e) { console.warn("Lot deduct failed:", e.message); }
+      }
     }
 
+    // Add produced item to inventory and lot
     const prodIdx = updAsm.findIndex(a => a.id === prodAssemblyItem.id);
     if (prodIdx >= 0) { updAsm[prodIdx] = { ...updAsm[prodIdx], qty: updAsm[prodIdx].qty + prodQty }; try { await updateItemQty(prodAssemblyItem.id, updAsm[prodIdx].qty); } catch (e) { console.warn(e.message); } }
 
+    // Add lot entry for produced item
+    if (lotNum) {
+      const existingLot = updLots.find(l => l.itemId === prodAssemblyItem.id && l.lotNumber === lotNum);
+      if (existingLot) {
+        existingLot.qty += prodQty;
+      } else {
+        updLots.push({ id: Date.now(), itemId: prodAssemblyItem.id, lotNumber: lotNum, qty: prodQty, productionDate: runDate, sourceRunId: runId });
+      }
+      try { await adjustLotQty(prodAssemblyItem.id, lotNum, prodQty, runDate, runId); } catch (e) { console.warn("Lot add failed:", e.message); }
+    }
+
+    // Remove empty lots
+    const cleanLots = updLots.filter(l => l.qty > 0);
+
     setParts(updParts);
     setAssemblies(updAsm);
+    setLots(cleanLots);
     setProdRuns(prev => [{ ...run, createdAt: new Date().toISOString() }, ...prev]);
     try { await createProductionRun(run); } catch (e) { console.warn("Production save failed:", e.message); }
-    show(`Produced ${prodQty} × ${prodAssemblyItem.name} (${runId})`);
+    show(`Produced ${prodQty} × ${prodAssemblyItem.name}${lotNum ? " (Lot: " + lotNum + ")" : ""}`);
     setProdModal(false);
   };
 
@@ -1320,7 +1428,7 @@ export default function App() {
         {tab === "vendors" && <button onClick={() => openAdd("vendor")} style={B1}><Plus size={14} /> Vendor</button>}
         {tab === "receiving" && <button onClick={openReceiveManual} style={B1}><Plus size={14} /> Manual Receipt</button>}
         {tab === "pos" && <button onClick={openManualPO} style={B1}><Plus size={14} /> Create PO</button>}
-        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdModal(true); }} style={B1}><Hammer size={14} /> Run Production</button>}
+        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setProdModal(true); }} style={B1}><Hammer size={14} /> Run Production</button>}
       </div>
 
       {/* ================== INVENTORY TABLE ================== */}
@@ -1342,15 +1450,20 @@ export default function App() {
                 {viewItems.length === 0 ? <tr><td colSpan={13} style={{ ...TD, textAlign: "center", color: "#555", padding: 32 }}>No items found</td></tr> :
                   viewItems.map((p) => {
                     const lvl = getLevel(p.id); const low = p.minStock > 0 && p.qty <= p.minStock; const hasBom = p.bom && p.bom.length > 0; const bc = hasBom ? bomCost(p.bom) : null;
+                    const itemLots = (lotsByItem[p.id] || []).filter(l => l.qty > 0);
+                    const hasDetail = hasBom || itemLots.length > 0;
                     return (
                       <React.Fragment key={p.id}>
                         <tr style={{ background: low ? "rgba(239,68,68,0.06)" : "transparent" }}>
-                          <td style={TD}>{hasBom && <button onClick={() => tog(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 2 }}>{expanded[p.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>}</td>
+                          <td style={TD}>{hasDetail && <button onClick={() => tog(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 2 }}>{expanded[p.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>}</td>
                           <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: LEVELS[lvl]?.color || "#888" }}>{p.id}</td>
                           <td style={{ ...TD, fontWeight: 500 }}>{p.name}{low && <AlertTriangle size={13} style={{ color: "#f59e0b", verticalAlign: "middle", marginLeft: 4 }} />}</td>
                           <td style={TD}><LevelBadge level={lvl} /></td>
                           <td style={{ ...TD, fontSize: 11, color: "#888" }}>{p.costing}</td>
-                          <td style={{ ...TD, fontWeight: 600, color: low ? "#ef4444" : "#22c55e" }}>{p.qty}</td>
+                          <td style={{ ...TD, fontWeight: 600, color: low ? "#ef4444" : "#22c55e" }}>
+                            {p.qty}
+                            {itemLots.length > 0 && <span style={{ fontSize: 10, color: "#888", marginLeft: 4 }}>({itemLots.length} lot{itemLots.length > 1 ? "s" : ""})</span>}
+                          </td>
                           <td style={{ ...TD, color: "#666" }}>{p.minStock || "—"}</td>
                           <td style={{ ...TD, fontSize: 12, color: "#999" }}>{p.unit}</td>
                           <td style={{ ...TD, fontSize: 12 }}>{p.avgCost > 0 ? `$${p.avgCost.toFixed(2)}` : ""}</td>
@@ -1361,7 +1474,30 @@ export default function App() {
                             {isAdmin && <button onClick={() => openAdjust(p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#f59e0b", padding: 3 }} title="Adjust Qty"><Edit2 size={14} /></button>}
                           </td>
                         </tr>
-                        {hasBom && expanded[p.id] && <tr><td colSpan={13} style={{ ...TD, background: "#16161e", paddingLeft: 48 }}><div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>BILL OF MATERIALS</div>{renderBom(p.bom)}</td></tr>}
+                        {expanded[p.id] && (
+                          <tr><td colSpan={13} style={{ ...TD, background: "#16161e", paddingLeft: 48 }}>
+                            {itemLots.length > 0 && (
+                              <div style={{ marginBottom: hasBom ? 12 : 0 }}>
+                                <div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>LOT / BATCH BREAKDOWN</div>
+                                <table style={{ width: "auto", borderCollapse: "collapse", fontSize: 12 }}>
+                                  <thead><tr>
+                                    <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Lot #</th>
+                                    <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Qty</th>
+                                    <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Production Date</th>
+                                  </tr></thead>
+                                  <tbody>{itemLots.map(l => (
+                                    <tr key={l.lotNumber}>
+                                      <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, padding: "4px 12px", color: "#a78bfa" }}>{l.lotNumber}</td>
+                                      <td style={{ ...TD, fontWeight: 600, fontSize: 12, padding: "4px 12px", color: "#22c55e" }}>{l.qty}</td>
+                                      <td style={{ ...TD, fontSize: 12, padding: "4px 12px", color: "#888" }}>{l.productionDate || "—"}</td>
+                                    </tr>
+                                  ))}</tbody>
+                                </table>
+                              </div>
+                            )}
+                            {hasBom && <><div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>BILL OF MATERIALS</div>{renderBom(p.bom)}</>}
+                          </td></tr>
+                        )}
                       </React.Fragment>
                     );
                   })}
@@ -1433,9 +1569,9 @@ export default function App() {
       {tab === "orders" && (
         <div>
           <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-            <Stat icon={<ShoppingCart size={18} />} label="Total Orders" value={orders.length} accent="#6366f1" />
-            <Stat icon={<ClipboardList size={18} />} label="Pending" value={orders.filter(o => o.status === "Pending").length} accent="#f59e0b" />
-            <Stat icon={<PackageCheck size={18} />} label="Fulfilled" value={orders.filter(o => o.status === "Fulfilled").length} accent="#22c55e" />
+            <Stat icon={<ShoppingCart size={18} />} label="Total Orders" value={orderStats.total} accent="#6366f1" />
+            <Stat icon={<ClipboardList size={18} />} label="Pending" value={orderStats.pending} accent="#f59e0b" />
+            <Stat icon={<PackageCheck size={18} />} label="Fulfilled" value={orderStats.fulfilled} accent="#22c55e" />
           </div>
 
           {groupedOrders.length === 0 ? (
@@ -1772,7 +1908,7 @@ export default function App() {
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}>
                   <thead><tr>
-                    {["Run ID", "Date", "Assembly", "Qty", "Items Consumed", "Notes", ""].map(h => <th key={h} style={TH}>{h}</th>)}
+                    {["Run ID", "Date", "Assembly", "Lot #", "Qty", "Items Consumed", "Notes", ""].map(h => <th key={h} style={TH}>{h}</th>)}
                   </tr></thead>
                   <tbody>
                     {prodRuns.map(r => {
@@ -1789,13 +1925,14 @@ export default function App() {
                               <span style={{ fontWeight: 500 }}>{r.assemblyName}</span>
                               <span style={{ color: "#888", fontSize: 11, marginLeft: 6 }}>({r.assemblyId})</span>
                             </td>
+                            <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: r.lotNumber ? "#a78bfa" : "#555" }}>{r.lotNumber || "—"}</td>
                             <td style={{ ...TD, fontWeight: 600, color: "#22c55e" }}>+{r.qtyProduced}</td>
                             <td style={{ ...TD, fontSize: 12 }}>{r.consumed.length} items</td>
                             <td style={{ ...TD, fontSize: 12, color: "#888", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.notes || "—"}</td>
                             <td style={{ ...TD, fontSize: 11, color: "#666" }}>{r.createdBy || ""}</td>
                           </tr>
                           {isExp && (
-                            <tr><td colSpan={7} style={{ ...TD, background: "#16161e", paddingLeft: 40 }}>
+                            <tr><td colSpan={8} style={{ ...TD, background: "#16161e", paddingLeft: 40 }}>
                               <div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>CONSUMED</div>
                               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                                 <thead><tr>{["Part ID", "Name", "Qty Used", "Unit"].map(h => <th key={h} style={{ ...TH, fontSize: 10 }}>{h}</th>)}</tr></thead>
@@ -1826,7 +1963,7 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
-            <select value={prodAssembly} onChange={e => { setProdAssembly(e.target.value); setProdConsume(initConsume(e.target.value)); }} style={IS}>
+            <select value={prodAssembly} onChange={e => { const id = e.target.value; setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); }} style={IS}>
               <option value="">Select assembly...</option>
               {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
             </select>
@@ -1836,6 +1973,33 @@ export default function App() {
             <input type="number" step="any" min="0" value={prodQty} onChange={e => setProdQty(Number(e.target.value))} style={IS} />
           </div>
         </div>
+
+        {/* Lot Number */}
+        {prodAssemblyItem && (
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>
+              Lot / Batch Number {getLevel(prodAssemblyItem.id) === 200 ? "(new lot)" : "(inherited from 200-level)"}
+            </label>
+            {getLevel(prodAssemblyItem.id) === 200 ? (
+              <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} placeholder="Enter lot number (e.g. CB-20260315-01)" style={IS} />
+            ) : (
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <select value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} style={{ ...IS, flex: 1 }}>
+                  <option value="">Select lot...</option>
+                  {suggestedLots.map(l => (
+                    <option key={l.lotNumber} value={l.lotNumber}>{l.lotNumber} ({l.qty} avail, {l.productionDate || "?"})</option>
+                  ))}
+                </select>
+                <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} placeholder="Or type manually" style={{ ...IS, flex: 1 }} />
+              </div>
+            )}
+            {suggestedLots.length > 0 && getLevel(prodAssemblyItem.id) > 200 && !prodLotNumber && (
+              <button onClick={() => setProdLotNumber(suggestedLots[0].lotNumber)} style={{ marginTop: 4, background: "none", border: "none", cursor: "pointer", color: "#6366f1", fontSize: 12, padding: 0 }}>
+                Auto-select oldest (FIFO): {suggestedLots[0].lotNumber}
+              </button>
+            )}
+          </div>
+        )}
 
         {prodAssemblyItem && (
           <div style={{ marginBottom: 12, padding: "8px 12px", background: "#16161e", borderRadius: 6, fontSize: 12, color: "#888", display: "flex", gap: 16, flexWrap: "wrap" }}>
