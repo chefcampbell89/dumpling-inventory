@@ -1,4 +1,4 @@
-// APP VERSION: v101
+// APP VERSION: v102
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -416,7 +416,7 @@ export default function App() {
   const [importMapping, setImportMapping] = useState({});
   const [importMode, setImportMode] = useState("update_add");
   const [bomColMap, setBomColMap] = useState({ parent: "", component: "", qty: "" });
-  const [qtyColMap, setQtyColMap] = useState({ sku: "", qty: "", batch: "" });
+  const [qtyColMap, setQtyColMap] = useState({ sku: "", qty: "", batch: "", location: "" });
   const [replaceAllConfirm, setReplaceAllConfirm] = useState(false);
   const [adjModal, setAdjModal] = useState(false);
   const [adjItem, setAdjItem] = useState(null);
@@ -1381,7 +1381,8 @@ export default function App() {
   const QTY_ALIASES = {
     sku: "sku", id: "sku", productcode: "sku", "product code": "sku", itemid: "sku", "item id": "sku", partid: "sku",
     qty: "qty", quantity: "qty", "on hand": "qty", onhand: "qty", stock: "qty", count: "qty",
-    batch: "batch", "batch #": "batch", batchnumber: "batch", "batch number": "batch", lot: "batch", "lot #": "batch", lotnumber: "batch", "lot number": "batch", lotno: "batch", batchno: "batch",
+    batch: "batch", "batch #": "batch", batchnumber: "batch", "batch number": "batch", lot: "batch", "lot #": "batch", lotnumber: "batch", "lot number": "batch", lotno: "batch", batchno: "batch", batchorserialnumber: "batch", "batch or serial number": "batch",
+    location: "location", loc: "location", bin: "location", warehouse: "location", "default location": "location", defaultlocation: "location",
   };
 
   const parseCSVLine = (line) => {
@@ -1446,7 +1447,7 @@ export default function App() {
         });
         setBomColMap(autoMap);
       } else if (importTab === "qty") {
-        const autoMap = { sku: "", qty: "", batch: "" };
+        const autoMap = { sku: "", qty: "", batch: "", location: "" };
         data.headers.forEach((h) => {
           const n = h.toLowerCase().trim();
           if (QTY_ALIASES[n]) autoMap[QTY_ALIASES[n]] = h;
@@ -1567,22 +1568,46 @@ export default function App() {
     if (!qtyColMap.sku || !qtyColMap.qty) { show("SKU and Qty columns must be mapped", "error"); return; }
     if (importMode === "full_replace" && !replaceAllConfirm) { show("Please confirm the Full Replace checkbox", "error"); return; }
     const { rows } = importData;
-    const lotRows = [];   // {itemId, lotNumber, qty} per CSV row
+    const lotRows = [];
     const allIds = new Set(allItems.map((i) => i.id));
-    const unknownSkus = new Set();
+    const unknownSkus = new Map(); // sku -> first row with name hints
     const touchedSkus = new Set();
     const defaultLot = "CSV-" + new Date().toISOString().slice(0, 10);
     for (const row of rows) {
       const sku = (row[qtyColMap.sku] || "").trim();
       const qty = Number((row[qtyColMap.qty] || "").replace(/[^0-9.\-]/g, "")) || 0;
       const batch = qtyColMap.batch ? (row[qtyColMap.batch] || "").trim() : "";
+      const loc = qtyColMap.location ? (row[qtyColMap.location] || "").trim() : "";
       if (!sku) continue;
-      if (!allIds.has(sku)) { unknownSkus.add(sku); continue; }
+      if (!allIds.has(sku)) {
+        if (!unknownSkus.has(sku)) unknownSkus.set(sku, row);
+      }
       touchedSkus.add(sku);
-      lotRows.push({ itemId: sku, lotNumber: batch || defaultLot, qty });
+      lotRows.push({ itemId: sku, lotNumber: batch || defaultLot, qty, location: loc });
     }
-    if (touchedSkus.size === 0) { show("No matching SKUs found in CSV", "error"); return; }
-    if (unknownSkus.size > 0) { show(`Warning: ${unknownSkus.size} unknown SKU(s) skipped: ${[...unknownSkus].slice(0, 3).join(", ")}${unknownSkus.size > 3 ? "..." : ""}`, "error"); }
+    if (touchedSkus.size === 0) { show("No valid SKUs found in CSV", "error"); return; }
+
+    // Auto-create unknown SKUs in item master
+    if (unknownSkus.size > 0) {
+      const newItems = [];
+      for (const [sku, row] of unknownSkus) {
+        // Try to get a name from a "Name" or "Description" column if present
+        const nameCol = importData.headers.find(h => /^(name|description|item.?name|part.?name)$/i.test(h.trim()));
+        const name = nameCol ? (row[nameCol] || "").trim() : "";
+        newItems.push({
+          id: sku, name: name || sku, category: "Raw Material", type: "Stock", costing: "FIFO",
+          location: "", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0,
+          notes: "Auto-created from inventory CSV import", status: "Active",
+        });
+      }
+      try {
+        await bulkInsertItems(newItems);
+        // Add to local state
+        setParts((prev) => [...prev, ...newItems]);
+        show(`Auto-created ${newItems.length} new SKU(s) in Item Master`, "success");
+      } catch (e) { show(`Warning: failed to auto-create some SKUs: ${e.message}`, "error"); }
+    }
+
     try {
       if (importMode === "full_replace") {
         await zeroAllInventory();
@@ -1591,11 +1616,23 @@ export default function App() {
         setLots([]);
       }
       await bulkUpdateItemQtys(lotRows, [...touchedSkus]);
-      // Update local item qtys (sum per SKU)
+      // Update local item qtys and locations
       const qtyBySku = {};
-      for (const r of lotRows) qtyBySku[r.itemId] = (qtyBySku[r.itemId] || 0) + r.qty;
-      setParts((prev) => prev.map((p) => qtyBySku[p.id] !== undefined ? { ...p, qty: qtyBySku[p.id] } : p));
-      setAssemblies((prev) => prev.map((a) => qtyBySku[a.id] !== undefined ? { ...a, qty: qtyBySku[a.id] } : a));
+      const locsBySku = {};
+      for (const r of lotRows) {
+        qtyBySku[r.itemId] = (qtyBySku[r.itemId] || 0) + r.qty;
+        if (r.location) {
+          if (!locsBySku[r.itemId]) locsBySku[r.itemId] = new Set();
+          locsBySku[r.itemId].add(r.location);
+        }
+      }
+      const getNewLoc = (id, oldLoc) => {
+        const locs = locsBySku[id];
+        if (!locs) return oldLoc;
+        return locs.size === 1 ? [...locs][0] : "Multiple";
+      };
+      setParts((prev) => prev.map((p) => qtyBySku[p.id] !== undefined ? { ...p, qty: qtyBySku[p.id], location: getNewLoc(p.id, p.location) } : p));
+      setAssemblies((prev) => prev.map((a) => qtyBySku[a.id] !== undefined ? { ...a, qty: qtyBySku[a.id], location: getNewLoc(a.id, a.location) } : a));
       fetchInventoryLots().then((r) => setLots(r)).catch(() => {});
       show(`Inventory: ${importMode === "full_replace" ? "replaced all" : "updated"} ${touchedSkus.size} SKUs, ${lotRows.length} lot entries`);
     } catch (e) { show(`Qty import failed: ${e.message}`, "error"); return; }
@@ -3045,7 +3082,7 @@ export default function App() {
           {/* ===== INVENTORY QTY TAB ===== */}
           {importTab === "qty" && (
             <div>
-              <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Mass-update inventory quantities by SKU. CSV should have columns for SKU, Qty, and optionally Batch/Lot #. Multiple rows per SKU (different batches) are supported. Existing lots for updated SKUs will be replaced.</div>
+              <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Mass-update inventory quantities by SKU. CSV should have columns for SKU, Qty, and optionally Batch/Lot # and Location. Multiple rows per SKU are supported and will be aggregated. Unknown SKUs will be auto-added to Item Master.</div>
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
                 <span style={{ fontSize: 12, color: "#888" }}>Mode:</span>
                 <select value={importMode} onChange={(e) => { setImportMode(e.target.value); setReplaceAllConfirm(false); }} style={{ ...IS, width: "auto", minWidth: 240 }}>
@@ -3066,12 +3103,12 @@ export default function App() {
               {importData && (
                 <>
                   <div style={{ fontSize: 12, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Map Columns</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
-                    {[["sku", "SKU / Product Code *"], ["qty", "Quantity *"], ["batch", "Batch / Lot # (optional)"]].map(([k, lbl]) => (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
+                    {[["sku", "SKU / Product Code *"], ["qty", "Quantity *"], ["batch", "Batch / Lot # (optional)"], ["location", "Location (optional)"]].map(([k, lbl]) => (
                       <div key={k}>
                         <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>{lbl}</label>
                         <select value={qtyColMap[k] || ""} onChange={(e) => setQtyColMap((p) => ({ ...p, [k]: e.target.value }))} style={{ ...IS, fontSize: 12, background: qtyColMap[k] ? "#1a2a1a" : "#16161e", borderColor: qtyColMap[k] ? "#2a4a2a" : "#333" }}>
-                          <option value="">{k === "batch" ? "-- None --" : "-- Select --"}</option>
+                          <option value="">{k === "batch" || k === "location" ? "-- None --" : "-- Select --"}</option>
                           {importData.headers.map((h) => <option key={h} value={h}>{h}</option>)}
                         </select>
                       </div>
@@ -3083,8 +3120,9 @@ export default function App() {
                       const sku = (row[qtyColMap.sku] || "").trim();
                       const qty = Number((row[qtyColMap.qty] || "").replace(/[^0-9.\-]/g, "")) || 0;
                       const batch = qtyColMap.batch ? (row[qtyColMap.batch] || "").trim() : "";
+                      const loc = qtyColMap.location ? (row[qtyColMap.location] || "").trim() : "";
                       const existing = allItems.find((i) => i.id === sku);
-                      return { sku, qty, batch, name: existing?.name || "", found: !!existing };
+                      return { sku, qty, batch, loc, name: existing?.name || "", found: !!existing };
                     });
                     return (
                       <>
@@ -3095,13 +3133,15 @@ export default function App() {
                               <th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>SKU</th>
                               <th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Name</th>
                               {qtyColMap.batch && <th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Batch #</th>}
+                              {qtyColMap.location && <th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Location</th>}
                               <th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Qty</th>
                             </tr></thead>
                             <tbody>{previewRows.map((r, i) => (
                               <tr key={i}>
                                 <td style={{ ...TD, fontSize: 11, padding: "5px 8px", fontFamily: "monospace" }}>{r.sku}</td>
-                                <td style={{ ...TD, fontSize: 11, padding: "5px 8px", color: r.found ? "#ccc" : "#ef4444" }}>{r.name || "NOT FOUND"}</td>
+                                <td style={{ ...TD, fontSize: 11, padding: "5px 8px", color: r.found ? "#ccc" : "#f59e0b" }}>{r.found ? r.name : "NEW"}</td>
                                 {qtyColMap.batch && <td style={{ ...TD, fontSize: 11, padding: "5px 8px", color: r.batch ? "#a78bfa" : "#555" }}>{r.batch || "\u2014"}</td>}
+                                {qtyColMap.location && <td style={{ ...TD, fontSize: 11, padding: "5px 8px", color: r.loc ? "#38bdf8" : "#555" }}>{r.loc || "\u2014"}</td>}
                                 <td style={{ ...TD, fontSize: 11, padding: "5px 8px", fontWeight: 600, color: "#22c55e" }}>{r.qty}</td>
                               </tr>
                             ))}</tbody>
@@ -3121,7 +3161,7 @@ export default function App() {
           <span style={{ fontSize: 11, color: "#666" }}>
             {importTab === "items" && importData ? `${Object.values(importMapping).filter((v) => v && v !== "skip").length} of ${importData.headers.length} columns mapped` : ""}
             {importTab === "bom" && importData ? `${bomColMap.parent && bomColMap.component && bomColMap.qty ? "3/3" : Object.values(bomColMap).filter(Boolean).length + "/3"} columns mapped` : ""}
-            {importTab === "qty" && importData ? `${[qtyColMap.sku, qtyColMap.qty].filter(Boolean).length}/2 required mapped${qtyColMap.batch ? " + batch" : ""}` : ""}
+            {importTab === "qty" && importData ? `${[qtyColMap.sku, qtyColMap.qty].filter(Boolean).length}/2 required mapped${qtyColMap.batch ? " + batch" : ""}${qtyColMap.location ? " + location" : ""}` : ""}
           </span>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => { setImportOpen(false); clearImportData(); }} style={B2}>Cancel</button>
