@@ -1,4 +1,4 @@
-// APP VERSION: v95
+// APP VERSION: v97
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -250,18 +250,35 @@ const TD = { padding: "9px 12px", fontSize: 13, color: "#d0d0d0", borderBottom: 
 // ============================================================
 
 function GoldenLamp({ active, onClick, size = 28 }) {
+  const a = active;
   return (
-    <button onClick={active ? onClick : undefined} style={{ background: "none", border: "none", cursor: active ? "pointer" : "default", padding: 2, opacity: active ? 1 : 0.25, filter: active ? "drop-shadow(0 0 6px #fbbf24)" : "none", transition: "all 0.3s" }} title={active ? "Make a wish!" : "Wish used"}>
-      <svg width={size} height={size} viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <ellipse cx="32" cy="52" rx="22" ry="6" fill={active ? "#b8860b" : "#555"} />
-        <ellipse cx="32" cy="48" rx="20" ry="5" fill={active ? "#daa520" : "#666"} />
-        <path d="M16 48 C16 38 20 34 26 32 L38 32 C44 34 48 38 48 48" fill={active ? "#daa520" : "#666"} />
-        <path d="M26 32 C26 28 28 24 32 22 C36 24 38 28 38 32" fill={active ? "#ffd700" : "#777"} />
-        <ellipse cx="32" cy="32" rx="12" ry="3" fill={active ? "#b8860b" : "#555"} />
-        <path d="M30 22 C28 16 24 14 20 12" stroke={active ? "#ffd700" : "#777"} strokeWidth="2" strokeLinecap="round" fill="none" />
-        <circle cx="18" cy="11" r="2" fill={active ? "#fbbf24" : "#555"} />
-        {active && <circle cx="20" cy="8" r="1" fill="#fde68a" opacity="0.7" />}
-        {active && <circle cx="16" cy="13" r="1" fill="#fde68a" opacity="0.5" />}
+    <button onClick={a ? onClick : undefined} style={{ background: "none", border: "none", cursor: a ? "pointer" : "default", padding: 2, opacity: a ? 1 : 0.3, filter: a ? "drop-shadow(0 0 6px #fbbf24)" : "none", transition: "all 0.3s" }} title={a ? "Make a wish!" : "Wish used"}>
+      <svg width={size} height={size * 0.7} viewBox="0 0 230 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+        {a && <>
+          <path d="M52 48 C48 38 40 28 34 22 C28 16 22 14 20 20 C18 28 24 36 30 40" stroke="#6366f1" strokeWidth="3" strokeLinecap="round" fill="none" opacity="0.5" />
+          <path d="M48 52 C42 42 36 32 28 26 C22 22 18 18 16 24 C14 30 20 38 26 42" stroke="#818cf8" strokeWidth="2" strokeLinecap="round" fill="none" opacity="0.35" />
+          <circle cx="19" cy="18" r="2.5" fill="#818cf8" opacity="0.4" />
+          <circle cx="15" cy="24" r="1.5" fill="#a5b4fc" opacity="0.3" />
+        </>}
+        <ellipse cx="135" cy="152" rx="38" ry="6" fill={a ? "#96700a" : "#333"} />
+        <path d="M110 152 L114 146 L156 146 L160 152" fill={a ? "#b8860b" : "#444"} />
+        <path d="M110 146 Q112 140 135 138 Q158 140 160 146 Z" fill={a ? "#c49a1a" : "#555"} />
+        <path d="M55 120 C45 116 30 108 20 96 C12 86 8 76 14 70 C22 64 32 68 40 78 C46 86 50 96 55 108 Z" fill={a ? "#daa520" : "#666"} />
+        <path d="M55 116 C47 112 34 104 26 94 C18 84 16 76 20 72 C26 66 34 72 40 80 C46 88 50 98 55 108 Z" fill={a ? "#e8b830" : "#777"} />
+        <path d="M14 74 C8 72 4 78 8 86 C10 90 14 88 16 82 Z" fill={a ? "#daa520" : "#666"} />
+        <ellipse cx="135" cy="118" rx="80" ry="28" fill={a ? "#daa520" : "#666"} />
+        <ellipse cx="135" cy="114" rx="80" ry="28" fill={a ? "#e8b830" : "#777"} />
+        <ellipse cx="135" cy="108" rx="60" ry="16" fill={a ? "#f0c840" : "#888"} opacity="0.35" />
+        <ellipse cx="135" cy="90" rx="24" ry="6" fill={a ? "#96700a" : "#444"} />
+        <path d="M111 90 Q118 72 135 68 Q152 72 159 90 Z" fill={a ? "#c49a1a" : "#555"} />
+        <path d="M115 88 Q120 74 135 70 Q150 74 155 88 Z" fill={a ? "#daa520" : "#666"} />
+        <path d="M125 68 L127 62 L143 62 L145 68" fill={a ? "#b8860b" : "#555"} />
+        <ellipse cx="135" cy="62" rx="12" ry="4" fill={a ? "#c49a1a" : "#555"} />
+        <ellipse cx="135" cy="60" rx="9" ry="3" fill={a ? "#daa520" : "#666"} />
+        <ellipse cx="135" cy="57" rx="5" ry="2.5" fill={a ? "#e8b830" : "#777"} />
+        <circle cx="135" cy="53" r="3" fill={a ? "#f0c840" : "#777"} />
+        <path d="M200 106 C210 100 220 104 218 116 C216 126 208 130 200 124" stroke={a ? "#96700a" : "#444"} strokeWidth="4.5" fill="none" strokeLinecap="round" />
+        <path d="M200 106 C210 100 220 104 218 116 C216 126 208 130 200 124" stroke={a ? "#c49a1a" : "#555"} strokeWidth="3" fill="none" strokeLinecap="round" />
       </svg>
     </button>
   );
@@ -1421,7 +1438,7 @@ export default function App() {
               <div style={{ fontSize: 48, marginBottom: 4 }}>🧞</div>
               <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>Ops Genie</h1>
               <p style={{ margin: "4px 0 0", color: "#666", fontSize: 13 }}>Your wish is my command</p>
-              <p style={{ margin: "8px 0 0", color: "#555", fontSize: 10, fontFamily: "monospace" }}>v95</p>
+              <p style={{ margin: "8px 0 0", color: "#555", fontSize: 10, fontFamily: "monospace" }}>v97</p>
             </div>
 
             <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
