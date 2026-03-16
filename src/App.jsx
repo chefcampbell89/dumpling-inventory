@@ -1,4 +1,4 @@
-// APP VERSION: v102
+// APP VERSION: v104
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1572,7 +1572,6 @@ export default function App() {
     const allIds = new Set(allItems.map((i) => i.id));
     const unknownSkus = new Map(); // sku -> first row with name hints
     const touchedSkus = new Set();
-    const defaultLot = "CSV-" + new Date().toISOString().slice(0, 10);
     for (const row of rows) {
       const sku = (row[qtyColMap.sku] || "").trim();
       const qty = Number((row[qtyColMap.qty] || "").replace(/[^0-9.\-]/g, "")) || 0;
@@ -1583,7 +1582,7 @@ export default function App() {
         if (!unknownSkus.has(sku)) unknownSkus.set(sku, row);
       }
       touchedSkus.add(sku);
-      lotRows.push({ itemId: sku, lotNumber: batch || defaultLot, qty, location: loc });
+      lotRows.push({ itemId: sku, lotNumber: batch, qty, location: loc });
     }
     if (touchedSkus.size === 0) { show("No valid SKUs found in CSV", "error"); return; }
 
@@ -1864,13 +1863,15 @@ export default function App() {
                                   <thead><tr>
                                     <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Lot #</th>
                                     <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Qty</th>
+                                    <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Location</th>
                                     <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Production Date</th>
                                   </tr></thead>
-                                  <tbody>{itemLots.map(l => (
-                                    <tr key={l.lotNumber}>
-                                      <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, padding: "4px 12px", color: "#a78bfa" }}>{l.lotNumber}</td>
+                                  <tbody>{itemLots.map((l, li) => (
+                                    <tr key={l.lotNumber + "-" + li}>
+                                      <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, padding: "4px 12px", color: l.lotNumber ? "#a78bfa" : "#555" }}>{l.lotNumber || "\u2014"}</td>
                                       <td style={{ ...TD, fontWeight: 600, fontSize: 12, padding: "4px 12px", color: "#22c55e" }}>{l.qty}</td>
-                                      <td style={{ ...TD, fontSize: 12, padding: "4px 12px", color: "#888" }}>{l.productionDate || "—"}</td>
+                                      <td style={{ ...TD, fontSize: 12, padding: "4px 12px", color: l.location ? "#38bdf8" : "#555" }}>{l.location || "\u2014"}</td>
+                                      <td style={{ ...TD, fontSize: 12, padding: "4px 12px", color: "#888" }}>{l.productionDate || "\u2014"}</td>
                                     </tr>
                                   ))}</tbody>
                                 </table>
@@ -3114,7 +3115,7 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                  {!qtyColMap.batch && <div style={{ fontSize: 11, color: "#666", marginBottom: 12 }}>No batch column mapped - all quantities will be imported under a single lot (<code style={{ color: "#888" }}>CSV-{new Date().toISOString().slice(0, 10)}</code>)</div>}
+                  {!qtyColMap.batch && <div style={{ fontSize: 11, color: "#666", marginBottom: 12 }}>No lot # column mapped - inventory will be recorded without lot numbers.</div>}
                   {qtyColMap.sku && qtyColMap.qty && (() => {
                     const previewRows = importData.rows.slice(0, 10).map((row) => {
                       const sku = (row[qtyColMap.sku] || "").trim();
