@@ -1,4 +1,4 @@
-// APP VERSION: v100
+// APP VERSION: v101
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1384,6 +1384,25 @@ export default function App() {
     batch: "batch", "batch #": "batch", batchnumber: "batch", "batch number": "batch", lot: "batch", "lot #": "batch", lotnumber: "batch", "lot number": "batch", lotno: "batch", batchno: "batch",
   };
 
+  const parseCSVLine = (line) => {
+    const cols = [];
+    let i = 0, inQuotes = false, field = "";
+    while (i < line.length) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"' && line[i + 1] === '"') { field += '"'; i += 2; }
+        else if (ch === '"') { inQuotes = false; i++; }
+        else { field += ch; i++; }
+      } else {
+        if (ch === '"') { inQuotes = true; i++; }
+        else if (ch === ',') { cols.push(field.trim()); field = ""; i++; }
+        else { field += ch; i++; }
+      }
+    }
+    cols.push(field.trim());
+    return cols;
+  };
+
   const parseCSVFile = (file, callback) => {
     const reader = new FileReader();
     reader.onload = (ev) => {
@@ -1391,11 +1410,11 @@ export default function App() {
         const text = ev.target.result;
         const lines = text.split("\n").filter((l) => l.trim());
         if (lines.length < 2) { show("CSV has no data rows", "error"); return; }
-        const rawHeaders = lines[0].split(",").map((h) => h.replace(/"/g, "").trim());
+        const rawHeaders = parseCSVLine(lines[0]);
         const rows = [];
         for (let i = 1; i < lines.length; i++) {
-          const cols = lines[i].match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g)?.map((c) => c.replace(/^"|"$/g, "").trim());
-          if (!cols || cols.length < 2) continue;
+          const cols = parseCSVLine(lines[i]);
+          if (cols.length < 2 || cols.every(c => !c)) continue;
           const row = {};
           rawHeaders.forEach((h, idx) => { row[h] = cols[idx] || ""; });
           rows.push(row);
