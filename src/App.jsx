@@ -1,4 +1,4 @@
-// APP VERSION: v93
+// APP VERSION: v94
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -10,7 +10,7 @@ import {
   fetchProductionRuns, createProductionRun,
   fetchInventoryLots, adjustLotQty,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles,
-  getInviteCode, setInviteCode, getLocations, saveLocations, changePassword, supabase,
+  getInviteCode, setInviteCode, getLocations, saveLocations, getConfig, saveConfig, changePassword, supabase,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
@@ -18,14 +18,14 @@ import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
   ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
-  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, MapPin,
+  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings,
 } from "lucide-react";
 
 // ============================================================
 // CONSTANTS
 // ============================================================
 
-const LEVELS = {
+const DEFAULT_LEVELS = {
   100: { label: "100 - Raw Materials", color: "#6366f1", cat: "Raw Material" },
   200: { label: "200 - Sub-Recipe", color: "#a78bfa", cat: "Sub-Recipe" },
   250: { label: "250 - Batch / WIP", color: "#f59e0b", cat: "WIP" },
@@ -34,10 +34,11 @@ const LEVELS = {
   500: { label: "500 - Retail Case", color: "#f97316", cat: "Retail Case" },
 };
 const LEVEL_KEYS = [100, 200, 250, 300, 400, 500];
-const COSTING = ["FIFO", "FEFO - Batch"];
-const PO_STATUSES = ["Draft", "Sent", "Confirmed", "Received", "Cancelled"];
-const ORD_STATUSES = ["Pending", "Confirmed", "In Production", "Fulfilled", "Cancelled"];
-const RECEIPT_TYPES = ["PO Receipt", "Vendor delivery (no PO)", "Inventory adjustment", "Return from production", "Found/count correction"];
+const DEFAULT_COSTING = ["FIFO", "FEFO - Batch"];
+const DEFAULT_PO_STATUSES = ["Draft", "Sent", "Confirmed", "Received", "Cancelled"];
+const DEFAULT_ORD_STATUSES = ["Pending", "Confirmed", "In Production", "Fulfilled", "Cancelled"];
+const DEFAULT_RECEIPT_TYPES = ["PO Receipt", "Vendor delivery (no PO)", "Inventory adjustment", "Return from production", "Found/count correction"];
+const DEFAULT_LOCATIONS = ["Dumpling Factory", "Dumpling Factory: Walk-in Freezer", "Dumpling Factory: Dry Storage"];
 
 function getLevel(id) {
   const m = id.match(/^(\d+)-/);
@@ -274,8 +275,9 @@ function Stat({ icon, label, value, accent }) {
   );
 }
 
-function LevelBadge({ level }) {
-  const l = LEVELS[level];
+function LevelBadge({ level, levels }) {
+  const lvls = levels || DEFAULT_LEVELS;
+  const l = lvls[level];
   return l ? <span style={{ background: l.color + "22", color: l.color, padding: "2px 8px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{level}</span> : <span>{level}</span>;
 }
 
@@ -378,9 +380,21 @@ export default function App() {
   const [adjItem, setAdjItem] = useState(null);
   const [adjQty, setAdjQty] = useState(0);
   const [adjNotes, setAdjNotes] = useState("");
-  const [locations, setLocations] = useState(["Dumpling Factory", "Dumpling Factory: Walk-in Freezer", "Dumpling Factory: Dry Storage"]);
-  const [locModal, setLocModal] = useState(false);
-  const [locEdit, setLocEdit] = useState("");
+  const [locations, setLocations] = useState(DEFAULT_LOCATIONS);
+  const [cfgLevels, setCfgLevels] = useState(DEFAULT_LEVELS);
+  const [cfgOrdStatuses, setCfgOrdStatuses] = useState(DEFAULT_ORD_STATUSES);
+  const [cfgPoStatuses, setCfgPoStatuses] = useState(DEFAULT_PO_STATUSES);
+  const [cfgReceiptTypes, setCfgReceiptTypes] = useState(DEFAULT_RECEIPT_TYPES);
+  const [cfgCosting, setCfgCosting] = useState(DEFAULT_COSTING);
+  const [cfgSection, setCfgSection] = useState("users");
+  const [cfgNewItem, setCfgNewItem] = useState("");
+
+  // Config aliases (so existing JSX references keep working)
+  const LEVELS = cfgLevels;
+  const ORD_STATUSES = cfgOrdStatuses;
+  const PO_STATUSES = cfgPoStatuses;
+  const RECEIPT_TYPES = cfgReceiptTypes;
+  const COSTING = cfgCosting;
 
   // ---- Helper: load all data from Supabase ----
   const loadAllData = useCallback(async () => {
@@ -401,7 +415,13 @@ export default function App() {
       fetchReceipts().then(r => setReceipts(r)).catch(() => {});
       fetchProductionRuns().then(r => setProdRuns(r)).catch(() => {});
       fetchInventoryLots().then(r => setLots(r)).catch(() => {});
+      // Load admin configs
       getLocations().then(r => { if (r && r.length > 0) setLocations(r); }).catch(() => {});
+      getConfig("ord_statuses").then(r => { if (r) setCfgOrdStatuses(r); }).catch(() => {});
+      getConfig("po_statuses").then(r => { if (r) setCfgPoStatuses(r); }).catch(() => {});
+      getConfig("receipt_types").then(r => { if (r) setCfgReceiptTypes(r); }).catch(() => {});
+      getConfig("costing_methods").then(r => { if (r) setCfgCosting(r); }).catch(() => {});
+      getConfig("sku_levels").then(r => { if (r) setCfgLevels(r); }).catch(() => {});
     } catch (err) {
       console.warn("Supabase load failed, using seed data:", err.message);
     }
@@ -794,20 +814,6 @@ export default function App() {
     const ids = new Set(group.lines.map(o => o.id));
     setOrders(prev => prev.filter(o => !ids.has(o.id)));
     show(`Deleted order for ${group.customer}`);
-  };
-
-  const addLocation = async (name) => {
-    const trimmed = name.trim();
-    if (!trimmed || locations.includes(trimmed)) return;
-    const updated = [...locations, trimmed].sort();
-    setLocations(updated);
-    try { await saveLocations(updated); } catch (e) { console.warn("Save locations failed:", e.message); }
-  };
-
-  const removeLocation = async (name) => {
-    const updated = locations.filter(l => l !== name);
-    setLocations(updated);
-    try { await saveLocations(updated); } catch (e) { console.warn("Save locations failed:", e.message); }
   };
 
   const openAdjust = (item) => { setAdjItem(item); setAdjQty(item.qty); setAdjNotes(""); setAdjModal(true); };
@@ -1431,7 +1437,6 @@ export default function App() {
               <div style={{ fontSize: 10, color: isAdmin ? "#f59e0b" : "#666" }}>{isAdmin ? "Admin" : "User"}</div>
             </div>
             <button onClick={() => { setNewPw(""); setNewPwConfirm(""); setPwModal(true); }} style={{ ...B2, padding: "6px 8px" }} title="Change Password"><KeyRound size={14} /></button>
-            {isAdmin && <button onClick={() => { setLocEdit(""); setLocModal(true); }} style={{ ...B2, padding: "6px 8px" }} title="Manage Locations"><MapPin size={14} /></button>}
             <button onClick={handleLogout} style={{ ...B2, padding: "6px 8px", borderColor: "#ef444444", color: "#ef4444" }} title="Log Out"><LogOut size={14} /></button>
           </div>
         </div>
@@ -1456,7 +1461,7 @@ export default function App() {
         {tabBtn("receiving", "Receiving", <PackageCheck size={14} />)}
         {tabBtn("production", "Production", <Hammer size={14} />)}
         {tabBtn("log", "Transaction Log", <ScrollText size={14} />)}
-        {isAdmin && tabBtn("users", "Users", <Users size={14} />)}
+        {isAdmin && tabBtn("admin", "Admin Config", <Settings size={14} />)}
       </div>
 
       {/* Filters */}
@@ -1521,7 +1526,7 @@ export default function App() {
                           <td style={TD}>{hasDetail && <button onClick={() => tog(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 2 }}>{expanded[p.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>}</td>
                           <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: LEVELS[lvl]?.color || "#888" }}>{p.id}</td>
                           <td style={{ ...TD, fontWeight: 500 }}>{p.name}{low && <AlertTriangle size={13} style={{ color: "#f59e0b", verticalAlign: "middle", marginLeft: 4 }} />}</td>
-                          <td style={TD}><LevelBadge level={lvl} /></td>
+                          <td style={TD}><LevelBadge level={lvl} levels={LEVELS} /></td>
                           <td style={{ ...TD, fontSize: 11, color: "#888" }}>{p.costing}</td>
                           <td style={{ ...TD, fontWeight: 600, color: low ? "#ef4444" : "#22c55e" }}>
                             {p.qty}
@@ -1599,7 +1604,7 @@ export default function App() {
                           <td style={TD}>{hasBom && <button onClick={() => tog(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 2 }}>{expanded[p.id] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>}</td>
                           <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: LEVELS[lvl]?.color || "#888" }}>{p.id}</td>
                           <td style={{ ...TD, fontWeight: 500 }}>{p.name}</td>
-                          <td style={TD}><LevelBadge level={lvl} /></td>
+                          <td style={TD}><LevelBadge level={lvl} levels={LEVELS} /></td>
                           <td style={{ ...TD, fontSize: 12, color: "#999" }}>{p.category}</td>
                           <td style={{ ...TD, fontSize: 11, color: "#888" }}>{p.costing}</td>
                           <td style={{ ...TD, fontSize: 12, color: "#999" }}>{p.unit}</td>
@@ -2174,56 +2179,166 @@ export default function App() {
         </div>
       )}
 
-      {/* ================== USERS TAB (Admin only) ================== */}
-      {tab === "users" && isAdmin && (() => {
+      {/* ================== ADMIN CONFIG ================== */}
+      {tab === "admin" && isAdmin && (() => {
         if (allProfiles.length === 0) { fetchProfiles().then(p => setAllProfiles(p)).catch(() => {}); }
-        return (
+
+        const cfgSections = [
+          { id: "users", label: "Users", icon: <Users size={14} /> },
+          { id: "locations", label: "Locations", icon: <Package size={14} /> },
+          { id: "levels", label: "SKU Levels", icon: <Layers size={14} /> },
+          { id: "ordStatuses", label: "Order Statuses", icon: <ShoppingCart size={14} /> },
+          { id: "poStatuses", label: "PO Statuses", icon: <FileText size={14} /> },
+          { id: "receiptTypes", label: "Receipt Types", icon: <PackageCheck size={14} /> },
+          { id: "costing", label: "Costing Methods", icon: <DollarSign size={14} /> },
+        ];
+
+        // Generic list editor
+        const ListEditor = ({ items, setItems, configKey, label }) => (
           <div>
-            <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-              <Stat icon={<Users size={18} />} label="Total Users" value={allProfiles.length} accent="#6366f1" />
-              <Stat icon={<KeyRound size={18} />} label="Admins" value={allProfiles.filter(p => p.role === "admin").length} accent="#f59e0b" />
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <input value={cfgNewItem} onChange={e => setCfgNewItem(e.target.value)} placeholder={`New ${label.toLowerCase()}...`} style={{ ...IS, flex: 1 }} onKeyDown={async e => { if (e.key === "Enter" && cfgNewItem.trim()) { const updated = [...items, cfgNewItem.trim()]; setItems(updated); try { await saveConfig(configKey, updated); } catch (err) { console.warn(err); } setCfgNewItem(""); } }} />
+              <button onClick={async () => { if (cfgNewItem.trim()) { const updated = [...items, cfgNewItem.trim()]; setItems(updated); try { await saveConfig(configKey, updated); } catch (err) { console.warn(err); } setCfgNewItem(""); } }} style={B1}><Plus size={14} /> Add</button>
+            </div>
+            {items.length === 0 ? <p style={{ color: "#555", fontSize: 13 }}>None defined.</p> : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {items.map((item, idx) => (
+                  <div key={idx} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "#16161e", borderRadius: 6, border: "1px solid #2a2a3a" }}>
+                    <span style={{ fontSize: 13, color: "#e0e0e0" }}>{item}</span>
+                    <button onClick={async () => { const updated = items.filter((_, j) => j !== idx); setItems(updated); try { await saveConfig(configKey, updated); } catch (err) { console.warn(err); } }} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: "#666", marginTop: 8 }}>{items.length} items</div>
+          </div>
+        );
+
+        return (
+          <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+            {/* Sidebar */}
+            <div style={{ minWidth: 180, background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", flexShrink: 0 }}>
+              {cfgSections.map(s => (
+                <button key={s.id} onClick={() => { setCfgSection(s.id); setCfgNewItem(""); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "12px 16px", background: cfgSection === s.id ? "#6366f122" : "transparent", border: "none", borderLeft: cfgSection === s.id ? "3px solid #6366f1" : "3px solid transparent", cursor: "pointer", color: cfgSection === s.id ? "#e0e0e0" : "#888", fontSize: 13, textAlign: "left" }}>
+                  {s.icon} {s.label}
+                </button>
+              ))}
             </div>
 
-            {/* Invite Code */}
-            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 4 }}>Invite Code</div>
-                <div style={{ fontSize: 12, color: "#888" }}>Give this to new team members so they can sign up</div>
-              </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input id="inviteCodeInput" defaultValue="" placeholder="Loading..." style={{ ...IS, width: 180, fontFamily: "monospace", fontSize: 14, textAlign: "center" }}
-                  onFocus={async (e) => { if (!e.target.dataset.loaded) { try { const code = await getInviteCode(); e.target.value = code; e.target.dataset.loaded = "1"; } catch {} } }}
-                />
-                <button onClick={async () => { const input = document.getElementById("inviteCodeInput"); if (input?.value) { try { await setInviteCode(input.value); show("Invite code updated"); } catch (e) { show(e.message, "error"); } } }} style={B1}>Save</button>
-              </div>
-            </div>
+            {/* Content */}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {/* Users */}
+              {cfgSection === "users" && (
+                <div>
+                  <h3 style={{ margin: "0 0 16px", fontSize: 16, color: "#e0e0e0" }}>User Management</h3>
 
-            {/* User list */}
-            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
-              <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Team Members</div>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>{["Email", "Name", "Role", "Joined", "Actions"].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
-                  <tbody>
-                    {allProfiles.map(p => (
-                      <tr key={p.id}>
-                        <td style={{ ...TD, fontWeight: 500 }}>{p.email}</td>
-                        <td style={TD}>
-                          <input defaultValue={p.name || ""} onBlur={async (e) => { if (e.target.value !== (p.name || "")) { try { await updateProfile(p.id, { name: e.target.value }); setAllProfiles(prev => prev.map(x => x.id === p.id ? { ...x, name: e.target.value } : x)); show("Name updated"); } catch (err) { show(err.message, "error"); } } }} style={{ ...IS, padding: "4px 8px", fontSize: 13 }} />
-                        </td>
-                        <td style={TD}>
-                          <select value={p.role} onChange={async (e) => { try { await updateProfile(p.id, { role: e.target.value }); setAllProfiles(prev => prev.map(x => x.id === p.id ? { ...x, role: e.target.value } : x)); if (p.id === profile?.id) setProfile(prev => ({ ...prev, role: e.target.value })); show("Role updated"); } catch (err) { show(err.message, "error"); } }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 13, background: p.role === "admin" ? "#2a2a1a" : "#16161e", color: p.role === "admin" ? "#f59e0b" : "#ccc" }}>
-                            <option value="user">User</option>
-                            <option value="admin">Admin</option>
-                          </select>
-                        </td>
-                        <td style={{ ...TD, fontSize: 12, color: "#888" }}>{p.createdAt ? new Date(p.createdAt).toLocaleDateString() : "—"}</td>
-                        <td style={{ ...TD, fontSize: 12, color: "#555" }}>{p.id === profile?.id ? "(you)" : ""}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                  <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 4 }}>Invite Code</div>
+                      <div style={{ fontSize: 12, color: "#888" }}>Give this to new team members so they can sign up</div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <input id="inviteCodeInput" defaultValue="" placeholder="Loading..." style={{ ...IS, width: 180, fontFamily: "monospace", fontSize: 14, textAlign: "center" }}
+                        onFocus={async (e) => { if (!e.target.dataset.loaded) { try { const code = await getInviteCode(); e.target.value = code; e.target.dataset.loaded = "1"; } catch {} } }}
+                      />
+                      <button onClick={async () => { const input = document.getElementById("inviteCodeInput"); if (input?.value) { try { await setInviteCode(input.value); show("Invite code updated"); } catch (e) { show(e.message, "error"); } } }} style={B1}>Save</button>
+                    </div>
+                  </div>
+
+                  <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+                    <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Team Members ({allProfiles.length})</div>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead><tr>{["Email", "Name", "Role", "Joined", ""].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
+                        <tbody>
+                          {allProfiles.map(p => (
+                            <tr key={p.id}>
+                              <td style={{ ...TD, fontWeight: 500 }}>{p.email}</td>
+                              <td style={TD}>
+                                <input defaultValue={p.name || ""} onBlur={async (e) => { if (e.target.value !== (p.name || "")) { try { await updateProfile(p.id, { name: e.target.value }); setAllProfiles(prev => prev.map(x => x.id === p.id ? { ...x, name: e.target.value } : x)); show("Name updated"); } catch (err) { show(err.message, "error"); } } }} style={{ ...IS, padding: "4px 8px", fontSize: 13 }} />
+                              </td>
+                              <td style={TD}>
+                                <select value={p.role} onChange={async (e) => { try { await updateProfile(p.id, { role: e.target.value }); setAllProfiles(prev => prev.map(x => x.id === p.id ? { ...x, role: e.target.value } : x)); if (p.id === profile?.id) setProfile(prev => ({ ...prev, role: e.target.value })); show("Role updated"); } catch (err) { show(err.message, "error"); } }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 13, background: p.role === "admin" ? "#2a2a1a" : "#16161e", color: p.role === "admin" ? "#f59e0b" : "#ccc" }}>
+                                  <option value="user">User</option>
+                                  <option value="admin">Admin</option>
+                                </select>
+                              </td>
+                              <td style={{ ...TD, fontSize: 12, color: "#888" }}>{p.createdAt ? new Date(p.createdAt).toLocaleDateString() : "—"}</td>
+                              <td style={{ ...TD, fontSize: 12, color: "#555" }}>{p.id === profile?.id ? "(you)" : ""}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Locations */}
+              {cfgSection === "locations" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Inventory Locations</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Storage locations, bins, and slots used across inventory and receiving.</p>
+                  <ListEditor items={locations} setItems={setLocations} configKey="locations" label="Location" />
+                </div>
+              )}
+
+              {/* SKU Levels */}
+              {cfgSection === "levels" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>SKU Levels</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Define what each level prefix means in your product hierarchy.</p>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {LEVEL_KEYS.map(k => {
+                      const lvl = LEVELS[k] || { label: `${k}`, color: "#888", cat: "" };
+                      return (
+                        <div key={k} style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 14px", background: "#16161e", borderRadius: 8, border: `1px solid ${lvl.color}33` }}>
+                          <span style={{ width: 50, fontWeight: 700, color: lvl.color, fontSize: 16 }}>{k}</span>
+                          <input defaultValue={lvl.label} onBlur={async (e) => { const updated = { ...LEVELS, [k]: { ...lvl, label: e.target.value } }; setCfgLevels(updated); try { await saveConfig("sku_levels", updated); } catch (err) { console.warn(err); } }} placeholder="Label" style={{ ...IS, flex: 1 }} />
+                          <input defaultValue={lvl.cat} onBlur={async (e) => { const updated = { ...LEVELS, [k]: { ...lvl, cat: e.target.value } }; setCfgLevels(updated); try { await saveConfig("sku_levels", updated); } catch (err) { console.warn(err); } }} placeholder="Category name" style={{ ...IS, flex: 1 }} />
+                          <input type="color" defaultValue={lvl.color} onChange={async (e) => { const updated = { ...LEVELS, [k]: { ...lvl, color: e.target.value } }; setCfgLevels(updated); try { await saveConfig("sku_levels", updated); } catch (err) { console.warn(err); } }} style={{ width: 36, height: 36, padding: 2, background: "none", border: "1px solid #333", borderRadius: 6, cursor: "pointer" }} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Order Statuses */}
+              {cfgSection === "ordStatuses" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Order Statuses</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Status options available on customer orders.</p>
+                  <ListEditor items={cfgOrdStatuses} setItems={setCfgOrdStatuses} configKey="ord_statuses" label="Status" />
+                </div>
+              )}
+
+              {/* PO Statuses */}
+              {cfgSection === "poStatuses" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Purchase Order Statuses</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Status options available on purchase orders.</p>
+                  <ListEditor items={cfgPoStatuses} setItems={setCfgPoStatuses} configKey="po_statuses" label="Status" />
+                </div>
+              )}
+
+              {/* Receipt Types */}
+              {cfgSection === "receiptTypes" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Receipt Types</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Categories for inventory receipts (PO, adjustment, etc).</p>
+                  <ListEditor items={cfgReceiptTypes} setItems={setCfgReceiptTypes} configKey="receipt_types" label="Receipt Type" />
+                </div>
+              )}
+
+              {/* Costing Methods */}
+              {cfgSection === "costing" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Costing Methods</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Inventory costing methods available on items.</p>
+                  <ListEditor items={cfgCosting} setItems={setCfgCosting} configKey="costing_methods" label="Method" />
+                </div>
+              )}
             </div>
           </div>
         );
@@ -2586,35 +2701,6 @@ export default function App() {
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
           <button onClick={() => setPwModal(false)} style={B2}>Cancel</button>
           <button onClick={handleChangePassword} style={B1}>Update Password</button>
-        </div>
-      </Modal>
-
-      {/* Location Management Modal */}
-      <Modal open={locModal} onClose={() => setLocModal(false)} title="Manage Locations">
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <input value={locEdit} onChange={e => setLocEdit(e.target.value)} placeholder="New location name..." style={{ ...IS, flex: 1 }} onKeyDown={e => { if (e.key === "Enter" && locEdit.trim()) { addLocation(locEdit); setLocEdit(""); } }} />
-            <button onClick={() => { if (locEdit.trim()) { addLocation(locEdit); setLocEdit(""); } }} style={B1}><Plus size={14} /> Add</button>
-          </div>
-          <div style={{ fontSize: 11, color: "#888", marginBottom: 8 }}>{locations.length} locations</div>
-          {locations.length === 0 ? (
-            <p style={{ color: "#555", fontSize: 13 }}>No locations defined yet.</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {locations.map(loc => (
-                <div key={loc} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "#16161e", borderRadius: 6, border: "1px solid #2a2a3a" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <MapPin size={14} style={{ color: "#6366f1" }} />
-                    <span style={{ fontSize: 13, color: "#e0e0e0" }}>{loc}</span>
-                  </div>
-                  <button onClick={() => removeLocation(loc)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }} title="Remove"><Trash2 size={14} /></button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <button onClick={() => setLocModal(false)} style={B2}>Close</button>
         </div>
       </Modal>
 
