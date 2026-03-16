@@ -1,4 +1,4 @@
-// APP VERSION: v107
+// APP VERSION: v109
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -51,7 +51,7 @@ function getLevel(id) {
 // SAMPLE / SEED DATA (used as fallback if Supabase is empty)
 // ============================================================
 
-const R = (id,name,cost,unit,supplier="",minStock=0,qty=0) => ({id,name,category:"Raw Material",type:"Stock",costing:"FIFO",location:"Dumpling Factory",supplier,supplierCode:"",avgCost:cost,unit,minStock,qty,notes:"",status:"Active",lotTracking:false});
+const R = (id,name,cost,unit,supplier="",minStock=0,qty=0) => ({id,name,category:"Raw Material",type:"Stock",costing:"FIFO",location:"Dumpling Factory",supplier,supplierCode:"",avgCost:cost,unit,minStock,qty,notes:"",status:"Active",lotTracking:false,piecesPerUnit:0});
 const SEED_PARTS = [
   R("100-Baking Soda","Baking Soda",38.71,"24 LB","Baldor Boston, LLC",2,10),
   R("100-Blk Pepper 5 LB","Black Pepper",46.05,"5 LB","Chef's Warehouse",2,8),
@@ -109,7 +109,7 @@ const SEED_PARTS = [
   R("100-Kadoya Sesame Oil Case","Sesame Oil",213.95,"Case","",1,3),
 ];
 
-const A = (id,name,cat,unit,cost,loc,notes,bom) => ({id,name,category:cat,type:"Stock",costing:cat==="Raw Material"?"FIFO":"FEFO - Batch",location:loc||"Dumpling Factory",supplier:"",supplierCode:"",avgCost:cost,unit,minStock:0,qty:0,notes:notes||"",status:"Active",lotTracking:true,bom});
+const A = (id,name,cat,unit,cost,loc,notes,bom,pcs) => ({id,name,category:cat,type:"Stock",costing:cat==="Raw Material"?"FIFO":"FEFO - Batch",location:loc||"Dumpling Factory",supplier:"",supplierCode:"",avgCost:cost,unit,minStock:0,qty:0,notes:notes||"",status:"Active",lotTracking:true,piecesPerUnit:pcs||0,bom});
 const SEED_ASSEMBLIES = [
   // ---- CB (Cheeseburger) ----
   A("200-CB Dough","CB Dough","Sub-Recipe","Batch",0,"Dumpling Factory","",
@@ -773,7 +773,14 @@ export default function App() {
     const low = allItems.filter((i) => i.minStock > 0 && i.qty <= i.minStock).length;
     const rawVal = parts.reduce((s, p) => s + p.qty * p.avgCost, 0);
     const open = orders.filter((o) => o.status === "Pending" || o.status === "Confirmed").length;
-    return { total: allItems.length, raw: parts.length, asm: assemblies.length, low, rawVal, open };
+    // Total dumplings: sum qty * piecesPerUnit for all items that have it set
+    let totalPcs = 0;
+    for (const item of allItems) {
+      if (item.piecesPerUnit > 0 && item.qty > 0) {
+        totalPcs += item.qty * item.piecesPerUnit;
+      }
+    }
+    return { total: allItems.length, raw: parts.length, asm: assemblies.length, low, rawVal, open, totalPcs: Math.round(totalPcs) };
   }, [allItems, parts, assemblies, orders]);
 
   // ---- MRP Explosion ----
@@ -817,7 +824,7 @@ export default function App() {
     setEditItem(null);
     if (type === "item") {
       const lvl = initLevel || 100;
-      setForm({ id: `${lvl}-`, name: "", category: LEVELS[lvl]?.cat || "Raw Material", type: "Stock", costing: lvl >= 250 ? "FEFO - Batch" : "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active", lotTracking: lvl >= 200 });
+      setForm({ id: `${lvl}-`, name: "", category: LEVELS[lvl]?.cat || "Raw Material", type: "Stock", costing: lvl >= 250 ? "FEFO - Batch" : "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active", lotTracking: lvl >= 200, piecesPerUnit: 0 });
       setBomForm([]);
     }
     else if (type === "order") setForm({ id: `ORD-${String(orders.length + 1).padStart(3, "0")}`, customer: "", item: "", qty: 0, date: new Date().toISOString().slice(0, 10), status: "Pending", notes: "" });
@@ -1473,7 +1480,7 @@ export default function App() {
     const newItems = [];
     const existingIds = new Set(allItems.map((i) => i.id));
     for (const row of rows) {
-      const item = { id: "", name: "", category: "Raw Material", type: "Stock", costing: "FIFO", location: "", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active", lotTracking: false };
+      const item = { id: "", name: "", category: "Raw Material", type: "Stock", costing: "FIFO", location: "", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active", lotTracking: false, piecesPerUnit: 0 };
       for (const [csvCol, appField] of Object.entries(mapping)) {
         if (!appField || appField === "skip") continue;
         const val = row[csvCol] || "";
@@ -1486,7 +1493,7 @@ export default function App() {
       // For update_add: if item exists, preserve qty and lotTracking from DB
       if (importMode === "update_add" && existingIds.has(item.id)) {
         const existing = allItems.find((i) => i.id === item.id);
-        if (existing) { item.qty = existing.qty; item.lotTracking = existing.lotTracking; }
+        if (existing) { item.qty = existing.qty; item.lotTracking = existing.lotTracking; item.piecesPerUnit = existing.piecesPerUnit; }
       }
       newItems.push(item);
     }
@@ -1596,7 +1603,7 @@ export default function App() {
         newItems.push({
           id: sku, name: name || sku, category: "Raw Material", type: "Stock", costing: "FIFO",
           location: "", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0,
-          notes: "Auto-created from inventory CSV import", status: "Active", lotTracking: false,
+          notes: "Auto-created from inventory CSV import", status: "Active", lotTracking: false, piecesPerUnit: 0,
         });
       }
       try {
@@ -1790,7 +1797,7 @@ export default function App() {
       <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
         <Stat icon={<Package size={18} />} label="Total SKUs" value={stats.total} accent="#6366f1" />
         <Stat icon={<AlertTriangle size={18} />} label="Low Stock" value={stats.low} accent={stats.low > 0 ? "#ef4444" : "#22c55e"} />
-        <Stat icon={<DollarSign size={18} />} label="Raw Material Value" value={`$${stats.rawVal.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`} accent="#22c55e" />
+        <Stat icon={<span style={{ fontSize: 18 }}>&#129791;</span>} label="Total Dumplings" value={stats.totalPcs.toLocaleString()} accent="#f59e0b" />
         <Stat icon={<ShoppingCart size={18} />} label="Open Orders" value={orderStats.pending} accent="#ec4899" />
       </div>
 
@@ -2960,6 +2967,9 @@ export default function App() {
                     Lot Tracking
                   </label>
                 </div>
+              )}
+              {!isRaw && (
+                <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Pcs / Unit <span style={{ fontSize: 10, color: "#555" }}>(dumplings per unit)</span></label><input type="number" min="0" value={form.piecesPerUnit || 0} onChange={(e) => setForm((f) => ({ ...f, piecesPerUnit: Number(e.target.value) }))} style={IS} /></div>
               )}
               <div style={{ gridColumn: "1/-1" }}><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
             </div>
