@@ -168,17 +168,6 @@ export async function bulkInsertItems(items) {
   }
 }
 
-// -- REPLACE ALL INVENTORY --
-
-export async function deleteAllItems() {
-  // Delete all inventory lots first (FK dependency)
-  const { error: lotErr } = await supabase.from("inventory_lots").delete().not("id", "is", null)
-  if (lotErr) throw lotErr
-  // Delete all items
-  const { error } = await supabase.from("items").delete().not("id", "is", null)
-  if (error) throw error
-}
-
 // -- RECEIPTS --
 
 export async function fetchReceipts() {
@@ -250,6 +239,56 @@ export async function createProductionRun(run) {
       }))
     )
     if (cErr) throw cErr
+  }
+}
+
+// -- INVENTORY QTY BULK UPDATES --
+
+export async function zeroAllInventory() {
+  // Delete all inventory lots
+  const { error: lotErr } = await supabase.from("inventory_lots").delete().not("id", "is", null)
+  if (lotErr) throw lotErr
+  // Set all item qtys to 0
+  const { error } = await supabase.from("items").update({ qty: 0 }).not("id", "is", null)
+  if (error) throw error
+}
+
+export async function bulkUpdateItemQtys(lotRows, skuIds) {
+  // lotRows = [{itemId, lotNumber, qty}, ...]  (one per SKU+batch combo)
+  // skuIds = [string, ...]  (all unique SKU IDs being touched)
+  const batchSize = 50
+
+  // 1. Delete existing lots for all affected SKUs
+  for (let i = 0; i < skuIds.length; i += batchSize) {
+    const batch = skuIds.slice(i, i + batchSize)
+    await Promise.all(batch.map(id =>
+      supabase.from("inventory_lots").delete().eq("item_id", id)
+    ))
+  }
+
+  // 2. Insert new lot rows (one per SKU+batch)
+  const insertRows = lotRows.filter(r => r.qty > 0).map(r => ({
+    item_id: r.itemId, lot_number: r.lotNumber, qty: r.qty,
+    production_date: new Date().toISOString().slice(0, 10),
+  }))
+  if (insertRows.length > 0) {
+    for (let i = 0; i < insertRows.length; i += 500) {
+      const batch = insertRows.slice(i, i + 500)
+      const { error } = await supabase.from("inventory_lots").insert(batch)
+      if (error) throw error
+    }
+  }
+
+  // 3. Update item-level qty (sum of all lots per SKU)
+  const qtyBySku = {}
+  for (const id of skuIds) qtyBySku[id] = 0
+  for (const r of lotRows) qtyBySku[r.itemId] = (qtyBySku[r.itemId] || 0) + r.qty
+  const qtyUpdates = Object.entries(qtyBySku).map(([id, qty]) => ({ id, qty }))
+  for (let i = 0; i < qtyUpdates.length; i += batchSize) {
+    const batch = qtyUpdates.slice(i, i + batchSize)
+    await Promise.all(batch.map(u =>
+      supabase.from("items").update({ qty: u.qty }).eq("id", u.id)
+    ))
   }
 }
 
