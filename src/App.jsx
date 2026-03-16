@@ -1,4 +1,4 @@
-// APP VERSION: v94
+// APP VERSION: v95
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -9,6 +9,7 @@ import {
   fetchReceipts, createReceipt, updateItemQty,
   fetchProductionRuns, createProductionRun,
   fetchInventoryLots, adjustLotQty,
+  fetchWishes, createWish, countUserWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles,
   getInviteCode, setInviteCode, getLocations, saveLocations, getConfig, saveConfig, changePassword, supabase,
 } from "./supabase";
@@ -18,7 +19,7 @@ import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
   ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
-  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings,
+  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles,
 } from "lucide-react";
 
 // ============================================================
@@ -248,6 +249,24 @@ const TD = { padding: "9px 12px", fontSize: 13, color: "#d0d0d0", borderBottom: 
 // COMPONENTS
 // ============================================================
 
+function GoldenLamp({ active, onClick, size = 28 }) {
+  return (
+    <button onClick={active ? onClick : undefined} style={{ background: "none", border: "none", cursor: active ? "pointer" : "default", padding: 2, opacity: active ? 1 : 0.25, filter: active ? "drop-shadow(0 0 6px #fbbf24)" : "none", transition: "all 0.3s" }} title={active ? "Make a wish!" : "Wish used"}>
+      <svg width={size} height={size} viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <ellipse cx="32" cy="52" rx="22" ry="6" fill={active ? "#b8860b" : "#555"} />
+        <ellipse cx="32" cy="48" rx="20" ry="5" fill={active ? "#daa520" : "#666"} />
+        <path d="M16 48 C16 38 20 34 26 32 L38 32 C44 34 48 38 48 48" fill={active ? "#daa520" : "#666"} />
+        <path d="M26 32 C26 28 28 24 32 22 C36 24 38 28 38 32" fill={active ? "#ffd700" : "#777"} />
+        <ellipse cx="32" cy="32" rx="12" ry="3" fill={active ? "#b8860b" : "#555"} />
+        <path d="M30 22 C28 16 24 14 20 12" stroke={active ? "#ffd700" : "#777"} strokeWidth="2" strokeLinecap="round" fill="none" />
+        <circle cx="18" cy="11" r="2" fill={active ? "#fbbf24" : "#555"} />
+        {active && <circle cx="20" cy="8" r="1" fill="#fde68a" opacity="0.7" />}
+        {active && <circle cx="16" cy="13" r="1" fill="#fde68a" opacity="0.5" />}
+      </svg>
+    </button>
+  );
+}
+
 function Modal({ open, onClose, title, children, wide }) {
   if (!open) return null;
   return (
@@ -386,8 +405,14 @@ export default function App() {
   const [cfgPoStatuses, setCfgPoStatuses] = useState(DEFAULT_PO_STATUSES);
   const [cfgReceiptTypes, setCfgReceiptTypes] = useState(DEFAULT_RECEIPT_TYPES);
   const [cfgCosting, setCfgCosting] = useState(DEFAULT_COSTING);
-  const [cfgSection, setCfgSection] = useState("users");
+  const [cfgSection, setCfgSection] = useState("appName");
   const [cfgNewItem, setCfgNewItem] = useState("");
+  const [appName, setAppName] = useState("Dumpling Genie");
+  const [wishModal, setWishModal] = useState(false);
+  const [wishText, setWishText] = useState("");
+  const [wishesUsed, setWishesUsed] = useState(0);
+  const [allWishes, setAllWishes] = useState([]);
+  const MAX_WISHES = 3;
 
   // Config aliases (so existing JSX references keep working)
   const LEVELS = cfgLevels;
@@ -422,6 +447,7 @@ export default function App() {
       getConfig("receipt_types").then(r => { if (r) setCfgReceiptTypes(r); }).catch(() => {});
       getConfig("costing_methods").then(r => { if (r) setCfgCosting(r); }).catch(() => {});
       getConfig("sku_levels").then(r => { if (r) setCfgLevels(r); }).catch(() => {});
+      getConfig("app_name").then(r => { if (r) setAppName(r); }).catch(() => {});
     } catch (err) {
       console.warn("Supabase load failed, using seed data:", err.message);
     }
@@ -464,6 +490,13 @@ export default function App() {
 
     return () => { isMounted = false; subscription.unsubscribe(); };
   }, [loadAllData]);
+
+  // Load wish count when user is authenticated
+  useEffect(() => {
+    if (authUser) {
+      countUserWishes(authUser.id).then(c => setWishesUsed(c)).catch(() => {});
+    }
+  }, [authUser]);
 
   // ---- Auth handlers ----
   const handleLogin = async () => {
@@ -838,6 +871,18 @@ export default function App() {
     try { await createReceipt(rcpt); setReceipts(prev => [rcpt, ...prev]); } catch (e) { console.warn("Receipt log failed:", e.message); }
     show(`Adjusted ${adjItem.name}: ${adjItem.qty} -> ${newQty}`);
     setAdjModal(false);
+  };
+
+  const submitWish = async () => {
+    if (!wishText.trim()) { show("Tell the Genie your wish!", "error"); return; }
+    if (wishesUsed >= MAX_WISHES) { show("You have used all your wishes!", "error"); return; }
+    try {
+      await createWish({ userId: authUser.id, userEmail: profile?.email || authUser.email, wish: wishText.trim() });
+      setWishesUsed(prev => prev + 1);
+      setWishText("");
+      setWishModal(false);
+      show("Your wish has been granted... er, submitted! The Genie will review it.");
+    } catch (e) { show("Wish failed: " + e.message, "error"); }
   };
 
   const genPOs = async () => {
@@ -1373,10 +1418,10 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
           <div style={{ background: "#1e1e2e", borderRadius: 16, padding: 32, width: "90%", maxWidth: 400, border: "1px solid #333" }}>
             <div style={{ textAlign: "center", marginBottom: 24 }}>
-              <Package size={40} style={{ color: "#6366f1", marginBottom: 8 }} />
-              <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Dumpling Factory</h1>
-              <p style={{ margin: "4px 0 0", color: "#666", fontSize: 13 }}>Inventory Management System</p>
-              <p style={{ margin: "8px 0 0", color: "#555", fontSize: 10, fontFamily: "monospace" }}>v87</p>
+              <div style={{ fontSize: 48, marginBottom: 4 }}>🧞</div>
+              <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>Ops Genie</h1>
+              <p style={{ margin: "4px 0 0", color: "#666", fontSize: 13 }}>Your wish is my command</p>
+              <p style={{ margin: "8px 0 0", color: "#555", fontSize: 10, fontFamily: "monospace" }}>v95</p>
             </div>
 
             <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
@@ -1424,10 +1469,21 @@ export default function App() {
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}><Package size={26} style={{ color: "#6366f1" }} /> Dumpling Factory</h1>
-          <p style={{ margin: "2px 0 0", color: "#555", fontSize: 12 }}>Production Inventory • BOM • Purchasing</p>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}>
+            <Sparkles size={26} style={{ color: "#fbbf24" }} />
+            <span style={{ background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>{appName}</span>
+          </h1>
+          <p style={{ margin: "2px 0 0", color: "#555", fontSize: 12 }}>Powered by Ops Genie</p>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          {/* Golden Lamps */}
+          <div style={{ display: "flex", gap: 2, alignItems: "center", marginRight: 4 }}>
+            {[0, 1, 2].map(i => (
+              <GoldenLamp key={i} active={i >= wishesUsed} onClick={() => { setWishText(""); setWishModal(true); }} size={26} />
+            ))}
+            <span style={{ fontSize: 10, color: "#b8860b", marginLeft: 4 }}>{Math.max(0, MAX_WISHES - wishesUsed)} wish{MAX_WISHES - wishesUsed !== 1 ? "es" : ""}</span>
+          </div>
+          <div style={{ height: 20, width: 1, background: "#333", margin: "0 4px" }} />
           <label style={B2}><Upload size={14} /> Import CSV<input type="file" accept=".csv" onChange={importCSV} style={{ display: "none" }} /></label>
           <button onClick={exportCSV} style={B2}><Download size={14} /> Export</button>
           <div style={{ height: 20, width: 1, background: "#333", margin: "0 4px" }} />
@@ -2184,6 +2240,7 @@ export default function App() {
         if (allProfiles.length === 0) { fetchProfiles().then(p => setAllProfiles(p)).catch(() => {}); }
 
         const cfgSections = [
+          { id: "appName", label: "App Name", icon: <Sparkles size={14} /> },
           { id: "users", label: "Users", icon: <Users size={14} /> },
           { id: "locations", label: "Locations", icon: <Package size={14} /> },
           { id: "levels", label: "SKU Levels", icon: <Layers size={14} /> },
@@ -2191,6 +2248,7 @@ export default function App() {
           { id: "poStatuses", label: "PO Statuses", icon: <FileText size={14} /> },
           { id: "receiptTypes", label: "Receipt Types", icon: <PackageCheck size={14} /> },
           { id: "costing", label: "Costing Methods", icon: <DollarSign size={14} /> },
+          { id: "wishes", label: "Wishes", icon: <Sparkles size={14} /> },
         ];
 
         // Generic list editor
@@ -2227,6 +2285,28 @@ export default function App() {
 
             {/* Content */}
             <div style={{ flex: 1, minWidth: 0 }}>
+              {/* App Name */}
+              {cfgSection === "appName" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>App Name</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Your company name followed by "Genie". This appears in the header.</p>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input id="appNameInput" defaultValue={appName} placeholder="e.g. Dumpling Genie" style={{ ...IS, flex: 1, fontSize: 16, fontWeight: 600 }} />
+                    <button onClick={async () => { const input = document.getElementById("appNameInput"); if (input?.value.trim()) { const name = input.value.trim(); setAppName(name); try { await saveConfig("app_name", name); show("App name updated!"); } catch (e) { show(e.message, "error"); } } }} style={{ ...B1, background: "linear-gradient(135deg, #fbbf24, #d97706)", color: "#000" }}>
+                      <Sparkles size={14} /> Save
+                    </button>
+                  </div>
+                  <div style={{ marginTop: 16, padding: 16, background: "#16161e", borderRadius: 8, border: "1px solid #2a2a3a" }}>
+                    <div style={{ fontSize: 11, color: "#666", marginBottom: 8 }}>PREVIEW</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <Sparkles size={22} style={{ color: "#fbbf24" }} />
+                      <span style={{ fontSize: 20, fontWeight: 700, background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>{appName}</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: "#555", marginTop: 4 }}>Powered by Ops Genie</div>
+                  </div>
+                </div>
+              )}
+
               {/* Users */}
               {cfgSection === "users" && (
                 <div>
@@ -2339,6 +2419,42 @@ export default function App() {
                   <ListEditor items={cfgCosting} setItems={setCfgCosting} configKey="costing_methods" label="Method" />
                 </div>
               )}
+
+              {/* Wishes */}
+              {cfgSection === "wishes" && (() => {
+                if (allWishes.length === 0) { fetchWishes().then(w => setAllWishes(w)).catch(() => {}); }
+                return (
+                  <div>
+                    <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>
+                      <span style={{ marginRight: 8 }}>🧞</span>User Wishes
+                    </h3>
+                    <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Feature requests from your team. Each user gets {MAX_WISHES} wishes.</p>
+                    {allWishes.length === 0 ? (
+                      <div style={{ padding: 40, textAlign: "center", color: "#555", background: "#16161e", borderRadius: 10 }}>
+                        <div style={{ fontSize: 32, marginBottom: 8 }}>🧞</div>
+                        <p style={{ margin: 0 }}>No wishes yet. Your team has not rubbed the lamp!</p>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {allWishes.map(w => (
+                          <div key={w.id} style={{ background: "#16161e", borderRadius: 8, border: "1px solid #2a2a3a", padding: "14px 16px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 14, color: "#e0e0e0", marginBottom: 6, lineHeight: 1.5 }}>{w.wish}</div>
+                                <div style={{ fontSize: 11, color: "#666" }}>
+                                  From <span style={{ color: "#888" }}>{w.userEmail}</span> on {new Date(w.createdAt).toLocaleDateString()}
+                                </div>
+                              </div>
+                              <span style={{ fontSize: 24 }}>🪔</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ marginTop: 12, fontSize: 11, color: "#666" }}>{allWishes.length} wish{allWishes.length !== 1 ? "es" : ""} total</div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         );
@@ -2689,6 +2805,24 @@ export default function App() {
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button onClick={() => setDelConfirm(null)} style={B2}>Cancel</button>
           <button onClick={() => { del(delConfirm); setDelConfirm(null); }} style={{ ...B1, background: "#dc2626" }}>Delete</button>
+        </div>
+      </Modal>
+
+      {/* Wish Modal */}
+      <Modal open={wishModal} onClose={() => setWishModal(false)} title="">
+        <div style={{ textAlign: "center", paddingTop: 8 }}>
+          <div style={{ fontSize: 48, marginBottom: 8 }}>🧞</div>
+          <h2 style={{ margin: "0 0 4px", fontSize: 20, background: "linear-gradient(135deg, #fbbf24, #f59e0b)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>What do you wish for?</h2>
+          <p style={{ color: "#888", fontSize: 12, margin: "0 0 20px" }}>
+            You have {MAX_WISHES - wishesUsed} wish{MAX_WISHES - wishesUsed !== 1 ? "es" : ""} remaining. Describe a feature or capability you would love to see.
+          </p>
+          <textarea value={wishText} onChange={e => setWishText(e.target.value)} placeholder="I wish for..." rows={4} style={{ ...IS, resize: "vertical", fontSize: 14, lineHeight: 1.5, textAlign: "left" }} />
+          <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 16 }}>
+            <button onClick={() => setWishModal(false)} style={B2}>Nevermind</button>
+            <button onClick={submitWish} disabled={!wishText.trim()} style={{ ...B1, background: "linear-gradient(135deg, #fbbf24, #d97706)", color: "#000", opacity: wishText.trim() ? 1 : 0.4 }}>
+              <Sparkles size={14} /> Grant My Wish
+            </button>
+          </div>
         </div>
       </Modal>
 
