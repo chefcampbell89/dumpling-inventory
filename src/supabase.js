@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v95
+// SUPABASE VERSION: v96
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -166,6 +166,17 @@ export async function bulkInsertItems(items) {
     const { error } = await supabase.from("items").upsert(batch)
     if (error) throw error
   }
+}
+
+// -- REPLACE ALL INVENTORY --
+
+export async function deleteAllItems() {
+  // Delete all inventory lots first (FK dependency)
+  const { error: lotErr } = await supabase.from("inventory_lots").delete().not("id", "is", null)
+  if (lotErr) throw lotErr
+  // Delete all items
+  const { error } = await supabase.from("items").delete().not("id", "is", null)
+  if (error) throw error
 }
 
 // -- RECEIPTS --
