@@ -293,17 +293,21 @@ export async function setInviteCode(code) {
   if (error) throw error
 }
 
-export async function getLocations() {
-  const { data, error } = await supabase.from("app_settings").select("value").eq("key", "locations").maybeSingle()
+export async function getConfig(key) {
+  const { data, error } = await supabase.from("app_settings").select("value").eq("key", key).maybeSingle()
   if (error) throw error
-  if (!data || !data.value) return []
-  try { return JSON.parse(data.value) } catch { return [] }
+  if (!data || !data.value) return null
+  try { return JSON.parse(data.value) } catch { return data.value }
 }
 
-export async function saveLocations(locs) {
-  const { error } = await supabase.from("app_settings").upsert({ key: "locations", value: JSON.stringify(locs) })
+export async function saveConfig(key, value) {
+  const { error } = await supabase.from("app_settings").upsert({ key, value: JSON.stringify(value) })
   if (error) throw error
 }
+
+// Backward compat
+export async function getLocations() { return (await getConfig("locations")) || [] }
+export async function saveLocations(locs) { return saveConfig("locations", locs) }
 
 export async function changePassword(newPassword) {
   const { error } = await supabase.auth.updateUser({ password: newPassword })
