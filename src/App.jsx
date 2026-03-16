@@ -1,7 +1,7 @@
-// APP VERSION: v97
+// APP VERSION: v98
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
-  fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
+  fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems, deleteAllItems,
   fetchBomLines, setBomForAssembly,
   fetchVendors, upsertVendor, deleteVendor as dbDeleteVendor,
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
@@ -412,6 +412,7 @@ export default function App() {
   const [importData, setImportData] = useState(null);
   const [importMapping, setImportMapping] = useState({});
   const [importMode, setImportMode] = useState("append");
+  const [replaceAllConfirm, setReplaceAllConfirm] = useState(false);
   const [adjModal, setAdjModal] = useState(false);
   const [adjItem, setAdjItem] = useState(null);
   const [adjQty, setAdjQty] = useState(0);
@@ -1366,15 +1367,16 @@ export default function App() {
     e.target.value = "";
   };
 
-  const executeImport = () => {
+  const executeImport = async () => {
     if (!importData) return;
+    if (importMode === "replace_all" && !replaceAllConfirm) { show("Please confirm the Replace All checkbox first", "error"); return; }
     const { rows } = importData;
     const mapping = importMapping;
     const idCol = Object.entries(mapping).find(([_, v]) => v === "id")?.[0];
     const nameCol = Object.entries(mapping).find(([_, v]) => v === "name")?.[0];
     if (!idCol || !nameCol) { show("ProductCode and Name must be mapped", "error"); return; }
     const newItems = [];
-    const existingIds = new Set(allItems.map((i) => i.id));
+    const existingIds = importMode === "replace_all" ? new Set() : new Set(allItems.map((i) => i.id));
     for (const row of rows) {
       const item = { id: "", name: "", category: "Raw Material", type: "Stock", costing: "FIFO", location: "", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active" };
       for (const [csvCol, appField] of Object.entries(mapping)) {
@@ -1386,17 +1388,47 @@ export default function App() {
       }
       if (!item.id || !item.name) continue;
       if (importMode === "append" && existingIds.has(item.id)) continue;
-      if (importMode === "overwrite") existingIds.add(item.id);
+      if (importMode === "overwrite" || importMode === "replace_all") existingIds.add(item.id);
       newItems.push(item);
     }
     if (newItems.length === 0) { show(importMode === "append" ? "No new items (all IDs already exist)" : "No valid items found", "error"); setImportData(null); return; }
-    if (importMode === "overwrite") {
+
+    if (importMode === "replace_all") {
+      try {
+        await deleteAllItems();
+        setParts([]);
+        setAssemblies([]);
+        setLots([]);
+        await bulkInsertItems(newItems);
+        // Re-split into parts vs assemblies based on BOM
+        const assemblyIds = new Set(bomLines.map((b) => b.assemblyId));
+        const rawMats = newItems.filter((i) => !assemblyIds.has(i.id));
+        const asms = newItems.filter((i) => assemblyIds.has(i.id));
+        setParts(rawMats);
+        setAssemblies(asms);
+        show(`Replaced all inventory with ${newItems.length} items from CSV`);
+      } catch (e) {
+        show(`Replace All failed: ${e.message}`, "error");
+        // Reload from DB to recover
+        try {
+          const dbItems = await fetchItems();
+          const aIds = new Set(bomLines.map((b) => b.assemblyId));
+          setParts(dbItems.filter((i) => !aIds.has(i.id)));
+          setAssemblies(dbItems.filter((i) => aIds.has(i.id)));
+        } catch {}
+      }
+    } else if (importMode === "overwrite") {
       const overwriteIds = new Set(newItems.map((i) => i.id));
       setParts((prev) => [...prev.filter((p) => !overwriteIds.has(p.id)), ...newItems]);
-    } else { setParts((prev) => [...prev, ...newItems]); }
-    bulkInsertItems(newItems).catch((e) => console.warn("Bulk insert failed:", e.message));
-    show(`Imported ${newItems.length} items (${importMode})`);
+      bulkInsertItems(newItems).catch((e) => console.warn("Bulk insert failed:", e.message));
+      show(`Imported ${newItems.length} items (${importMode})`);
+    } else {
+      setParts((prev) => [...prev, ...newItems]);
+      bulkInsertItems(newItems).catch((e) => console.warn("Bulk insert failed:", e.message));
+      show(`Imported ${newItems.length} items (${importMode})`);
+    }
     setImportData(null);
+    setReplaceAllConfirm(false);
   };
 
   const exportCSV = () => {
@@ -2737,18 +2769,31 @@ export default function App() {
       </Modal>
 
       {/* CSV Import Preview */}
-      <Modal open={importData !== null} onClose={() => setImportData(null)} title={`Import CSV — ${importData?.fileName || ""}`} wide>
+      <Modal open={importData !== null} onClose={() => { setImportData(null); setReplaceAllConfirm(false); }} title={`Import CSV — ${importData?.fileName || ""}`} wide>
         <div style={{ marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <span style={{ fontSize: 13, color: "#ccc" }}>{importData?.rows.length || 0} rows found</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span style={{ fontSize: 12, color: "#888" }}>Mode:</span>
-              <select value={importMode} onChange={(e) => setImportMode(e.target.value)} style={{ ...IS, width: "auto", minWidth: 140 }}>
+              <select value={importMode} onChange={(e) => { setImportMode(e.target.value); setReplaceAllConfirm(false); }} style={{ ...IS, width: "auto", minWidth: 140 }}>
                 <option value="append">Append (skip existing IDs)</option>
                 <option value="overwrite">Overwrite (replace matching IDs)</option>
+                {isAdmin && <option value="replace_all">Replace All Inventory (admin)</option>}
               </select>
             </div>
           </div>
+          {importMode === "replace_all" && (
+            <div style={{ background: "#3a1a1a", border: "1px solid #ef4444", borderRadius: 8, padding: 12, marginBottom: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#ef4444", marginBottom: 6 }}>&#9888; DANGER: Replace All Inventory</div>
+              <div style={{ fontSize: 12, color: "#f87171", marginBottom: 10, lineHeight: 1.5 }}>
+                This will <strong>permanently delete ALL existing inventory items and inventory lots</strong> from the database and replace them with only the items in this CSV. This cannot be undone.
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={replaceAllConfirm} onChange={(e) => setReplaceAllConfirm(e.target.checked)} style={{ accentColor: "#ef4444", width: 16, height: 16 }} />
+                <span style={{ fontSize: 12, color: "#fca5a5" }}>I understand this will wipe all current inventory and replace it with this CSV</span>
+              </label>
+            </div>
+          )}
           <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Column Mapping</div>
           <div style={{ fontSize: 12, color: "#888", marginBottom: 12 }}>Match your CSV columns to inventory fields. Unmapped columns will be skipped.</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "6px 12px", alignItems: "center", marginBottom: 16 }}>
@@ -2779,8 +2824,8 @@ export default function App() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ fontSize: 12, color: "#888" }}>{Object.values(importMapping).filter((v) => v && v !== "skip").length} of {importData?.headers.length || 0} columns mapped</span>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setImportData(null)} style={B2}>Cancel</button>
-            <button onClick={executeImport} disabled={!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name")} style={{ ...B1, opacity: (!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name")) ? 0.4 : 1 }}>Import {importData?.rows.length || 0} Rows</button>
+            <button onClick={() => { setImportData(null); setReplaceAllConfirm(false); }} style={B2}>Cancel</button>
+            <button onClick={executeImport} disabled={!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name") || (importMode === "replace_all" && !replaceAllConfirm)} style={{ ...B1, background: importMode === "replace_all" ? "#dc2626" : undefined, borderColor: importMode === "replace_all" ? "#dc2626" : undefined, opacity: (!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name") || (importMode === "replace_all" && !replaceAllConfirm)) ? 0.4 : 1 }}>{importMode === "replace_all" ? `Replace All with ${importData?.rows.length || 0} Rows` : `Import ${importData?.rows.length || 0} Rows`}</button>
           </div>
         </div>
       </Modal>
