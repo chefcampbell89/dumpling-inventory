@@ -1,3 +1,4 @@
+// SUPABASE VERSION: v95
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -347,4 +348,28 @@ export async function adjustLotQty(itemId, lotNumber, delta, productionDate, sou
     })
     if (error) throw error
   }
+}
+
+// -- WISHES --
+
+export async function fetchWishes() {
+  const { data, error } = await supabase.from("wishes").select("*").order("created_at", { ascending: false })
+  if (error) throw error
+  return data.map(r => ({
+    id: r.id, userId: r.user_id, userEmail: r.user_email,
+    wish: r.wish_text, createdAt: r.created_at,
+  }))
+}
+
+export async function createWish(wish) {
+  const { error } = await supabase.from("wishes").insert({
+    user_id: wish.userId, user_email: wish.userEmail, wish_text: wish.wish,
+  })
+  if (error) throw error
+}
+
+export async function countUserWishes(userId) {
+  const { count, error } = await supabase.from("wishes").select("*", { count: "exact", head: true }).eq("user_id", userId)
+  if (error) throw error
+  return count || 0
 }
