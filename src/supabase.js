@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v97
+// SUPABASE VERSION: v98
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -254,9 +254,19 @@ export async function zeroAllInventory() {
 }
 
 export async function bulkUpdateItemQtys(lotRows, skuIds) {
-  // lotRows = [{itemId, lotNumber, qty}, ...]  (one per SKU+batch combo)
+  // lotRows = [{itemId, lotNumber, qty, location}, ...]
   // skuIds = [string, ...]  (all unique SKU IDs being touched)
   const batchSize = 50
+
+  // 0. Aggregate duplicate rows (same itemId+lotNumber+location → sum qty)
+  const aggKey = (r) => `${r.itemId}|||${r.lotNumber}|||${r.location || ""}`
+  const aggMap = {}
+  for (const r of lotRows) {
+    const k = aggKey(r)
+    if (aggMap[k]) { aggMap[k].qty += r.qty }
+    else { aggMap[k] = { ...r } }
+  }
+  const aggregated = Object.values(aggMap)
 
   // 1. Delete existing lots for all affected SKUs
   for (let i = 0; i < skuIds.length; i += batchSize) {
@@ -266,10 +276,11 @@ export async function bulkUpdateItemQtys(lotRows, skuIds) {
     ))
   }
 
-  // 2. Insert new lot rows (one per SKU+batch)
-  const insertRows = lotRows.filter(r => r.qty > 0).map(r => ({
+  // 2. Insert new lot rows (one per unique SKU+batch+location)
+  const insertRows = aggregated.filter(r => r.qty > 0).map(r => ({
     item_id: r.itemId, lot_number: r.lotNumber, qty: r.qty,
     production_date: new Date().toISOString().slice(0, 10),
+    location: r.location || "",
   }))
   if (insertRows.length > 0) {
     for (let i = 0; i < insertRows.length; i += 500) {
@@ -282,12 +293,29 @@ export async function bulkUpdateItemQtys(lotRows, skuIds) {
   // 3. Update item-level qty (sum of all lots per SKU)
   const qtyBySku = {}
   for (const id of skuIds) qtyBySku[id] = 0
-  for (const r of lotRows) qtyBySku[r.itemId] = (qtyBySku[r.itemId] || 0) + r.qty
+  for (const r of aggregated) qtyBySku[r.itemId] = (qtyBySku[r.itemId] || 0) + r.qty
   const qtyUpdates = Object.entries(qtyBySku).map(([id, qty]) => ({ id, qty }))
   for (let i = 0; i < qtyUpdates.length; i += batchSize) {
     const batch = qtyUpdates.slice(i, i + batchSize)
     await Promise.all(batch.map(u =>
       supabase.from("items").update({ qty: u.qty }).eq("id", u.id)
+    ))
+  }
+
+  // 4. Update item-level location (single location or "Multiple")
+  const locsBySku = {}
+  for (const r of aggregated) {
+    if (!r.location) continue
+    if (!locsBySku[r.itemId]) locsBySku[r.itemId] = new Set()
+    locsBySku[r.itemId].add(r.location)
+  }
+  const locUpdates = Object.entries(locsBySku).map(([id, locs]) => ({
+    id, location: locs.size === 1 ? [...locs][0] : "Multiple",
+  }))
+  for (let i = 0; i < locUpdates.length; i += batchSize) {
+    const batch = locUpdates.slice(i, i + batchSize)
+    await Promise.all(batch.map(u =>
+      supabase.from("items").update({ location: u.location }).eq("id", u.id)
     ))
   }
 }
@@ -374,10 +402,11 @@ export async function fetchInventoryLots() {
     id: r.id, itemId: r.item_id, lotNumber: r.lot_number,
     qty: Number(r.qty), productionDate: r.production_date,
     sourceRunId: r.source_run_id, createdAt: r.created_at,
+    location: r.location || "",
   }))
 }
 
-export async function adjustLotQty(itemId, lotNumber, delta, productionDate, sourceRunId) {
+export async function adjustLotQty(itemId, lotNumber, delta, productionDate, sourceRunId, location) {
   const { data: existing, error: fetchErr } = await supabase.from("inventory_lots")
     .select("*").eq("item_id", itemId).eq("lot_number", lotNumber).maybeSingle()
   if (fetchErr) throw fetchErr
@@ -395,6 +424,7 @@ export async function adjustLotQty(itemId, lotNumber, delta, productionDate, sou
     const { error } = await supabase.from("inventory_lots").insert({
       item_id: itemId, lot_number: lotNumber, qty: delta,
       production_date: productionDate || null, source_run_id: sourceRunId || null,
+      location: location || "",
     })
     if (error) throw error
   }
