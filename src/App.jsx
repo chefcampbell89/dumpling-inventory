@@ -1,7 +1,7 @@
-// APP VERSION: v98
+// APP VERSION: v99
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
-  fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems, deleteAllItems,
+  fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
   fetchBomLines, setBomForAssembly,
   fetchVendors, upsertVendor, deleteVendor as dbDeleteVendor,
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
@@ -9,6 +9,7 @@ import {
   fetchReceipts, createReceipt, updateItemQty,
   fetchProductionRuns, createProductionRun,
   fetchInventoryLots, adjustLotQty,
+  zeroAllInventory, bulkUpdateItemQtys,
   fetchWishes, createWish, countUserWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles,
   getInviteCode, setInviteCode, getLocations, saveLocations, getConfig, saveConfig, changePassword, supabase,
@@ -409,9 +410,13 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [delConfirm, setDelConfirm] = useState(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importTab, setImportTab] = useState("items");
   const [importData, setImportData] = useState(null);
   const [importMapping, setImportMapping] = useState({});
-  const [importMode, setImportMode] = useState("append");
+  const [importMode, setImportMode] = useState("update_add");
+  const [bomColMap, setBomColMap] = useState({ parent: "", component: "", qty: "" });
+  const [qtyColMap, setQtyColMap] = useState({ sku: "", qty: "", batch: "" });
   const [replaceAllConfirm, setReplaceAllConfirm] = useState(false);
   const [adjModal, setAdjModal] = useState(false);
   const [adjItem, setAdjItem] = useState(null);
@@ -1052,6 +1057,7 @@ export default function App() {
   const submitProduction = async () => {
     if (!prodAssemblyItem) { show("Select an assembly", "error"); return; }
     if (prodQty <= 0) { show("Qty must be > 0", "error"); return; }
+    if (!prodLotNumber.trim()) { show("Batch / Lot number is required", "error"); return; }
     const validationErrors = getValidationErrors(prodAssemblyItem.bom, prodQty);
     if (validationErrors.length > 0) { show("Not all materials are accounted for: " + validationErrors[0], "error"); return; }
     const consumed = getConsumedItems(prodAssemblyItem.bom, prodQty);
@@ -1299,7 +1305,7 @@ export default function App() {
     </div>
   );
 
-  // ---- CSV IMPORT WITH PREVIEW ----
+  // ---- CSV IMPORT SYSTEM (3 workflows) ----
   const APP_FIELDS = [
     { key: "id", label: "ProductCode (ID)", required: true },
     { key: "name", label: "Name", required: true },
@@ -1312,7 +1318,6 @@ export default function App() {
     { key: "avgCost", label: "Average Cost", numeric: true },
     { key: "unit", label: "Unit of Measure" },
     { key: "minStock", label: "Min Before Reorder", numeric: true },
-    { key: "qty", label: "Qty On Hand", numeric: true },
     { key: "notes", label: "Notes" },
     { key: "status", label: "Status" },
   ];
@@ -1329,14 +1334,23 @@ export default function App() {
     "averagecost (last 3 orders)": "avgCost", averagecost: "avgCost", avgcost: "avgCost", cost: "avgCost", "average cost": "avgCost", "supplier price": "avgCost", supplierprice: "avgCost",
     defaultunitofmeasure: "unit", "default unit of measure": "unit", unit: "unit", uom: "unit",
     minimumbeforereorder: "minStock", "minimum before reorder": "minStock", minstock: "minStock", min: "minStock",
-    qty: "qty", quantity: "qty", "on hand": "qty",
     notes: "notes",
     status: "status",
   };
 
-  const importCSV = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  const BOM_ALIASES = {
+    parent: "parent", parentsku: "parent", "parent sku": "parent", assembly: "parent", assemblyid: "parent", "assembly id": "parent", "parent id": "parent", parentid: "parent",
+    component: "component", componentsku: "component", "component sku": "component", part: "component", partid: "component", "part id": "component", "component id": "component", child: "component", childsku: "component",
+    qty: "qty", quantity: "qty", "qty per": "qty", qtyper: "qty", "qty per assembly": "qty", amount: "qty",
+  };
+
+  const QTY_ALIASES = {
+    sku: "sku", id: "sku", productcode: "sku", "product code": "sku", itemid: "sku", "item id": "sku", partid: "sku",
+    qty: "qty", quantity: "qty", "on hand": "qty", onhand: "qty", stock: "qty", count: "qty",
+    batch: "batch", "batch #": "batch", batchnumber: "batch", "batch number": "batch", lot: "batch", "lot #": "batch", lotnumber: "batch", "lot number": "batch", lotno: "batch", batchno: "batch",
+  };
+
+  const parseCSVFile = (file, callback) => {
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
@@ -1353,30 +1367,57 @@ export default function App() {
           rows.push(row);
         }
         if (rows.length === 0) { show("No valid rows found", "error"); return; }
-        const autoMap = {};
-        rawHeaders.forEach((h) => {
-          const normalized = h.toLowerCase().trim();
-          if (HEADER_ALIASES[normalized]) { autoMap[h] = HEADER_ALIASES[normalized]; }
-        });
-        setImportData({ headers: rawHeaders, rows, fileName: file.name });
-        setImportMapping(autoMap);
-        setImportMode("append");
+        callback({ headers: rawHeaders, rows, fileName: file.name });
       } catch { show("Failed to read CSV", "error"); }
     };
     reader.readAsText(file);
+  };
+
+  const handleImportFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    parseCSVFile(file, (data) => {
+      setImportData(data);
+      if (importTab === "items") {
+        const autoMap = {};
+        data.headers.forEach((h) => {
+          const n = h.toLowerCase().trim();
+          if (HEADER_ALIASES[n]) autoMap[h] = HEADER_ALIASES[n];
+        });
+        setImportMapping(autoMap);
+      } else if (importTab === "bom") {
+        const autoMap = { parent: "", component: "", qty: "" };
+        data.headers.forEach((h) => {
+          const n = h.toLowerCase().trim();
+          if (BOM_ALIASES[n]) autoMap[BOM_ALIASES[n]] = h;
+        });
+        setBomColMap(autoMap);
+      } else if (importTab === "qty") {
+        const autoMap = { sku: "", qty: "", batch: "" };
+        data.headers.forEach((h) => {
+          const n = h.toLowerCase().trim();
+          if (QTY_ALIASES[n]) autoMap[QTY_ALIASES[n]] = h;
+        });
+        setQtyColMap(autoMap);
+      }
+    });
     e.target.value = "";
   };
 
-  const executeImport = async () => {
+  const clearImportData = () => { setImportData(null); setImportMapping({}); setReplaceAllConfirm(false); };
+
+  const switchImportTab = (t) => { setImportTab(t); clearImportData(); setImportMode(t === "items" ? "update_add" : t === "bom" ? "replace" : "update_listed"); };
+
+  // ---- ITEM MASTER IMPORT ----
+  const executeItemImport = async () => {
     if (!importData) return;
-    if (importMode === "replace_all" && !replaceAllConfirm) { show("Please confirm the Replace All checkbox first", "error"); return; }
     const { rows } = importData;
     const mapping = importMapping;
     const idCol = Object.entries(mapping).find(([_, v]) => v === "id")?.[0];
     const nameCol = Object.entries(mapping).find(([_, v]) => v === "name")?.[0];
     if (!idCol || !nameCol) { show("ProductCode and Name must be mapped", "error"); return; }
     const newItems = [];
-    const existingIds = importMode === "replace_all" ? new Set() : new Set(allItems.map((i) => i.id));
+    const existingIds = new Set(allItems.map((i) => i.id));
     for (const row of rows) {
       const item = { id: "", name: "", category: "Raw Material", type: "Stock", costing: "FIFO", location: "", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active" };
       for (const [csvCol, appField] of Object.entries(mapping)) {
@@ -1387,48 +1428,125 @@ export default function App() {
         else { item[appField] = val; }
       }
       if (!item.id || !item.name) continue;
-      if (importMode === "append" && existingIds.has(item.id)) continue;
-      if (importMode === "overwrite" || importMode === "replace_all") existingIds.add(item.id);
+      if (importMode === "add_only" && existingIds.has(item.id)) continue;
+      // For update_add: if item exists, merge with existing data (preserve qty from DB)
+      if (importMode === "update_add" && existingIds.has(item.id)) {
+        const existing = allItems.find((i) => i.id === item.id);
+        if (existing) item.qty = existing.qty; // preserve existing qty
+      }
       newItems.push(item);
     }
-    if (newItems.length === 0) { show(importMode === "append" ? "No new items (all IDs already exist)" : "No valid items found", "error"); setImportData(null); return; }
+    if (newItems.length === 0) { show(importMode === "add_only" ? "No new items (all IDs already exist)" : "No valid items found", "error"); return; }
+    try {
+      await bulkInsertItems(newItems);
+      // Re-split into parts vs assemblies by reloading BOM
+      const dbBom = await fetchBomLines();
+      const assemblyIds = new Set(dbBom.map((b) => b.assemblyId));
+      const updatedIds = new Set(newItems.map((i) => i.id));
+      setParts((prev) => [...prev.filter((p) => !updatedIds.has(p.id)), ...newItems.filter((i) => !assemblyIds.has(i.id))]);
+      setAssemblies((prev) => [...prev.filter((a) => !updatedIds.has(a.id)), ...newItems.filter((i) => assemblyIds.has(i.id)).map((a) => ({ ...a, bom: dbBom.filter((b) => b.assemblyId === a.id).map((b) => ({ partId: b.partId, qty: b.qty })) }))]);
+      show(`Item Master: ${importMode === "add_only" ? "added" : "updated/added"} ${newItems.length} items`);
+    } catch (e) { show(`Import failed: ${e.message}`, "error"); return; }
+    setImportOpen(false); clearImportData();
+  };
 
-    if (importMode === "replace_all") {
-      try {
-        await deleteAllItems();
-        setParts([]);
-        setAssemblies([]);
-        setLots([]);
-        await bulkInsertItems(newItems);
-        // Re-split into parts vs assemblies based on BOM
-        const assemblyIds = new Set(bomLines.map((b) => b.assemblyId));
-        const rawMats = newItems.filter((i) => !assemblyIds.has(i.id));
-        const asms = newItems.filter((i) => assemblyIds.has(i.id));
-        setParts(rawMats);
-        setAssemblies(asms);
-        show(`Replaced all inventory with ${newItems.length} items from CSV`);
-      } catch (e) {
-        show(`Replace All failed: ${e.message}`, "error");
-        // Reload from DB to recover
-        try {
-          const dbItems = await fetchItems();
-          const aIds = new Set(bomLines.map((b) => b.assemblyId));
-          setParts(dbItems.filter((i) => !aIds.has(i.id)));
-          setAssemblies(dbItems.filter((i) => aIds.has(i.id)));
-        } catch {}
-      }
-    } else if (importMode === "overwrite") {
-      const overwriteIds = new Set(newItems.map((i) => i.id));
-      setParts((prev) => [...prev.filter((p) => !overwriteIds.has(p.id)), ...newItems]);
-      bulkInsertItems(newItems).catch((e) => console.warn("Bulk insert failed:", e.message));
-      show(`Imported ${newItems.length} items (${importMode})`);
-    } else {
-      setParts((prev) => [...prev, ...newItems]);
-      bulkInsertItems(newItems).catch((e) => console.warn("Bulk insert failed:", e.message));
-      show(`Imported ${newItems.length} items (${importMode})`);
+  // ---- BOM / ASSEMBLIES IMPORT ----
+  const executeBomImport = async () => {
+    if (!importData) return;
+    const { rows } = importData;
+    if (!bomColMap.parent || !bomColMap.component || !bomColMap.qty) { show("All 3 columns must be mapped: Parent, Component, Qty", "error"); return; }
+    // Group by parent
+    const byParent = {};
+    for (const row of rows) {
+      const parentId = (row[bomColMap.parent] || "").trim();
+      const compId = (row[bomColMap.component] || "").trim();
+      const qty = Number((row[bomColMap.qty] || "").replace(/[^0-9.\-]/g, "")) || 0;
+      if (!parentId || !compId || qty <= 0) continue;
+      if (!byParent[parentId]) byParent[parentId] = [];
+      byParent[parentId].push({ partId: compId, qty });
     }
-    setImportData(null);
-    setReplaceAllConfirm(false);
+    const parentIds = Object.keys(byParent);
+    if (parentIds.length === 0) { show("No valid BOM rows found", "error"); return; }
+    // Validate all SKUs exist
+    const allIds = new Set(allItems.map((i) => i.id));
+    const missing = new Set();
+    for (const pid of parentIds) {
+      if (!allIds.has(pid)) missing.add(pid);
+      for (const line of byParent[pid]) { if (!allIds.has(line.partId)) missing.add(line.partId); }
+    }
+    if (missing.size > 0) { show(`SKUs not found in Item Master: ${[...missing].slice(0, 5).join(", ")}${missing.size > 5 ? ` +${missing.size - 5} more` : ""}`, "error"); return; }
+    try {
+      let totalLines = 0;
+      // Fetch current BOM for merge mode
+      const currentBom = await fetchBomLines();
+      for (const parentId of parentIds) {
+        if (importMode === "replace") {
+          await setBomForAssembly(parentId, byParent[parentId]);
+        } else {
+          // Merge: keep existing lines, add new component IDs
+          const existingLines = currentBom.filter((b) => b.assemblyId === parentId);
+          const existingCompIds = new Set(existingLines.map((l) => l.partId));
+          const merged = [...existingLines.map((l) => ({ partId: l.partId, qty: l.qty }))];
+          for (const newLine of byParent[parentId]) {
+            if (existingCompIds.has(newLine.partId)) {
+              const idx = merged.findIndex((m) => m.partId === newLine.partId);
+              if (idx >= 0) merged[idx].qty = newLine.qty;
+            } else { merged.push(newLine); }
+          }
+          await setBomForAssembly(parentId, merged);
+        }
+        totalLines += byParent[parentId].length;
+      }
+      // Reload BOM data and reclassify
+      const freshBom = await fetchBomLines();
+      const freshAssemblyIds = new Set(freshBom.map((b) => b.assemblyId));
+      const allCurrent = [...parts, ...assemblies];
+      setParts(allCurrent.filter((i) => !freshAssemblyIds.has(i.id)));
+      setAssemblies(allCurrent.filter((i) => freshAssemblyIds.has(i.id)).map((a) => ({ ...a, bom: freshBom.filter((b) => b.assemblyId === a.id).map((b) => ({ partId: b.partId, qty: b.qty })) })));
+      show(`BOM: ${importMode === "replace" ? "replaced" : "merged"} ${parentIds.length} assemblies, ${totalLines} lines`);
+    } catch (e) { show(`BOM import failed: ${e.message}`, "error"); return; }
+    setImportOpen(false); clearImportData();
+  };
+
+  // ---- INVENTORY QTY IMPORT ----
+  const executeQtyImport = async () => {
+    if (!importData) return;
+    if (!qtyColMap.sku || !qtyColMap.qty) { show("SKU and Qty columns must be mapped", "error"); return; }
+    if (importMode === "full_replace" && !replaceAllConfirm) { show("Please confirm the Full Replace checkbox", "error"); return; }
+    const { rows } = importData;
+    const lotRows = [];   // {itemId, lotNumber, qty} per CSV row
+    const allIds = new Set(allItems.map((i) => i.id));
+    const unknownSkus = new Set();
+    const touchedSkus = new Set();
+    const defaultLot = "CSV-" + new Date().toISOString().slice(0, 10);
+    for (const row of rows) {
+      const sku = (row[qtyColMap.sku] || "").trim();
+      const qty = Number((row[qtyColMap.qty] || "").replace(/[^0-9.\-]/g, "")) || 0;
+      const batch = qtyColMap.batch ? (row[qtyColMap.batch] || "").trim() : "";
+      if (!sku) continue;
+      if (!allIds.has(sku)) { unknownSkus.add(sku); continue; }
+      touchedSkus.add(sku);
+      lotRows.push({ itemId: sku, lotNumber: batch || defaultLot, qty });
+    }
+    if (touchedSkus.size === 0) { show("No matching SKUs found in CSV", "error"); return; }
+    if (unknownSkus.size > 0) { show(`Warning: ${unknownSkus.size} unknown SKU(s) skipped: ${[...unknownSkus].slice(0, 3).join(", ")}${unknownSkus.size > 3 ? "..." : ""}`, "error"); }
+    try {
+      if (importMode === "full_replace") {
+        await zeroAllInventory();
+        setParts((prev) => prev.map((p) => ({ ...p, qty: 0 })));
+        setAssemblies((prev) => prev.map((a) => ({ ...a, qty: 0 })));
+        setLots([]);
+      }
+      await bulkUpdateItemQtys(lotRows, [...touchedSkus]);
+      // Update local item qtys (sum per SKU)
+      const qtyBySku = {};
+      for (const r of lotRows) qtyBySku[r.itemId] = (qtyBySku[r.itemId] || 0) + r.qty;
+      setParts((prev) => prev.map((p) => qtyBySku[p.id] !== undefined ? { ...p, qty: qtyBySku[p.id] } : p));
+      setAssemblies((prev) => prev.map((a) => qtyBySku[a.id] !== undefined ? { ...a, qty: qtyBySku[a.id] } : a));
+      fetchInventoryLots().then((r) => setLots(r)).catch(() => {});
+      show(`Inventory: ${importMode === "full_replace" ? "replaced all" : "updated"} ${touchedSkus.size} SKUs, ${lotRows.length} lot entries`);
+    } catch (e) { show(`Qty import failed: ${e.message}`, "error"); return; }
+    setImportOpen(false); clearImportData();
   };
 
   const exportCSV = () => {
@@ -1533,7 +1651,7 @@ export default function App() {
             <span style={{ fontSize: 10, color: "#b8860b", marginLeft: 4 }}>{Math.max(0, MAX_WISHES - wishesUsed)} wish{MAX_WISHES - wishesUsed !== 1 ? "es" : ""}</span>
           </div>
           <div style={{ height: 20, width: 1, background: "#333", margin: "0 4px" }} />
-          <label style={B2}><Upload size={14} /> Import CSV<input type="file" accept=".csv" onChange={importCSV} style={{ display: "none" }} /></label>
+          <button onClick={() => { setImportOpen(true); setImportTab("items"); clearImportData(); setImportMode("update_add"); }} style={B2}><Upload size={14} /> Import Data</button>
           <button onClick={exportCSV} style={B2}><Download size={14} /> Export</button>
           <div style={{ height: 20, width: 1, background: "#333", margin: "0 4px" }} />
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2154,13 +2272,13 @@ export default function App() {
         {prodAssemblyItem && (
           <div style={{ marginBottom: 16 }}>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>
-              Lot / Batch Number {getLevel(prodAssemblyItem.id) === 200 ? "(new lot)" : "(inherited from 200-level)"}
+              Lot / Batch Number <span style={{ color: "#ef4444" }}>*</span> {getLevel(prodAssemblyItem.id) === 200 ? "(new lot)" : "(inherited from 200-level)"}
             </label>
             {getLevel(prodAssemblyItem.id) === 200 ? (
-              <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} placeholder="Enter lot number (e.g. CB-20260315-01)" style={IS} />
+              <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} placeholder="Enter lot number (e.g. CB-20260315-01)" style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
             ) : (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <select value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} style={{ ...IS, flex: 1 }}>
+                <select value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} style={{ ...IS, flex: 1, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }}>
                   <option value="">Select lot...</option>
                   {suggestedLots.map(l => (
                     <option key={l.lotNumber} value={l.lotNumber}>{l.lotNumber} ({l.qty} avail, {l.productionDate || "?"})</option>
@@ -2169,6 +2287,7 @@ export default function App() {
                 <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} placeholder="Or type manually" style={{ ...IS, flex: 1 }} />
               </div>
             )}
+            {!prodLotNumber.trim() && <div style={{ fontSize: 11, color: "#ef4444", marginTop: 4 }}>Required - enter or select a batch number</div>}
             {suggestedLots.length > 0 && getLevel(prodAssemblyItem.id) > 200 && !prodLotNumber && (
               <button onClick={() => setProdLotNumber(suggestedLots[0].lotNumber)} style={{ marginTop: 4, background: "none", border: "none", cursor: "pointer", color: "#6366f1", fontSize: 12, padding: 0 }}>
                 Auto-select oldest (FIFO): {suggestedLots[0].lotNumber}
@@ -2230,7 +2349,7 @@ export default function App() {
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button onClick={() => setProdModal(false)} style={B2}>Cancel</button>
-          <button onClick={submitProduction} disabled={!prodAssemblyItem || prodQty <= 0 || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)} style={{ ...B1, background: "#8b5cf6", opacity: (!prodAssemblyItem || prodQty <= 0 || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}><Hammer size={14} /> Run Production</button>
+          <button onClick={submitProduction} disabled={!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)} style={{ ...B1, background: "#8b5cf6", opacity: (!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}><Hammer size={14} /> Run Production</button>
         </div>
       </Modal>
 
@@ -2768,64 +2887,200 @@ export default function App() {
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>{editItem ? "Update" : "Add"}</button></div>
       </Modal>
 
-      {/* CSV Import Preview */}
-      <Modal open={importData !== null} onClose={() => { setImportData(null); setReplaceAllConfirm(false); }} title={`Import CSV — ${importData?.fileName || ""}`} wide>
+      {/* Data Import Modal (3 workflows) */}
+      <Modal open={importOpen} onClose={() => { setImportOpen(false); clearImportData(); }} title="Import Data" wide>
         <div style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <span style={{ fontSize: 13, color: "#ccc" }}>{importData?.rows.length || 0} rows found</span>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <span style={{ fontSize: 12, color: "#888" }}>Mode:</span>
-              <select value={importMode} onChange={(e) => { setImportMode(e.target.value); setReplaceAllConfirm(false); }} style={{ ...IS, width: "auto", minWidth: 140 }}>
-                <option value="append">Append (skip existing IDs)</option>
-                <option value="overwrite">Overwrite (replace matching IDs)</option>
-                {isAdmin && <option value="replace_all">Replace All Inventory (admin)</option>}
-              </select>
-            </div>
-          </div>
-          {importMode === "replace_all" && (
-            <div style={{ background: "#3a1a1a", border: "1px solid #ef4444", borderRadius: 8, padding: 12, marginBottom: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#ef4444", marginBottom: 6 }}>&#9888; DANGER: Replace All Inventory</div>
-              <div style={{ fontSize: 12, color: "#f87171", marginBottom: 10, lineHeight: 1.5 }}>
-                This will <strong>permanently delete ALL existing inventory items and inventory lots</strong> from the database and replace them with only the items in this CSV. This cannot be undone.
-              </div>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-                <input type="checkbox" checked={replaceAllConfirm} onChange={(e) => setReplaceAllConfirm(e.target.checked)} style={{ accentColor: "#ef4444", width: 16, height: 16 }} />
-                <span style={{ fontSize: 12, color: "#fca5a5" }}>I understand this will wipe all current inventory and replace it with this CSV</span>
-              </label>
-            </div>
-          )}
-          <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Column Mapping</div>
-          <div style={{ fontSize: 12, color: "#888", marginBottom: 12 }}>Match your CSV columns to inventory fields. Unmapped columns will be skipped.</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "6px 12px", alignItems: "center", marginBottom: 16 }}>
-            <div style={{ fontSize: 11, color: "#666", fontWeight: 600 }}>YOUR CSV COLUMN</div>
-            <div></div>
-            <div style={{ fontSize: 11, color: "#666", fontWeight: 600 }}>MAPS TO</div>
-            {importData?.headers.map((h) => (
-              <React.Fragment key={h}>
-                <div style={{ fontSize: 13, color: "#e0e0e0", padding: "4px 8px", background: "#16161e", borderRadius: 4, fontFamily: "monospace" }}>{h}</div>
-                <div style={{ color: "#555", fontSize: 13 }}>→</div>
-                <select value={importMapping[h] || "skip"} onChange={(e) => setImportMapping((prev) => ({ ...prev, [h]: e.target.value }))} style={{ ...IS, padding: "6px 10px", fontSize: 13, background: importMapping[h] && importMapping[h] !== "skip" ? "#1a2a1a" : "#16161e", borderColor: importMapping[h] && importMapping[h] !== "skip" ? "#2a4a2a" : "#333" }}>
-                  <option value="skip">— Skip this column —</option>
-                  {APP_FIELDS.map((f) => (<option key={f.key} value={f.key}>{f.label}{f.required ? " *" : ""}</option>))}
-                </select>
-              </React.Fragment>
+          {/* Tab bar */}
+          <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: "1px solid #2a2a3a", paddingBottom: 8 }}>
+            {[["items", "Item Master"], ["bom", "Assemblies / BOM"], ["qty", "Inventory Qty"]].map(([k, lbl]) => (
+              <button key={k} onClick={() => switchImportTab(k)} style={{ ...B2, background: importTab === k ? "#6366f1" : "#2a2a3a", color: importTab === k ? "#fff" : "#999", borderColor: importTab === k ? "#6366f1" : "#333", fontSize: 12, padding: "6px 14px" }}>{lbl}</button>
             ))}
           </div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Preview (first 5 rows)</div>
-          <div style={{ overflowX: "auto", border: "1px solid #2a2a3a", borderRadius: 8, marginBottom: 16 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-              <thead><tr>{APP_FIELDS.filter((f) => Object.values(importMapping).includes(f.key)).map((f) => (<th key={f.key} style={{ ...TH, fontSize: 10, padding: "6px 8px" }}>{f.label}</th>))}</tr></thead>
-              <tbody>{importData?.rows.slice(0, 5).map((row, i) => (<tr key={i}>{APP_FIELDS.filter((f) => Object.values(importMapping).includes(f.key)).map((f) => { const csvCol = Object.entries(importMapping).find(([_, v]) => v === f.key)?.[0]; return <td key={f.key} style={{ ...TD, fontSize: 12, padding: "6px 8px", color: row[csvCol] ? "#ccc" : "#555" }}>{row[csvCol] || "—"}</td>; })}</tr>))}</tbody>
-            </table>
+
+          {/* File upload (shared) */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <label style={{ ...B2, cursor: "pointer", fontSize: 12 }}><Upload size={12} /> {importData ? importData.fileName : "Choose CSV File"}<input type="file" accept=".csv" onChange={handleImportFile} style={{ display: "none" }} /></label>
+            {importData && <span style={{ fontSize: 12, color: "#888" }}>{importData.rows.length} rows found</span>}
           </div>
-          {!Object.values(importMapping).includes("id") && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 8 }}>⚠ ProductCode (ID) must be mapped</div>}
-          {!Object.values(importMapping).includes("name") && <div style={{ color: "#ef4444", fontSize: 13, marginBottom: 8 }}>⚠ Name must be mapped</div>}
+
+          {/* ===== ITEM MASTER TAB ===== */}
+          {importTab === "items" && (
+            <div>
+              <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Upload SKUs with metadata (name, category, cost, supplier, etc). Quantities are <strong style={{ color: "#f59e0b" }}>not</strong> updated here - use the Inventory Qty tab for that.</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+                <span style={{ fontSize: 12, color: "#888" }}>Mode:</span>
+                <select value={importMode} onChange={(e) => setImportMode(e.target.value)} style={{ ...IS, width: "auto", minWidth: 180 }}>
+                  <option value="update_add">Update existing + add new</option>
+                  <option value="add_only">Add new SKUs only (skip existing)</option>
+                </select>
+              </div>
+              {importData && (
+                <>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 6 }}>Column Mapping</div>
+                  <div style={{ fontSize: 11, color: "#666", marginBottom: 10 }}>Match CSV columns to item fields. Unmapped columns will be skipped.</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "6px 12px", alignItems: "center", marginBottom: 16 }}>
+                    <div style={{ fontSize: 10, color: "#555", fontWeight: 600 }}>CSV COLUMN</div>
+                    <div></div>
+                    <div style={{ fontSize: 10, color: "#555", fontWeight: 600 }}>MAPS TO</div>
+                    {importData.headers.map((h) => (
+                      <React.Fragment key={h}>
+                        <div style={{ fontSize: 12, color: "#e0e0e0", padding: "4px 8px", background: "#16161e", borderRadius: 4, fontFamily: "monospace" }}>{h}</div>
+                        <div style={{ color: "#555", fontSize: 13 }}>&#8594;</div>
+                        <select value={importMapping[h] || "skip"} onChange={(e) => setImportMapping((prev) => ({ ...prev, [h]: e.target.value }))} style={{ ...IS, padding: "5px 8px", fontSize: 12, background: importMapping[h] && importMapping[h] !== "skip" ? "#1a2a1a" : "#16161e", borderColor: importMapping[h] && importMapping[h] !== "skip" ? "#2a4a2a" : "#333" }}>
+                          <option value="skip">-- Skip --</option>
+                          {APP_FIELDS.map((f) => (<option key={f.key} value={f.key}>{f.label}{f.required ? " *" : ""}</option>))}
+                        </select>
+                      </React.Fragment>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#ccc", marginBottom: 6 }}>Preview (first 5 rows)</div>
+                  <div style={{ overflowX: "auto", border: "1px solid #2a2a3a", borderRadius: 8, marginBottom: 12 }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                      <thead><tr>{APP_FIELDS.filter((f) => Object.values(importMapping).includes(f.key)).map((f) => (<th key={f.key} style={{ ...TH, fontSize: 10, padding: "5px 6px" }}>{f.label}</th>))}</tr></thead>
+                      <tbody>{importData.rows.slice(0, 5).map((row, i) => (<tr key={i}>{APP_FIELDS.filter((f) => Object.values(importMapping).includes(f.key)).map((f) => { const csvCol = Object.entries(importMapping).find(([_, v]) => v === f.key)?.[0]; return <td key={f.key} style={{ ...TD, fontSize: 11, padding: "5px 6px", color: row[csvCol] ? "#ccc" : "#555" }}>{row[csvCol] || "\u2014"}</td>; })}</tr>))}</tbody>
+                    </table>
+                  </div>
+                  {!Object.values(importMapping).includes("id") && <div style={{ color: "#ef4444", fontSize: 12, marginBottom: 6 }}>&#9888; ProductCode (ID) must be mapped</div>}
+                  {!Object.values(importMapping).includes("name") && <div style={{ color: "#ef4444", fontSize: 12, marginBottom: 6 }}>&#9888; Name must be mapped</div>}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ===== BOM / ASSEMBLIES TAB ===== */}
+          {importTab === "bom" && (
+            <div>
+              <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Upload assembly structures. CSV should have columns for Parent SKU, Component SKU, and Qty per assembly.</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+                <span style={{ fontSize: 12, color: "#888" }}>Mode:</span>
+                <select value={importMode} onChange={(e) => setImportMode(e.target.value)} style={{ ...IS, width: "auto", minWidth: 220 }}>
+                  <option value="replace">Replace BOM for parents in file</option>
+                  <option value="merge">Merge / add components to existing BOM</option>
+                </select>
+              </div>
+              {importData && (
+                <>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Map Columns</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
+                    {[["parent", "Parent SKU"], ["component", "Component SKU"], ["qty", "Qty Per Assembly"]].map(([k, lbl]) => (
+                      <div key={k}>
+                        <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>{lbl}</label>
+                        <select value={bomColMap[k] || ""} onChange={(e) => setBomColMap((p) => ({ ...p, [k]: e.target.value }))} style={{ ...IS, fontSize: 12, background: bomColMap[k] ? "#1a2a1a" : "#16161e", borderColor: bomColMap[k] ? "#2a4a2a" : "#333" }}>
+                          <option value="">-- Select --</option>
+                          {importData.headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                  {bomColMap.parent && bomColMap.component && bomColMap.qty && (
+                    <>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: "#ccc", marginBottom: 6 }}>Preview (first 8 rows)</div>
+                      <div style={{ overflowX: "auto", border: "1px solid #2a2a3a", borderRadius: 8, marginBottom: 12 }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                          <thead><tr><th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Parent SKU</th><th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Component SKU</th><th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Qty</th></tr></thead>
+                          <tbody>{importData.rows.slice(0, 8).map((row, i) => (<tr key={i}><td style={{ ...TD, fontSize: 11, padding: "5px 8px" }}>{row[bomColMap.parent] || "\u2014"}</td><td style={{ ...TD, fontSize: 11, padding: "5px 8px" }}>{row[bomColMap.component] || "\u2014"}</td><td style={{ ...TD, fontSize: 11, padding: "5px 8px" }}>{row[bomColMap.qty] || "\u2014"}</td></tr>))}</tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                  {(!bomColMap.parent || !bomColMap.component || !bomColMap.qty) && <div style={{ color: "#f59e0b", fontSize: 12 }}>&#9888; All 3 columns must be mapped</div>}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ===== INVENTORY QTY TAB ===== */}
+          {importTab === "qty" && (
+            <div>
+              <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Mass-update inventory quantities by SKU. CSV should have columns for SKU, Qty, and optionally Batch/Lot #. Multiple rows per SKU (different batches) are supported. Existing lots for updated SKUs will be replaced.</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+                <span style={{ fontSize: 12, color: "#888" }}>Mode:</span>
+                <select value={importMode} onChange={(e) => { setImportMode(e.target.value); setReplaceAllConfirm(false); }} style={{ ...IS, width: "auto", minWidth: 240 }}>
+                  <option value="update_listed">Update listed SKUs only</option>
+                  {isAdmin && <option value="full_replace">Full replace (zero ALL, CSV is truth)</option>}
+                </select>
+              </div>
+              {importMode === "full_replace" && (
+                <div style={{ background: "#3a1a1a", border: "1px solid #ef4444", borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#ef4444", marginBottom: 6 }}>&#9888; Full Replace Mode</div>
+                  <div style={{ fontSize: 12, color: "#f87171", marginBottom: 10, lineHeight: 1.5 }}>This will <strong>zero out ALL inventory quantities and lots</strong> for every SKU, then set only the quantities from this CSV. SKUs not in the CSV will have qty = 0. No item master data or BOM structures are affected.</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                    <input type="checkbox" checked={replaceAllConfirm} onChange={(e) => setReplaceAllConfirm(e.target.checked)} style={{ accentColor: "#ef4444", width: 16, height: 16 }} />
+                    <span style={{ fontSize: 12, color: "#fca5a5" }}>I understand all existing quantities will be zeroed and replaced</span>
+                  </label>
+                </div>
+              )}
+              {importData && (
+                <>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Map Columns</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
+                    {[["sku", "SKU / Product Code *"], ["qty", "Quantity *"], ["batch", "Batch / Lot # (optional)"]].map(([k, lbl]) => (
+                      <div key={k}>
+                        <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>{lbl}</label>
+                        <select value={qtyColMap[k] || ""} onChange={(e) => setQtyColMap((p) => ({ ...p, [k]: e.target.value }))} style={{ ...IS, fontSize: 12, background: qtyColMap[k] ? "#1a2a1a" : "#16161e", borderColor: qtyColMap[k] ? "#2a4a2a" : "#333" }}>
+                          <option value="">{k === "batch" ? "-- None --" : "-- Select --"}</option>
+                          {importData.headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                  {!qtyColMap.batch && <div style={{ fontSize: 11, color: "#666", marginBottom: 12 }}>No batch column mapped - all quantities will be imported under a single lot (<code style={{ color: "#888" }}>CSV-{new Date().toISOString().slice(0, 10)}</code>)</div>}
+                  {qtyColMap.sku && qtyColMap.qty && (() => {
+                    const previewRows = importData.rows.slice(0, 10).map((row) => {
+                      const sku = (row[qtyColMap.sku] || "").trim();
+                      const qty = Number((row[qtyColMap.qty] || "").replace(/[^0-9.\-]/g, "")) || 0;
+                      const batch = qtyColMap.batch ? (row[qtyColMap.batch] || "").trim() : "";
+                      const existing = allItems.find((i) => i.id === sku);
+                      return { sku, qty, batch, name: existing?.name || "", found: !!existing };
+                    });
+                    return (
+                      <>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: "#ccc", marginBottom: 6 }}>Preview (first 10 rows)</div>
+                        <div style={{ overflowX: "auto", border: "1px solid #2a2a3a", borderRadius: 8, marginBottom: 12 }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                            <thead><tr>
+                              <th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>SKU</th>
+                              <th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Name</th>
+                              {qtyColMap.batch && <th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Batch #</th>}
+                              <th style={{ ...TH, fontSize: 10, padding: "5px 8px" }}>Qty</th>
+                            </tr></thead>
+                            <tbody>{previewRows.map((r, i) => (
+                              <tr key={i}>
+                                <td style={{ ...TD, fontSize: 11, padding: "5px 8px", fontFamily: "monospace" }}>{r.sku}</td>
+                                <td style={{ ...TD, fontSize: 11, padding: "5px 8px", color: r.found ? "#ccc" : "#ef4444" }}>{r.name || "NOT FOUND"}</td>
+                                {qtyColMap.batch && <td style={{ ...TD, fontSize: 11, padding: "5px 8px", color: r.batch ? "#a78bfa" : "#555" }}>{r.batch || "\u2014"}</td>}
+                                <td style={{ ...TD, fontSize: 11, padding: "5px 8px", fontWeight: 600, color: "#22c55e" }}>{r.qty}</td>
+                              </tr>
+                            ))}</tbody>
+                          </table>
+                        </div>
+                      </>
+                    );
+                  })()}
+                  {(!qtyColMap.sku || !qtyColMap.qty) && <div style={{ color: "#f59e0b", fontSize: 12 }}>&#9888; Both SKU and Qty columns must be mapped</div>}
+                </>
+              )}
+            </div>
+          )}
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: 12, color: "#888" }}>{Object.values(importMapping).filter((v) => v && v !== "skip").length} of {importData?.headers.length || 0} columns mapped</span>
+        {/* Footer */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid #2a2a3a", paddingTop: 12 }}>
+          <span style={{ fontSize: 11, color: "#666" }}>
+            {importTab === "items" && importData ? `${Object.values(importMapping).filter((v) => v && v !== "skip").length} of ${importData.headers.length} columns mapped` : ""}
+            {importTab === "bom" && importData ? `${bomColMap.parent && bomColMap.component && bomColMap.qty ? "3/3" : Object.values(bomColMap).filter(Boolean).length + "/3"} columns mapped` : ""}
+            {importTab === "qty" && importData ? `${[qtyColMap.sku, qtyColMap.qty].filter(Boolean).length}/2 required mapped${qtyColMap.batch ? " + batch" : ""}` : ""}
+          </span>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => { setImportData(null); setReplaceAllConfirm(false); }} style={B2}>Cancel</button>
-            <button onClick={executeImport} disabled={!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name") || (importMode === "replace_all" && !replaceAllConfirm)} style={{ ...B1, background: importMode === "replace_all" ? "#dc2626" : undefined, borderColor: importMode === "replace_all" ? "#dc2626" : undefined, opacity: (!Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name") || (importMode === "replace_all" && !replaceAllConfirm)) ? 0.4 : 1 }}>{importMode === "replace_all" ? `Replace All with ${importData?.rows.length || 0} Rows` : `Import ${importData?.rows.length || 0} Rows`}</button>
+            <button onClick={() => { setImportOpen(false); clearImportData(); }} style={B2}>Cancel</button>
+            {importTab === "items" && (
+              <button onClick={executeItemImport} disabled={!importData || !Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name")} style={{ ...B1, opacity: (!importData || !Object.values(importMapping).includes("id") || !Object.values(importMapping).includes("name")) ? 0.4 : 1 }}>Import Items</button>
+            )}
+            {importTab === "bom" && (
+              <button onClick={executeBomImport} disabled={!importData || !bomColMap.parent || !bomColMap.component || !bomColMap.qty} style={{ ...B1, opacity: (!importData || !bomColMap.parent || !bomColMap.component || !bomColMap.qty) ? 0.4 : 1 }}>Import BOM</button>
+            )}
+            {importTab === "qty" && (
+              <button onClick={executeQtyImport} disabled={!importData || !qtyColMap.sku || !qtyColMap.qty || (importMode === "full_replace" && !replaceAllConfirm)} style={{ ...B1, background: importMode === "full_replace" ? "#dc2626" : undefined, borderColor: importMode === "full_replace" ? "#dc2626" : undefined, opacity: (!importData || !qtyColMap.sku || !qtyColMap.qty || (importMode === "full_replace" && !replaceAllConfirm)) ? 0.4 : 1 }}>{importMode === "full_replace" ? "Replace All Qty" : "Update Quantities"}</button>
+            )}
           </div>
         </div>
       </Modal>
