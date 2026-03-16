@@ -1,4 +1,4 @@
-// APP VERSION: v99
+// APP VERSION: v100
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -450,16 +450,50 @@ export default function App() {
       const [dbItems, dbBom, dbVendors, dbOrders, dbPOs] = await Promise.all([
         fetchItems(), fetchBomLines(), fetchVendors(), fetchOrders(), fetchPurchaseOrders(),
       ]);
-      const assemblyIds = new Set(dbBom.map((b) => b.assemblyId));
-      const rawMats = dbItems.filter((i) => !assemblyIds.has(i.id));
-      const asms = dbItems.filter((i) => assemblyIds.has(i.id)).map((a) => ({
-        ...a,
-        bom: dbBom.filter((b) => b.assemblyId === a.id).map((b) => ({ partId: b.partId, qty: b.qty })),
-      }));
-      if (dbItems.length > 0) { setParts(rawMats); setAssemblies(asms); }
-      if (dbVendors.length > 0) setVendors(dbVendors);
-      if (dbOrders.length > 0) setOrders(dbOrders);
-      if (dbPOs.length > 0) setPOs(dbPOs);
+
+      // If DB is empty, seed it with all starter data
+      if (dbItems.length === 0) {
+        console.log("DB empty — seeding items, BOM, and vendors...");
+        try {
+          // Insert all items (parts + assemblies without bom field)
+          const allSeedItems = [...SEED_PARTS, ...SEED_ASSEMBLIES.map(({ bom, ...rest }) => rest)];
+          await bulkInsertItems(allSeedItems);
+          // Insert BOM lines
+          for (const asm of SEED_ASSEMBLIES) {
+            if (asm.bom && asm.bom.length > 0) {
+              await setBomForAssembly(asm.id, asm.bom.map(b => ({ partId: b.partId, qty: b.qty })));
+            }
+          }
+          // Insert vendors
+          for (const v of SEED_VENDORS) { await upsertVendor(v); }
+          // Insert orders
+          for (const o of SEED_ORDERS) { await upsertOrder(o); }
+          console.log("Seed complete — reloading...");
+          // Re-fetch everything now that DB is populated
+          const [freshItems, freshBom, freshVendors, freshOrders, freshPOs] = await Promise.all([
+            fetchItems(), fetchBomLines(), fetchVendors(), fetchOrders(), fetchPurchaseOrders(),
+          ]);
+          const aIds = new Set(freshBom.map(b => b.assemblyId));
+          setParts(freshItems.filter(i => !aIds.has(i.id)));
+          setAssemblies(freshItems.filter(i => aIds.has(i.id)).map(a => ({
+            ...a, bom: freshBom.filter(b => b.assemblyId === a.id).map(b => ({ partId: b.partId, qty: b.qty })),
+          })));
+          if (freshVendors.length > 0) setVendors(freshVendors);
+          if (freshOrders.length > 0) setOrders(freshOrders);
+          if (freshPOs.length > 0) setPOs(freshPOs);
+        } catch (seedErr) { console.warn("Auto-seed failed:", seedErr.message); }
+      } else {
+        const assemblyIds = new Set(dbBom.map((b) => b.assemblyId));
+        const rawMats = dbItems.filter((i) => !assemblyIds.has(i.id));
+        const asms = dbItems.filter((i) => assemblyIds.has(i.id)).map((a) => ({
+          ...a,
+          bom: dbBom.filter((b) => b.assemblyId === a.id).map((b) => ({ partId: b.partId, qty: b.qty })),
+        }));
+        setParts(rawMats); setAssemblies(asms);
+        if (dbVendors.length > 0) setVendors(dbVendors);
+        if (dbOrders.length > 0) setOrders(dbOrders);
+        if (dbPOs.length > 0) setPOs(dbPOs);
+      }
       fetchReceipts().then(r => setReceipts(r)).catch(() => {});
       fetchProductionRuns().then(r => setProdRuns(r)).catch(() => {});
       fetchInventoryLots().then(r => setLots(r)).catch(() => {});
