@@ -423,6 +423,7 @@ export default function App() {
   const [prodNotes, setProdNotes] = useState("");
   const [prodConsume, setProdConsume] = useState({});
   const [prodLotNumber, setProdLotNumber] = useState("");
+  const [prodDate, setProdDate] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; });
   const [lots, setLots] = useState([]);
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState([]);
@@ -1243,8 +1244,8 @@ export default function App() {
       if (!window.confirm(`Warning: insufficient stock for: ${names}. Inventory will go negative. Continue?`)) return;
     }
 
-    const runId = `PROD-${new Date().toISOString().slice(0, 10)}-${String(prodRuns.length + 1).padStart(3, "0")}`;
-    const runDate = new Date().toISOString().slice(0, 10);
+    const runId = `PROD-${prodDate}-${String(prodRuns.length + 1).padStart(3, "0")}`;
+    const runDate = prodDate;
     const lotNum = prodLotNumber.trim();
     const run = {
       id: runId, assemblyId: prodAssemblyItem.id, assemblyName: prodAssemblyItem.name,
@@ -1981,7 +1982,7 @@ export default function App() {
         {tab === "vendors" && <button onClick={() => openAdd("vendor")} style={B1}><Plus size={14} /> Vendor</button>}
         {tab === "receiving" && <button onClick={openReceiveManual} style={B1}><Plus size={14} /> Manual Receipt</button>}
         {tab === "pos" && <button onClick={openManualPO} style={B1}><Plus size={14} /> Create PO</button>}
-        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setProdModal(true); }} style={B1}><Hammer size={14} /> Run Production</button>}
+        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setProdDate(fmtDate(new Date())); setProdModal(true); }} style={B1}><Hammer size={14} /> Run Production</button>}
       </div>
 
       {/* ================== INVENTORY TABLE ================== */}
@@ -2518,7 +2519,7 @@ export default function App() {
 
       {/* ================== PRODUCTION MODAL ================== */}
       <Modal open={prodModal} onClose={() => setProdModal(false)} title="Run Production" wide>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
             <select value={prodAssembly} onChange={e => { const id = e.target.value; setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); }} style={IS}>
@@ -2529,6 +2530,10 @@ export default function App() {
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity *</label>
             <input type="number" step="any" min="0" value={prodQty} onChange={e => setProdQty(Number(e.target.value))} style={IS} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Production Date</label>
+            <input type="date" value={prodDate} onChange={e => setProdDate(e.target.value)} style={IS} />
           </div>
         </div>
 
