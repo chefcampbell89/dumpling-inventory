@@ -371,6 +371,50 @@ export async function deleteProfile(userId) {
   if (error) throw error
 }
 
+// ---- Forecast / Planning ----
+
+export async function fetchForecastWeeks(startDate, endDate) {
+  const { data, error } = await supabase.from("forecast_weeks").select("*")
+    .gte("week_start", startDate).lte("week_start", endDate).order("week_start")
+  if (error) throw error
+  return data.map(r => ({
+    id: r.id, weekStart: r.week_start, productLine: r.product_line, itemId: r.item_id,
+    forecastQty: Number(r.forecast_qty), autoQty: Number(r.auto_qty),
+    notes: r.notes || "", createdBy: r.created_by || "", updatedAt: r.updated_at,
+  }))
+}
+
+export async function upsertForecastWeek(fw) {
+  const { data, error } = await supabase.from("forecast_weeks").upsert({
+    id: fw.id || undefined, week_start: fw.weekStart, product_line: fw.productLine,
+    item_id: fw.itemId, forecast_qty: fw.forecastQty, auto_qty: fw.autoQty,
+    notes: fw.notes || "", created_by: fw.createdBy || "", updated_at: new Date().toISOString(),
+  }, { onConflict: "week_start,product_line" }).select()
+  if (error) throw error
+  return data?.[0]
+}
+
+export async function fetchForecastDays(startDate, endDate) {
+  const { data, error } = await supabase.from("forecast_days").select("*")
+    .gte("day_date", startDate).lte("day_date", endDate).order("day_date")
+  if (error) throw error
+  return data.map(r => ({
+    id: r.id, forecastWeekId: r.forecast_week_id, dayDate: r.day_date,
+    productLine: r.product_line, plannedQty: Number(r.planned_qty),
+    actualQty: r.actual_qty !== null ? Number(r.actual_qty) : null, notes: r.notes || "",
+  }))
+}
+
+export async function upsertForecastDays(days) {
+  const rows = days.map(d => ({
+    id: d.id || undefined, forecast_week_id: d.forecastWeekId, day_date: d.dayDate,
+    product_line: d.productLine, planned_qty: d.plannedQty,
+    actual_qty: d.actualQty, notes: d.notes || "",
+  }))
+  const { error } = await supabase.from("forecast_days").upsert(rows, { onConflict: "day_date,product_line" })
+  if (error) throw error
+}
+
 export async function getInviteCode() {
   const { data, error } = await supabase.from("app_settings").select("value").eq("key", "invite_code").single()
   if (error) throw error

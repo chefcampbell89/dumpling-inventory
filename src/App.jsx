@@ -12,6 +12,7 @@ import {
   zeroAllInventory, bulkUpdateItemQtys,
   fetchWishes, createWish, countUserWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles, deleteProfile as dbDeleteProfile,
+  fetchForecastWeeks, upsertForecastWeek, fetchForecastDays, upsertForecastDays,
   getInviteCode, setInviteCode, getLocations, saveLocations, getConfig, saveConfig, changePassword, supabase,
 } from "./supabase";
 
@@ -20,7 +21,7 @@ import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
   ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
-  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles,
+  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles, TrendingUp, ChevronLeft, Calendar,
 } from "lucide-react";
 
 // ============================================================
@@ -462,6 +463,17 @@ export default function App() {
   const [allWishes, setAllWishes] = useState([]);
   const MAX_WISHES = 3;
 
+  // ---- Planning / Forecast State ----
+  const [planView, setPlanView] = useState("weekly");
+  const [forecastWeeks, setForecastWeeks] = useState([]);
+  const [forecastDays, setForecastDays] = useState([]);
+  const [planWeekStart, setPlanWeekStart] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.toISOString().slice(0, 10);
+  });
+  const [weeklyEdits, setWeeklyEdits] = useState({});
+  const [dailyEdits, setDailyEdits] = useState({});
+  const [forecastConfig, setForecastConfig] = useState({ horizonWeeks: 4, lookbackWeeks: 8, workDays: ["Mon","Tue","Wed","Thu","Fri"] });
+
   // Config aliases (so existing JSX references keep working)
   const LEVELS = cfgLevels;
   const ORD_STATUSES = cfgOrdStatuses;
@@ -530,6 +542,12 @@ export default function App() {
       getConfig("costing_methods").then(r => { if (r) setCfgCosting(r); }).catch(() => {});
       getConfig("sku_levels").then(r => { if (r) setCfgLevels(r); }).catch(() => {});
       getConfig("app_name").then(r => { if (r) setAppName(r); }).catch(() => {});
+      getConfig("forecast_config").then(r => { if (r) setForecastConfig(prev => ({ ...prev, ...r })); }).catch(() => {});
+      // Load forecast data for a wide window
+      const fcStart = (() => { const d = new Date(); d.setDate(d.getDate() - 56); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.toISOString().slice(0, 10); })();
+      const fcEnd = (() => { const d = new Date(); d.setDate(d.getDate() + 84); return d.toISOString().slice(0, 10); })();
+      fetchForecastWeeks(fcStart, fcEnd).then(r => setForecastWeeks(r)).catch(() => {});
+      fetchForecastDays(fcStart, fcEnd).then(r => setForecastDays(r)).catch(() => {});
     } catch (err) {
       console.warn("Supabase load failed, using seed data:", err.message);
     }
@@ -835,6 +853,81 @@ export default function App() {
     }
     return { oo, rows, byVendor: Object.values(byVendor), totalCost: rows.reduce((s, r) => s + r.purchaseCost, 0), critical: rows.filter((r) => r.shortfall > 0).length, covered: rows.filter((r) => r.shortfall === 0).length };
   }, [orders, allItems]);
+
+  // ---- Planning Helpers ----
+  const getMonday = (d) => { const dt = new Date(d); dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7)); return dt.toISOString().slice(0, 10); };
+  const addDays = (d, n) => { const dt = new Date(d); dt.setDate(dt.getDate() + n); return dt.toISOString().slice(0, 10); };
+  const DAY_NAMES = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  const productLines = useMemo(() => {
+    const lines = [...new Set(assemblies.filter(a => getLevel(a.id) === 250).map(a => {
+      const m = a.id.match(/^250-(\w+)/); return m ? m[1] : null;
+    }).filter(Boolean))];
+    return lines.sort();
+  }, [assemblies]);
+
+  // Auto-forecast: avg batches per week from fulfilled order history
+  const autoForecast = useMemo(() => {
+    const result = {};
+    const lookback = forecastConfig.lookbackWeeks || 8;
+    const cutoff = addDays(new Date().toISOString().slice(0, 10), -(lookback * 7));
+    const fulfilled = orders.filter(o => o.status === "Fulfilled" && o.date >= cutoff);
+    // BOM explosion to batch equivalents
+    const explodeToBatch = (itemId, qty, targetLine) => {
+      const batchId = `250-${targetLine} Batch`;
+      const walk = (id, mult) => {
+        if (id === batchId) return mult;
+        const it = allItems.find(i => i.id === id);
+        if (!it || !it.bom || it.bom.length === 0) return 0;
+        let total = 0;
+        for (const l of it.bom) total += walk(l.partId, l.qty * mult);
+        return total;
+      };
+      return walk(itemId, qty);
+    };
+    for (const pl of productLines) {
+      const plOrders = fulfilled.filter(o => {
+        const m = o.item.match(/^\d+-(\w+)/); return m && m[1] === pl;
+      });
+      let totalBatches = 0;
+      for (const o of plOrders) totalBatches += explodeToBatch(o.item, o.qty, pl);
+      const weeksSet = new Set(plOrders.map(o => getMonday(o.date)));
+      const weeks = Math.max(weeksSet.size, 1);
+      result[pl] = Math.round((totalBatches / weeks) * 2) / 2;
+    }
+    return result;
+  }, [orders, allItems, productLines, forecastConfig.lookbackWeeks]);
+
+  // Runway: current stock per product line in batch equivalents and weeks until out
+  const runwayData = useMemo(() => {
+    return productLines.map(pl => {
+      // Sum stock at all levels for this product line, converted to batch equivalents
+      const batchItem = allItems.find(i => i.id === `250-${pl} Batch`);
+      let batchEquiv = batchItem ? batchItem.qty : 0;
+      // Add stock from higher levels converted down to batches
+      for (const item of allItems) {
+        if (item.id === `250-${pl} Batch`) continue;
+        const m = item.id.match(/^\d+-(\w+)/);
+        if (!m || m[1] !== pl) continue;
+        const lvl = getLevel(item.id);
+        if (lvl < 250 || item.qty <= 0) continue;
+        // Walk BOM from this item down to the batch level
+        const walk = (id, mult) => {
+          if (id === `250-${pl} Batch`) return mult;
+          const it = allItems.find(i => i.id === id);
+          if (!it || !it.bom) return 0;
+          let t = 0; for (const l of it.bom) t += walk(l.partId, l.qty * mult); return t;
+        };
+        // Reverse: how many batches does this stock represent?
+        // item.qty units at this level; use BOM to see how many batches per unit
+        const batchesPerUnit = walk(item.id, 1);
+        if (batchesPerUnit > 0) batchEquiv += item.qty * batchesPerUnit;
+      }
+      const demandPerWeek = autoForecast[pl] || 0;
+      const weeksLeft = demandPerWeek > 0 ? batchEquiv / demandPerWeek : Infinity;
+      const stockoutDate = demandPerWeek > 0 ? addDays(new Date().toISOString().slice(0, 10), Math.round(weeksLeft * 7)) : null;
+      return { productLine: pl, batchEquiv: Math.round(batchEquiv * 100) / 100, demandPerWeek, weeksLeft: Math.round(weeksLeft * 10) / 10, stockoutDate };
+    });
+  }, [productLines, allItems, autoForecast]);
 
   // ---- CRUD with Supabase persistence ----
   const bomItemsForLevel = (level) => {
@@ -1847,6 +1940,7 @@ export default function App() {
         {tabBtn("pos", "Purchase Orders", <FileText size={14} />)}
         {tabBtn("receiving", "Receiving", <PackageCheck size={14} />)}
         {tabBtn("production", "Production", <Hammer size={14} />)}
+        {tabBtn("planning", "Planning", <TrendingUp size={14} />)}
         {tabBtn("log", "Transaction Log", <ScrollText size={14} />)}
         {isAdmin && tabBtn("admin", "Admin Config", <Settings size={14} />)}
       </div>
@@ -2519,6 +2613,325 @@ export default function App() {
         </div>
       </Modal>
 
+      {/* ================== PLANNING ================== */}
+      {tab === "planning" && (() => {
+        const horizon = forecastConfig.horizonWeeks || 4;
+        const workDays = forecastConfig.workDays || ["Mon","Tue","Wed","Thu","Fri"];
+        const weekStarts = Array.from({ length: horizon }, (_, i) => addDays(planWeekStart, i * 7));
+        const todayStr = new Date().toISOString().slice(0, 10);
+
+        // Get days for the currently selected week
+        const selectedWeekDays = Array.from({ length: 7 }, (_, i) => {
+          const d = addDays(planWeekStart, i);
+          const dayName = DAY_NAMES[new Date(d).getDay()];
+          return { date: d, dayName, isWorkDay: workDays.includes(dayName) };
+        }).filter(d => d.isWorkDay);
+
+        // Build lookup for saved forecast data
+        const weekLookup = {};
+        for (const fw of forecastWeeks) weekLookup[`${fw.productLine}|${fw.weekStart}`] = fw;
+        const dayLookup = {};
+        for (const fd of forecastDays) dayLookup[`${fd.productLine}|${fd.dayDate}`] = fd;
+
+        const getWeekVal = (pl, ws) => {
+          const editKey = `${pl}|${ws}`;
+          if (weeklyEdits[editKey] !== undefined) return weeklyEdits[editKey];
+          const saved = weekLookup[editKey];
+          return saved ? saved.forecastQty : "";
+        };
+        const getDayVal = (pl, date) => {
+          const editKey = `${pl}|${date}`;
+          if (dailyEdits[editKey] !== undefined) return dailyEdits[editKey];
+          const saved = dayLookup[editKey];
+          return saved ? saved.plannedQty : "";
+        };
+
+        // Fulfilled order weeks count for history warning
+        const lookback = forecastConfig.lookbackWeeks || 8;
+        const cutoffDate = addDays(todayStr, -(lookback * 7));
+        const fulfilledWeeks = new Set(orders.filter(o => o.status === "Fulfilled" && o.date >= cutoffDate).map(o => getMonday(o.date))).size;
+
+        // Save weekly plan
+        const saveWeeklyPlan = async () => {
+          try {
+            for (const pl of productLines) {
+              for (const ws of weekStarts) {
+                const editKey = `${pl}|${ws}`;
+                const val = getWeekVal(pl, ws);
+                if (val === "" || val === undefined) continue;
+                const existing = weekLookup[editKey];
+                await upsertForecastWeek({
+                  id: existing?.id, weekStart: ws, productLine: pl,
+                  itemId: `250-${pl} Batch`, forecastQty: Number(val),
+                  autoQty: autoForecast[pl] || 0, createdBy: profile?.email || "",
+                });
+              }
+            }
+            // Reload
+            const fcStart = addDays(planWeekStart, -7);
+            const fcEnd = addDays(planWeekStart, (horizon + 1) * 7);
+            const fresh = await fetchForecastWeeks(fcStart, fcEnd);
+            setForecastWeeks(fresh);
+            setWeeklyEdits({});
+            show("Plan saved");
+          } catch (e) { show(e.message, "error"); }
+        };
+
+        // Auto-fill weekly from history
+        const autoFillWeekly = () => {
+          const edits = { ...weeklyEdits };
+          for (const pl of productLines) {
+            for (const ws of weekStarts) {
+              const key = `${pl}|${ws}`;
+              if (!weekLookup[key] && edits[key] === undefined) {
+                edits[key] = autoForecast[pl] || 0;
+              }
+            }
+          }
+          setWeeklyEdits(edits);
+          show("Auto-filled from history");
+        };
+
+        // Spread weekly plan evenly across work days
+        const spreadEvenly = () => {
+          const edits = { ...dailyEdits };
+          for (const pl of productLines) {
+            const weekVal = Number(getWeekVal(pl, planWeekStart)) || 0;
+            const days = selectedWeekDays.length;
+            const base = Math.floor(weekVal / days);
+            const remainder = weekVal - base * days;
+            selectedWeekDays.forEach((d, i) => {
+              edits[`${pl}|${d.date}`] = base + (i < remainder ? 1 : 0);
+            });
+          }
+          setDailyEdits(edits);
+          show("Schedule spread evenly");
+        };
+
+        // Save daily schedule
+        const saveDailySchedule = async () => {
+          try {
+            const rows = [];
+            for (const pl of productLines) {
+              for (const d of selectedWeekDays) {
+                const val = getDayVal(pl, d.date);
+                if (val === "" || val === undefined) continue;
+                const weekKey = `${pl}|${planWeekStart}`;
+                const weekRow = weekLookup[weekKey];
+                const existing = dayLookup[`${pl}|${d.date}`];
+                rows.push({
+                  id: existing?.id, forecastWeekId: weekRow?.id || null,
+                  dayDate: d.date, productLine: pl, plannedQty: Number(val),
+                  actualQty: existing?.actualQty ?? null, notes: "",
+                });
+              }
+            }
+            if (rows.length > 0) await upsertForecastDays(rows);
+            const fcStart = addDays(planWeekStart, -1);
+            const fcEnd = addDays(planWeekStart, 8);
+            const fresh = await fetchForecastDays(fcStart, fcEnd);
+            setForecastDays(prev => {
+              const freshIds = new Set(fresh.map(f => f.id));
+              return [...prev.filter(p => !freshIds.has(p.id) && (p.dayDate < fcStart || p.dayDate > fcEnd)), ...fresh];
+            });
+            setDailyEdits({});
+            show("Schedule saved");
+          } catch (e) { show(e.message, "error"); }
+        };
+
+        // Sub-tab style
+        const planTabBtn = (k, lbl, ico) => (
+          <button onClick={() => setPlanView(k)} style={{ ...B2, background: planView === k ? "#6366f1" : "#2a2a3a", color: planView === k ? "#fff" : "#ccc", borderColor: planView === k ? "#6366f1" : "#333", fontSize: 12, padding: "6px 14px" }}>{ico} {lbl}</button>
+        );
+
+        return (
+          <div>
+            {/* Sub-tabs */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              {planTabBtn("weekly", "Weekly Plan", <Calendar size={13} />)}
+              {planTabBtn("daily", "Daily Schedule", <ClipboardList size={13} />)}
+              {planTabBtn("runway", "Inventory Runway", <TrendingUp size={13} />)}
+            </div>
+
+            {/* Week Navigator */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+              <button onClick={() => setPlanWeekStart(addDays(planWeekStart, -7))} style={{ ...B2, padding: "6px 10px" }}><ChevronLeft size={14} /></button>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#e0e0e0" }}>Week of {new Date(planWeekStart + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
+              <button onClick={() => setPlanWeekStart(addDays(planWeekStart, 7))} style={{ ...B2, padding: "6px 10px" }}><ChevronRight size={14} /></button>
+              <button onClick={() => setPlanWeekStart(getMonday(todayStr))} style={{ ...B2, fontSize: 11, padding: "5px 10px" }}>Today</button>
+            </div>
+
+            {fulfilledWeeks < 4 && planView === "weekly" && (
+              <div style={{ background: "#2a2a1a", border: "1px solid #f59e0b33", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#f59e0b" }}>
+                <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
+                Limited order history ({fulfilledWeeks} week{fulfilledWeeks !== 1 ? "s" : ""}) — consider setting forecasts manually.
+              </div>
+            )}
+
+            {/* ---- WEEKLY PLAN VIEW ---- */}
+            {planView === "weekly" && (
+              <div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                  <button onClick={autoFillWeekly} style={{ ...B2, fontSize: 12, color: "#f59e0b", borderColor: "#f59e0b44" }}><Sparkles size={13} /> Auto-Fill from History</button>
+                  <button onClick={saveWeeklyPlan} style={{ ...B1, fontSize: 12 }}><Check size={13} /> Save Plan</button>
+                </div>
+                <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead><tr>
+                        <th style={TH}>Product</th>
+                        {weekStarts.map(ws => <th key={ws} style={{ ...TH, textAlign: "center", minWidth: 90 }}>{new Date(ws + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}</th>)}
+                        <th style={{ ...TH, textAlign: "center", color: "#888" }}>Auto Avg</th>
+                      </tr></thead>
+                      <tbody>
+                        {productLines.map(pl => (
+                          <tr key={pl}>
+                            <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{pl} Batch</td>
+                            {weekStarts.map(ws => {
+                              const val = getWeekVal(pl, ws);
+                              const auto = autoForecast[pl] || 0;
+                              const isOverride = val !== "" && val !== undefined && Number(val) !== auto;
+                              return (
+                                <td key={ws} style={{ ...TD, textAlign: "center", padding: "4px 6px" }}>
+                                  <input type="number" min={0} step={0.5} value={val} placeholder="—"
+                                    onChange={e => setWeeklyEdits(prev => ({ ...prev, [`${pl}|${ws}`]: e.target.value === "" ? "" : Number(e.target.value) }))}
+                                    style={{ ...IS, width: 64, textAlign: "center", padding: "4px 6px", fontSize: 13, fontWeight: 600, borderColor: isOverride ? "#f59e0b55" : undefined }}
+                                  />
+                                </td>
+                              );
+                            })}
+                            <td style={{ ...TD, textAlign: "center", fontSize: 12, color: "#888" }}>{autoForecast[pl] || 0}/wk</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ---- DAILY SCHEDULE VIEW ---- */}
+            {planView === "daily" && (
+              <div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                  <button onClick={spreadEvenly} style={{ ...B2, fontSize: 12, color: "#6366f1", borderColor: "#6366f144" }}><Layers size={13} /> Spread Evenly</button>
+                  <button onClick={saveDailySchedule} style={{ ...B1, fontSize: 12 }}><Check size={13} /> Save Schedule</button>
+                </div>
+                <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead><tr>
+                        <th style={TH}>Product</th>
+                        {selectedWeekDays.map(d => (
+                          <th key={d.date} style={{ ...TH, textAlign: "center", minWidth: 80, borderLeft: d.date === todayStr ? "2px solid #6366f1" : undefined }}>
+                            {d.dayName} {new Date(d.date + "T12:00:00").getDate()}
+                          </th>
+                        ))}
+                        <th style={{ ...TH, textAlign: "center", fontWeight: 700 }}>TOTAL</th>
+                      </tr></thead>
+                      <tbody>
+                        {productLines.map(pl => {
+                          const rowTotal = selectedWeekDays.reduce((s, d) => s + (Number(getDayVal(pl, d.date)) || 0), 0);
+                          return (
+                            <tr key={pl}>
+                              <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{pl} Batch</td>
+                              {selectedWeekDays.map(d => {
+                                const val = getDayVal(pl, d.date);
+                                const saved = dayLookup[`${pl}|${d.date}`];
+                                const isDone = saved && saved.actualQty !== null;
+                                return (
+                                  <td key={d.date} style={{ ...TD, textAlign: "center", padding: "4px 6px", borderLeft: d.date === todayStr ? "2px solid #6366f1" : undefined, background: isDone ? "#16261e" : undefined }}>
+                                    {isDone ? (
+                                      <span style={{ color: "#22c55e", fontWeight: 600, fontSize: 12 }}>DONE ({saved.actualQty})</span>
+                                    ) : (
+                                      <input type="number" min={0} step={1} value={val} placeholder="—"
+                                        onChange={e => setDailyEdits(prev => ({ ...prev, [`${pl}|${d.date}`]: e.target.value === "" ? "" : Number(e.target.value) }))}
+                                        style={{ ...IS, width: 54, textAlign: "center", padding: "4px 6px", fontSize: 13, fontWeight: 600 }}
+                                      />
+                                    )}
+                                  </td>
+                                );
+                              })}
+                              <td style={{ ...TD, textAlign: "center", fontWeight: 700, color: "#e0e0e0", fontSize: 14 }}>{rowTotal}</td>
+                            </tr>
+                          );
+                        })}
+                        {/* Day totals row */}
+                        <tr style={{ background: "#16161e" }}>
+                          <td style={{ ...TD, fontWeight: 600, color: "#888", fontSize: 11 }}>DAY TOTAL</td>
+                          {selectedWeekDays.map(d => {
+                            const colTotal = productLines.reduce((s, pl) => s + (Number(getDayVal(pl, d.date)) || 0), 0);
+                            return <td key={d.date} style={{ ...TD, textAlign: "center", fontWeight: 700, color: "#ccc", borderLeft: d.date === todayStr ? "2px solid #6366f1" : undefined }}>{colTotal}</td>;
+                          })}
+                          <td style={{ ...TD, textAlign: "center", fontWeight: 700, color: "#f59e0b", fontSize: 14 }}>
+                            {productLines.reduce((s, pl) => s + selectedWeekDays.reduce((s2, d) => s2 + (Number(getDayVal(pl, d.date)) || 0), 0), 0)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ---- RUNWAY VIEW ---- */}
+            {planView === "runway" && (
+              <div>
+                <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+                  {(() => {
+                    const urgent = runwayData.filter(r => r.weeksLeft < 2 && r.weeksLeft !== Infinity);
+                    const ok = runwayData.filter(r => r.weeksLeft >= 2 || r.weeksLeft === Infinity);
+                    return <>
+                      <Stat icon={<TrendingUp size={18} />} label="Product Lines" value={productLines.length} accent="#6366f1" />
+                      <Stat icon={<AlertTriangle size={18} />} label="Low Runway" value={urgent.length} accent={urgent.length > 0 ? "#ef4444" : "#22c55e"} />
+                      <Stat icon={<CheckCircle size={18} />} label="Healthy" value={ok.length} accent="#22c55e" />
+                    </>;
+                  })()}
+                </div>
+                <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead><tr>
+                        <th style={TH}>Product Line</th>
+                        <th style={{ ...TH, textAlign: "center" }}>Stock (Batches)</th>
+                        <th style={{ ...TH, textAlign: "center" }}>Avg Demand/wk</th>
+                        <th style={{ ...TH, textAlign: "center" }}>Weeks Left</th>
+                        <th style={{ ...TH, textAlign: "center" }}>Est. Stockout</th>
+                      </tr></thead>
+                      <tbody>
+                        {runwayData.map(r => {
+                          const color = r.weeksLeft === Infinity ? "#6366f1" : r.weeksLeft < 1 ? "#ef4444" : r.weeksLeft < 2 ? "#f59e0b" : r.weeksLeft < 4 ? "#22c55e" : "#6366f1";
+                          return (
+                            <tr key={r.productLine}>
+                              <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{r.productLine}</td>
+                              <td style={{ ...TD, textAlign: "center", fontWeight: 600 }}>{r.batchEquiv}</td>
+                              <td style={{ ...TD, textAlign: "center", color: "#ccc" }}>{r.demandPerWeek > 0 ? `${r.demandPerWeek} batches` : "No data"}</td>
+                              <td style={{ ...TD, textAlign: "center" }}>
+                                <span style={{ fontWeight: 700, color, fontSize: 14 }}>{r.weeksLeft === Infinity ? "∞" : r.weeksLeft}</span>
+                                {r.weeksLeft !== Infinity && <span style={{ color: "#888", fontSize: 11, marginLeft: 4 }}>wks</span>}
+                              </td>
+                              <td style={{ ...TD, textAlign: "center", fontSize: 12, color: "#888" }}>
+                                {r.stockoutDate ? new Date(r.stockoutDate + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "—"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                {runwayData.some(r => r.weeksLeft !== Infinity && r.weeksLeft < 2) && (
+                  <div style={{ marginTop: 12, background: "#2a1a1a", border: "1px solid #ef444433", borderRadius: 8, padding: "10px 14px", fontSize: 12, color: "#ef4444" }}>
+                    <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
+                    {runwayData.filter(r => r.weeksLeft !== Infinity && r.weeksLeft < 2).map(r => r.productLine).join(", ")} — less than 2 weeks of stock remaining.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* ================== TRANSACTION LOG ================== */}
       {tab === "log" && (
         <div>
@@ -2582,6 +2995,7 @@ export default function App() {
           { id: "poStatuses", label: "PO Statuses", icon: <FileText size={14} /> },
           { id: "receiptTypes", label: "Receipt Types", icon: <PackageCheck size={14} /> },
           { id: "costing", label: "Costing Methods", icon: <DollarSign size={14} /> },
+          { id: "planning", label: "Planning", icon: <TrendingUp size={14} /> },
           { id: "wishes", label: "Wishes", icon: <Sparkles size={14} /> },
         ];
 
@@ -2756,6 +3170,42 @@ export default function App() {
                   <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Costing Methods</h3>
                   <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Inventory costing methods available on items.</p>
                   <ListEditor items={cfgCosting} setItems={setCfgCosting} configKey="costing_methods" label="Method" />
+                </div>
+              )}
+
+              {/* Planning Config */}
+              {cfgSection === "planning" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Planning Settings</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Configure forecast horizon, lookback period, and production days.</p>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                    <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px" }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Forecast Horizon (weeks)</div>
+                      <input type="number" min={1} max={52} value={forecastConfig.horizonWeeks} onChange={e => setForecastConfig(prev => ({ ...prev, horizonWeeks: Number(e.target.value) || 4 }))} style={{ ...IS, width: 80 }} />
+                    </div>
+                    <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px" }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>History Lookback (weeks)</div>
+                      <input type="number" min={1} max={52} value={forecastConfig.lookbackWeeks} onChange={e => setForecastConfig(prev => ({ ...prev, lookbackWeeks: Number(e.target.value) || 8 }))} style={{ ...IS, width: 80 }} />
+                    </div>
+                    <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px" }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 8 }}>Production Days</div>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(d => (
+                          <label key={d} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: forecastConfig.workDays.includes(d) ? "#e0e0e0" : "#666", cursor: "pointer" }}>
+                            <input type="checkbox" checked={forecastConfig.workDays.includes(d)} onChange={e => {
+                              setForecastConfig(prev => ({
+                                ...prev, workDays: e.target.checked ? [...prev.workDays, d] : prev.workDays.filter(x => x !== d),
+                              }));
+                            }} />
+                            {d}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                    <button onClick={async () => {
+                      try { await saveConfig("forecast_config", forecastConfig); show("Planning settings saved"); } catch (e) { show(e.message, "error"); }
+                    }} style={{ ...B1, alignSelf: "flex-start" }}><Check size={14} /> Save Settings</button>
+                  </div>
                 </div>
               )}
 
