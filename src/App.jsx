@@ -1,4 +1,4 @@
-// APP VERSION: v110
+// APP VERSION: v111
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -404,6 +404,7 @@ export default function App() {
   const [assemblies, setAssemblies] = useState(SEED_ASSEMBLIES);
   const [vendors, setVendors] = useState(SEED_VENDORS);
   const [orders, setOrders] = useState(SEED_ORDERS);
+  const [orderLines, setOrderLines] = useState([]);
   const [pos, setPOs] = useState([]);
   const [receipts, setReceipts] = useState([]);
   const [rcvModal, setRcvModal] = useState(false);
@@ -950,12 +951,40 @@ export default function App() {
       setForm({ id: `${lvl}-`, name: "", category: LEVELS[lvl]?.cat || "Raw Material", type: "Stock", costing: lvl >= 250 ? "FEFO - Batch" : "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active", lotTracking: lvl >= 200, piecesPerUnit: 0 });
       setBomForm([]);
     }
-    else if (type === "order") setForm({ id: `ORD-${String(orders.length + 1).padStart(3, "0")}`, customer: "", item: "", qty: 0, date: new Date().toISOString().slice(0, 10), status: "Pending", notes: "" });
+    else if (type === "order") {
+      setForm({ customer: "", date: fmtDate(new Date()), status: "Pending", notes: "" });
+      setOrderLines([{ item: "", qty: 0, notes: "" }]);
+    }
     else if (type === "vendor") setForm({ id: `V-${String(vendors.length + 1).padStart(3, "0")}`, name: "", contact: "", email: "", phone: "", address: "", paymentTerms: "Net 30", leadDays: 0, notes: "" });
     setModal(type);
   };
 
-  const openEdit = (type, item) => { setEditItem(item); setForm({ ...item }); setBomForm(item.bom ? item.bom.map(b => ({...b})) : []); setModal(type); };
+  const openEdit = (type, item) => {
+    setEditItem(item);
+    setForm({ ...item });
+    if (type === "order") setOrderLines([]);
+    setBomForm(item.bom ? item.bom.map(b => ({...b})) : []);
+    setModal(type);
+  };
+
+  const addLinesToOrder = (group) => {
+    setEditItem(null);
+    setForm({ customer: group.customer, date: group.date, status: group.lines[0]?.status || "Pending", notes: "" });
+    setOrderLines([{ item: "", qty: 0, notes: "" }]);
+    setModal("order");
+  };
+
+  const setGroupStatus = async (group, newStatus) => {
+    const updated = group.lines.map(o => ({ ...o, status: newStatus }));
+    setOrders(prev => prev.map(o => {
+      const match = updated.find(u => u.id === o.id);
+      return match || o;
+    }));
+    for (const o of updated) {
+      try { await upsertOrder(o); } catch (err) { console.warn(err); }
+    }
+    show(`Set ${updated.length} line(s) to ${newStatus}`);
+  };
 
   const changeItemLevel = (newLvl) => {
     const oldId = form.id || "";
@@ -1000,11 +1029,35 @@ export default function App() {
         else setParts(p => [...p, obj]);
       }
     } else if (modal === "order") {
-      if (!form.customer || !form.item) { show("Customer & item required", "error"); return; }
-      const obj = { ...form, qty: Number(form.qty) };
-      try { await upsertOrder(obj); } catch (e) { console.warn("DB save failed:", e.message); }
-      if (editItem) setOrders((p) => p.map((x) => (x.id === editItem.id ? obj : x)));
-      else setOrders((p) => [...p, obj]);
+      if (!form.customer) { show("Customer required", "error"); return; }
+      if (editItem) {
+        // Editing a single existing line
+        if (!form.item) { show("Item required", "error"); return; }
+        const obj = { ...form, qty: Number(form.qty) };
+        try { await upsertOrder(obj); } catch (e) { console.warn("DB save failed:", e.message); }
+        setOrders((p) => p.map((x) => (x.id === editItem.id ? obj : x)));
+      } else {
+        // Creating new lines (new order or adding to existing)
+        const validLines = orderLines.filter(l => l.item && l.qty > 0);
+        if (validLines.length === 0) { show("At least one line with item and qty required", "error"); return; }
+        const maxOrd = orders.reduce((max, o) => {
+          const m = o.id.match(/^ORD-(\d+)$/);
+          return m ? Math.max(max, parseInt(m[1])) : max;
+        }, 0);
+        const newOrders = validLines.map((l, i) => ({
+          id: `ORD-${String(maxOrd + 1 + i).padStart(3, "0")}`,
+          customer: form.customer,
+          date: form.date,
+          status: form.status,
+          item: l.item,
+          qty: Number(l.qty),
+          notes: l.notes || "",
+        }));
+        for (const o of newOrders) {
+          try { await upsertOrder(o); } catch (e) { console.warn("DB save failed:", e.message); }
+        }
+        setOrders(p => [...p, ...newOrders]);
+      }
     } else if (modal === "vendor") {
       if (!form.name) { show("Name required", "error"); return; }
       const obj = { ...form, leadDays: Number(form.leadDays) };
@@ -2160,9 +2213,13 @@ export default function App() {
                         </div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        {statuses.map(s => (
-                          <span key={s} style={{ background: sC(s) + "22", color: sC(s), padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{s}</span>
-                        ))}
+                        <select value={statuses.length === 1 ? statuses[0] : ""} onClick={e => e.stopPropagation()} onChange={(e) => { e.stopPropagation(); setGroupStatus(group, e.target.value); }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 12, background: statuses.length === 1 ? sC(statuses[0]) + "11" : "#1a1a2a", color: statuses.length === 1 ? sC(statuses[0]) : "#888", borderColor: statuses.length === 1 ? sC(statuses[0]) + "44" : "#333" }}>
+                          {statuses.length > 1 && <option value="">Mixed...</option>}
+                          {ORD_STATUSES.map(s => <option key={s}>{s}</option>)}
+                        </select>
+                        <button onClick={(e) => { e.stopPropagation(); addLinesToOrder(group); }} style={{ ...B2, padding: "5px 12px", fontSize: 12, borderColor: "#6366f144", color: "#6366f1" }}>
+                          <Plus size={12} /> Add Line
+                        </button>
                         {!allFulfilled && (
                           <button onClick={(e) => { e.stopPropagation(); shipAllLines(group.lines); }} style={{ ...B1, padding: "6px 14px", background: "#22c55e", fontSize: 12 }}>
                             <PackageCheck size={13} /> Ship All ({unshippedCount})
@@ -3499,17 +3556,54 @@ export default function App() {
       </Modal>
 
       {/* Order Modal */}
-      <Modal open={modal === "order"} onClose={() => setModal(null)} title={editItem ? "Edit Order" : "Add Order"}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Order ID</label><input value={form.id || ""} onChange={(e) => setForm((f) => ({ ...f, id: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Customer</label><input value={form.customer || ""} onChange={(e) => setForm((f) => ({ ...f, customer: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Item</label><select value={form.item || ""} onChange={(e) => setForm((f) => ({ ...f, item: e.target.value }))} style={IS}><option value="">Select...</option>{assemblies.filter((a) => getLevel(a.id) >= 300).map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}</select></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Qty</label><input type="number" value={form.qty || 0} onChange={(e) => setForm((f) => ({ ...f, qty: Number(e.target.value) }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Date</label><input type="date" value={form.date || ""} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} style={IS} /></div>
-          <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status</label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.map((s) => <option key={s}>{s}</option>)}</select></div>
-          <div style={{ gridColumn: "1/3" }}><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
-        </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>{editItem ? "Update" : "Add"}</button></div>
+      <Modal open={modal === "order"} onClose={() => setModal(null)} title={editItem ? "Edit Order Line" : (form.customer ? `Add Lines — ${form.customer}` : "New Order")} wide>
+        {editItem ? (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Order ID</label><input value={form.id || ""} readOnly style={{ ...IS, opacity: 0.5 }} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Customer</label><input value={form.customer || ""} onChange={(e) => setForm((f) => ({ ...f, customer: e.target.value }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Item</label><select value={form.item || ""} onChange={(e) => setForm((f) => ({ ...f, item: e.target.value }))} style={IS}><option value="">Select...</option>{assemblies.filter((a) => getLevel(a.id) >= 300).map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}</select></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Qty</label><input type="number" value={form.qty || 0} onChange={(e) => setForm((f) => ({ ...f, qty: Number(e.target.value) }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Date</label><input type="date" value={form.date || ""} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status</label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.map((s) => <option key={s}>{s}</option>)}</select></div>
+              <div style={{ gridColumn: "1/3" }}><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>Update</button></div>
+          </>
+        ) : (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Customer</label><input value={form.customer || ""} onChange={(e) => setForm((f) => ({ ...f, customer: e.target.value }))} style={IS} placeholder="Customer name" /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Date</label><input type="date" value={form.date || ""} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status</label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.map((s) => <option key={s}>{s}</option>)}</select></div>
+            </div>
+            <div style={{ borderTop: "1px solid #2a2a3a", paddingTop: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "#e0e0e0" }}>Order Lines</span>
+                <button onClick={() => setOrderLines(prev => [...prev, { item: "", qty: 0, notes: "" }])} style={{ ...B2, padding: "4px 12px", fontSize: 12, borderColor: "#6366f144", color: "#6366f1" }}><Plus size={12} /> Add Line</button>
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr>
+                  <th style={{ ...TH, width: "45%" }}>Item</th>
+                  <th style={{ ...TH, width: "15%" }}>Qty</th>
+                  <th style={{ ...TH, width: "30%" }}>Notes</th>
+                  <th style={{ ...TH, width: "10%" }}></th>
+                </tr></thead>
+                <tbody>
+                  {orderLines.map((line, idx) => (
+                    <tr key={idx}>
+                      <td style={TD}><select value={line.item} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, item: e.target.value } : l))} style={{ ...IS, fontSize: 13 }}><option value="">Select item...</option>{assemblies.filter((a) => getLevel(a.id) >= 300).map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}</select></td>
+                      <td style={TD}><input type="number" value={line.qty || ""} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, qty: Number(e.target.value) } : l))} style={{ ...IS, fontSize: 13 }} min="0" /></td>
+                      <td style={TD}><input value={line.notes || ""} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, notes: e.target.value } : l))} style={{ ...IS, fontSize: 13 }} placeholder="Optional" /></td>
+                      <td style={TD}>{orderLines.length > 1 && <button onClick={() => setOrderLines(prev => prev.filter((_, i) => i !== idx))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>{orderLines.filter(l => l.item && l.qty > 0).length > 1 ? `Add ${orderLines.filter(l => l.item && l.qty > 0).length} Lines` : "Add Order"}</button></div>
+          </>
+        )}
       </Modal>
 
       {/* Vendor Modal */}
