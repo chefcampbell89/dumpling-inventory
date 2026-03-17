@@ -468,7 +468,8 @@ export default function App() {
   const [forecastWeeks, setForecastWeeks] = useState([]);
   const [forecastDays, setForecastDays] = useState([]);
   const [planWeekStart, setPlanWeekStart] = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.toISOString().slice(0, 10);
+    const d = new Date(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   });
   const [weeklyEdits, setWeeklyEdits] = useState({});
   const [dailyEdits, setDailyEdits] = useState({});
@@ -544,8 +545,9 @@ export default function App() {
       getConfig("app_name").then(r => { if (r) setAppName(r); }).catch(() => {});
       getConfig("forecast_config").then(r => { if (r) setForecastConfig(prev => ({ ...prev, ...r })); }).catch(() => {});
       // Load forecast data for a wide window
-      const fcStart = (() => { const d = new Date(); d.setDate(d.getDate() - 56); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.toISOString().slice(0, 10); })();
-      const fcEnd = (() => { const d = new Date(); d.setDate(d.getDate() + 84); return d.toISOString().slice(0, 10); })();
+      const _fd = (dt) => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
+      const fcStart = (() => { const d = new Date(); d.setDate(d.getDate() - 56); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return _fd(d); })();
+      const fcEnd = (() => { const d = new Date(); d.setDate(d.getDate() + 84); return _fd(d); })();
       fetchForecastWeeks(fcStart, fcEnd).then(r => setForecastWeeks(r)).catch(() => {});
       fetchForecastDays(fcStart, fcEnd).then(r => setForecastDays(r)).catch(() => {});
     } catch (err) {
@@ -855,8 +857,10 @@ export default function App() {
   }, [orders, allItems]);
 
   // ---- Planning Helpers ----
-  const getMonday = (d) => { const dt = new Date(d); dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7)); return dt.toISOString().slice(0, 10); };
-  const addDays = (d, n) => { const dt = new Date(d); dt.setDate(dt.getDate() + n); return dt.toISOString().slice(0, 10); };
+  const fmtDate = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  const parseDate = (s) => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
+  const getMonday = (d) => { const dt = parseDate(typeof d === "string" ? d : fmtDate(d)); dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7)); return fmtDate(dt); };
+  const addDays = (d, n) => { const dt = parseDate(typeof d === "string" ? d : fmtDate(d)); dt.setDate(dt.getDate() + n); return fmtDate(dt); };
   const DAY_NAMES = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
   const productLines = useMemo(() => {
     const lines = [...new Set(assemblies.filter(a => getLevel(a.id) === 250).map(a => {
@@ -869,7 +873,7 @@ export default function App() {
   const autoForecast = useMemo(() => {
     const result = {};
     const lookback = forecastConfig.lookbackWeeks || 8;
-    const cutoff = addDays(new Date().toISOString().slice(0, 10), -(lookback * 7));
+    const cutoff = addDays(fmtDate(new Date()), -(lookback * 7));
     const fulfilled = orders.filter(o => o.status === "Fulfilled" && o.date >= cutoff);
     // BOM explosion to batch equivalents
     const explodeToBatch = (itemId, qty, targetLine) => {
@@ -924,7 +928,7 @@ export default function App() {
       }
       const demandPerWeek = autoForecast[pl] || 0;
       const weeksLeft = demandPerWeek > 0 ? batchEquiv / demandPerWeek : Infinity;
-      const stockoutDate = demandPerWeek > 0 ? addDays(new Date().toISOString().slice(0, 10), Math.round(weeksLeft * 7)) : null;
+      const stockoutDate = demandPerWeek > 0 ? addDays(fmtDate(new Date()), Math.round(weeksLeft * 7)) : null;
       return { productLine: pl, batchEquiv: Math.round(batchEquiv * 100) / 100, demandPerWeek, weeksLeft: Math.round(weeksLeft * 10) / 10, stockoutDate };
     });
   }, [productLines, allItems, autoForecast]);
@@ -2618,12 +2622,12 @@ export default function App() {
         const horizon = forecastConfig.horizonWeeks || 4;
         const workDays = forecastConfig.workDays || ["Mon","Tue","Wed","Thu","Fri"];
         const weekStarts = Array.from({ length: horizon }, (_, i) => addDays(planWeekStart, i * 7));
-        const todayStr = new Date().toISOString().slice(0, 10);
+        const todayStr = fmtDate(new Date());
 
         // Get days for the currently selected week
         const selectedWeekDays = Array.from({ length: 7 }, (_, i) => {
           const d = addDays(planWeekStart, i);
-          const dayName = DAY_NAMES[new Date(d).getDay()];
+          const dayName = DAY_NAMES[parseDate(d).getDay()];
           return { date: d, dayName, isWorkDay: workDays.includes(dayName) };
         }).filter(d => d.isWorkDay);
 
