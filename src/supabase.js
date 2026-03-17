@@ -366,6 +366,11 @@ export async function fetchProfiles() {
   return data.map(r => ({ id: r.id, email: r.email, name: r.name, role: r.role, createdAt: r.created_at }))
 }
 
+export async function deleteProfile(userId) {
+  const { error } = await supabase.from("profiles").delete().eq("id", userId)
+  if (error) throw error
+}
+
 export async function getInviteCode() {
   const { data, error } = await supabase.from("app_settings").select("value").eq("key", "invite_code").single()
   if (error) throw error

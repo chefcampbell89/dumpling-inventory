@@ -11,7 +11,7 @@ import {
   fetchInventoryLots, adjustLotQty,
   zeroAllInventory, bulkUpdateItemQtys,
   fetchWishes, createWish, countUserWishes,
-  signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles,
+  signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles, deleteProfile as dbDeleteProfile,
   getInviteCode, setInviteCode, getLocations, saveLocations, getConfig, saveConfig, changePassword, supabase,
 } from "./supabase";
 
@@ -369,6 +369,7 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [allProfiles, setAllProfiles] = useState([]);
+  const [delUserConfirm, setDelUserConfirm] = useState(null);
   const [pwModal, setPwModal] = useState(false);
   const [newPw, setNewPw] = useState("");
   const [newPwConfirm, setNewPwConfirm] = useState("");
@@ -911,6 +912,17 @@ export default function App() {
     const ids = new Set(group.lines.map(o => o.id));
     setOrders(prev => prev.filter(o => !ids.has(o.id)));
     show(`Deleted order for ${group.customer}`);
+  };
+
+  const delUser = async (userId) => {
+    try {
+      await dbDeleteProfile(userId);
+      setAllProfiles((prev) => prev.filter((x) => x.id !== userId));
+      show("User removed");
+    } catch (e) {
+      show(e.message, "error");
+    }
+    setDelUserConfirm(null);
   };
 
   const openAdjust = (item) => { setAdjItem(item); setAdjQty(item.qty); setAdjNotes(""); setAdjModal(true); };
@@ -2642,7 +2654,12 @@ export default function App() {
                                 </select>
                               </td>
                               <td style={{ ...TD, fontSize: 12, color: "#888" }}>{p.createdAt ? new Date(p.createdAt).toLocaleDateString() : "—"}</td>
-                              <td style={{ ...TD, fontSize: 12, color: "#555" }}>{p.id === profile?.id ? "(you)" : ""}</td>
+                              <td style={{ ...TD, fontSize: 12, color: "#555" }}>
+                                {p.id === profile?.id
+                                  ? "(you)"
+                                  : <button onClick={() => setDelUserConfirm(p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }} title="Remove user"><Trash2 size={14} /></button>
+                                }
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -3266,6 +3283,17 @@ export default function App() {
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button onClick={() => setDelConfirm(null)} style={B2}>Cancel</button>
           <button onClick={() => { del(delConfirm); setDelConfirm(null); }} style={{ ...B1, background: "#dc2626" }}>Delete</button>
+        </div>
+      </Modal>
+
+      {/* Delete User Confirm */}
+      <Modal open={delUserConfirm !== null} onClose={() => setDelUserConfirm(null)} title="Remove User">
+        <p style={{ color: "#ccc", margin: "0 0 20px", fontSize: 14 }}>
+          Remove <strong>{delUserConfirm?.email}</strong>{delUserConfirm?.name ? ` (${delUserConfirm.name})` : ""}? They will no longer be able to use this app. This cannot be undone.
+        </p>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={() => setDelUserConfirm(null)} style={B2}>Cancel</button>
+          <button onClick={() => delUser(delUserConfirm.id)} style={{ ...B1, background: "#dc2626" }}>Remove</button>
         </div>
       </Modal>
 
