@@ -1,4 +1,4 @@
-// APP VERSION: v109
+// APP VERSION: v110
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -254,32 +254,56 @@ function GoldenLamp({ active, onClick, size = 28 }) {
   const a = active;
   return (
     <button onClick={a ? onClick : undefined} style={{ background: "none", border: "none", cursor: a ? "pointer" : "default", padding: 2, opacity: a ? 1 : 0.3, filter: a ? "drop-shadow(0 0 6px #fbbf24)" : "none", transition: "all 0.3s" }} title={a ? "Make a wish!" : "Wish used"}>
-      <svg width={size} height={size * 0.7} viewBox="0 0 230 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg width={size} height={size} viewBox="0 0 266 190" fill="none" xmlns="http://www.w3.org/2000/svg">
+        {/* Smoke / vapor wisps when active */}
         {a && <>
-          <path d="M52 48 C48 38 40 28 34 22 C28 16 22 14 20 20 C18 28 24 36 30 40" stroke="#6366f1" strokeWidth="3" strokeLinecap="round" fill="none" opacity="0.5" />
-          <path d="M48 52 C42 42 36 32 28 26 C22 22 18 18 16 24 C14 30 20 38 26 42" stroke="#818cf8" strokeWidth="2" strokeLinecap="round" fill="none" opacity="0.35" />
-          <circle cx="19" cy="18" r="2.5" fill="#818cf8" opacity="0.4" />
-          <circle cx="15" cy="24" r="1.5" fill="#a5b4fc" opacity="0.3" />
+          <path d="M52 88 C48 78 40 68 34 58 C30 50 28 40 32 36 C36 32 40 38 42 46 C44 54 48 66 52 76" stroke="#fbbf24" strokeWidth="2.5" strokeLinecap="round" fill="none" opacity="0.4">
+            <animate attributeName="opacity" values="0.4;0.15;0.4" dur="3s" repeatCount="indefinite" />
+            <animate attributeName="d" values="M52 88 C48 78 40 68 34 58 C30 50 28 40 32 36 C36 32 40 38 42 46 C44 54 48 66 52 76;M52 88 C46 76 38 64 30 54 C24 46 20 36 26 32 C32 28 38 36 40 44 C42 52 46 64 52 76;M52 88 C48 78 40 68 34 58 C30 50 28 40 32 36 C36 32 40 38 42 46 C44 54 48 66 52 76" dur="3s" repeatCount="indefinite" />
+          </path>
+          <path d="M48 92 C42 80 36 66 28 56 C22 48 18 38 22 34 C26 30 32 36 34 44 C36 52 40 68 46 80" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" fill="none" opacity="0.3">
+            <animate attributeName="opacity" values="0.3;0.1;0.3" dur="2.5s" repeatCount="indefinite" />
+          </path>
+          <path d="M56 84 C54 72 46 56 42 44 C40 38 42 30 46 28 C50 26 50 34 50 42 C50 52 54 68 56 78" stroke="#fcd34d" strokeWidth="1.5" strokeLinecap="round" fill="none" opacity="0.25">
+            <animate attributeName="opacity" values="0.25;0.08;0.25" dur="3.5s" repeatCount="indefinite" />
+          </path>
+          <circle cx="30" cy="34" r="2" fill="#fbbf24" opacity="0.3">
+            <animate attributeName="opacity" values="0.3;0;0.3" dur="2s" repeatCount="indefinite" />
+          </circle>
+          <circle cx="22" cy="42" r="1.5" fill="#fcd34d" opacity="0.2">
+            <animate attributeName="opacity" values="0.2;0;0.2" dur="2.8s" repeatCount="indefinite" />
+          </circle>
         </>}
-        <ellipse cx="135" cy="152" rx="38" ry="6" fill={a ? "#96700a" : "#333"} />
-        <path d="M110 152 L114 146 L156 146 L160 152" fill={a ? "#b8860b" : "#444"} />
-        <path d="M110 146 Q112 140 135 138 Q158 140 160 146 Z" fill={a ? "#c49a1a" : "#555"} />
-        <path d="M55 120 C45 116 30 108 20 96 C12 86 8 76 14 70 C22 64 32 68 40 78 C46 86 50 96 55 108 Z" fill={a ? "#daa520" : "#666"} />
-        <path d="M55 116 C47 112 34 104 26 94 C18 84 16 76 20 72 C26 66 34 72 40 80 C46 88 50 98 55 108 Z" fill={a ? "#e8b830" : "#777"} />
-        <path d="M14 74 C8 72 4 78 8 86 C10 90 14 88 16 82 Z" fill={a ? "#daa520" : "#666"} />
-        <ellipse cx="135" cy="118" rx="80" ry="28" fill={a ? "#daa520" : "#666"} />
-        <ellipse cx="135" cy="114" rx="80" ry="28" fill={a ? "#e8b830" : "#777"} />
-        <ellipse cx="135" cy="108" rx="60" ry="16" fill={a ? "#f0c840" : "#888"} opacity="0.35" />
-        <ellipse cx="135" cy="90" rx="24" ry="6" fill={a ? "#96700a" : "#444"} />
-        <path d="M111 90 Q118 72 135 68 Q152 72 159 90 Z" fill={a ? "#c49a1a" : "#555"} />
-        <path d="M115 88 Q120 74 135 70 Q150 74 155 88 Z" fill={a ? "#daa520" : "#666"} />
-        <path d="M125 68 L127 62 L143 62 L145 68" fill={a ? "#b8860b" : "#555"} />
-        <ellipse cx="135" cy="62" rx="12" ry="4" fill={a ? "#c49a1a" : "#555"} />
-        <ellipse cx="135" cy="60" rx="9" ry="3" fill={a ? "#daa520" : "#666"} />
-        <ellipse cx="135" cy="57" rx="5" ry="2.5" fill={a ? "#e8b830" : "#777"} />
-        <circle cx="135" cy="53" r="3" fill={a ? "#f0c840" : "#777"} />
-        <path d="M200 106 C210 100 220 104 218 116 C216 126 208 130 200 124" stroke={a ? "#96700a" : "#444"} strokeWidth="4.5" fill="none" strokeLinecap="round" />
-        <path d="M200 106 C210 100 220 104 218 116 C216 126 208 130 200 124" stroke={a ? "#c49a1a" : "#555"} strokeWidth="3" fill="none" strokeLinecap="round" />
+        {/* Base / pedestal */}
+        <ellipse cx="160" cy="178" rx="70" ry="8" fill={a ? "#7a5a08" : "#333"} />
+        <path d="M95 178 L100 170 L220 170 L225 178 Z" fill={a ? "#96700a" : "#3a3a3a"} />
+        {/* Lamp body — wide rounded belly */}
+        <ellipse cx="160" cy="142" rx="85" ry="32" fill={a ? "#b8860b" : "#555"} />
+        <ellipse cx="160" cy="138" rx="85" ry="32" fill={a ? "#daa520" : "#666"} />
+        <ellipse cx="160" cy="134" rx="82" ry="30" fill={a ? "#e8b830" : "#777"} />
+        {/* Highlight on body */}
+        <ellipse cx="160" cy="126" rx="55" ry="14" fill={a ? "#f0c840" : "#888"} opacity="0.3" />
+        {/* Spout — long curved pouring lip */}
+        <path d="M75 134 C65 130 50 122 38 112 C28 104 18 92 22 86 C28 78 38 84 46 94 C54 104 62 118 72 130 Z" fill={a ? "#daa520" : "#666"} />
+        <path d="M75 130 C67 126 54 118 44 108 C36 100 30 90 34 86 C40 80 48 88 54 96 C60 104 66 118 72 128 Z" fill={a ? "#e8b830" : "#777"} />
+        {/* Spout tip */}
+        <path d="M22 90 C16 88 14 94 18 100 C20 103 24 100 24 96 Z" fill={a ? "#daa520" : "#666"} />
+        {/* Neck / chimney */}
+        <path d="M140 108 Q148 88 160 84 Q172 88 180 108 Z" fill={a ? "#c49a1a" : "#555"} />
+        <path d="M144 106 Q150 90 160 86 Q170 90 176 106 Z" fill={a ? "#daa520" : "#666"} />
+        {/* Lid */}
+        <ellipse cx="160" cy="84" rx="22" ry="6" fill={a ? "#96700a" : "#444"} />
+        <ellipse cx="160" cy="82" rx="18" ry="5" fill={a ? "#c49a1a" : "#555"} />
+        {/* Lid knob */}
+        <ellipse cx="160" cy="78" rx="8" ry="3.5" fill={a ? "#daa520" : "#666"} />
+        <ellipse cx="160" cy="76" rx="5" ry="2.5" fill={a ? "#e8b830" : "#777"} />
+        <circle cx="160" cy="73" r="3" fill={a ? "#f0c840" : "#777"} />
+        {/* Handle — ornate curved loop on right */}
+        <path d="M230 120 C244 112 258 118 256 132 C254 144 244 150 232 142" stroke={a ? "#96700a" : "#444"} strokeWidth="5" fill="none" strokeLinecap="round" />
+        <path d="M230 120 C244 112 258 118 256 132 C254 144 244 150 232 142" stroke={a ? "#c49a1a" : "#555"} strokeWidth="3" fill="none" strokeLinecap="round" />
+        {/* Decorative band around belly */}
+        <ellipse cx="160" cy="138" rx="85" ry="2" fill={a ? "#96700a" : "#444"} opacity="0.5" />
+        <ellipse cx="160" cy="148" rx="80" ry="1.5" fill={a ? "#96700a" : "#444"} opacity="0.3" />
       </svg>
     </button>
   );
