@@ -386,7 +386,7 @@ export async function fetchForecastWeeks(startDate, endDate) {
 
 export async function upsertForecastWeek(fw) {
   const { data, error } = await supabase.from("forecast_weeks").upsert({
-    id: fw.id || undefined, week_start: fw.weekStart, product_line: fw.productLine,
+    ...(fw.id ? { id: fw.id } : {}), week_start: fw.weekStart, product_line: fw.productLine,
     item_id: fw.itemId, forecast_qty: fw.forecastQty, auto_qty: fw.autoQty,
     notes: fw.notes || "", created_by: fw.createdBy || "", updated_at: new Date().toISOString(),
   }, { onConflict: "week_start,product_line" }).select()
@@ -407,7 +407,7 @@ export async function fetchForecastDays(startDate, endDate) {
 
 export async function upsertForecastDays(days) {
   const rows = days.map(d => ({
-    id: d.id || undefined, forecast_week_id: d.forecastWeekId, day_date: d.dayDate,
+    ...(d.id ? { id: d.id } : {}), forecast_week_id: d.forecastWeekId, day_date: d.dayDate,
     product_line: d.productLine, planned_qty: d.plannedQty,
     actual_qty: d.actualQty, notes: d.notes || "",
   }))
