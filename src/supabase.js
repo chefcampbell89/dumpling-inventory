@@ -90,14 +90,14 @@ export async function fetchOrders() {
   if (error) throw error
   return data.map(r => ({
     id: r.id, customer: r.customer, item: r.item_id, qty: Number(r.qty),
-    date: r.order_date, status: r.status, notes: r.notes,
+    date: r.order_date, status: r.status, notes: r.notes, shipDate: r.ship_date || null,
   }))
 }
 
 export async function upsertOrder(o) {
   const { error } = await supabase.from("orders").upsert({
     id: o.id, customer: o.customer, item_id: o.item, qty: o.qty,
-    order_date: o.date, status: o.status, notes: o.notes,
+    order_date: o.date, status: o.status, notes: o.notes, ship_date: o.shipDate || null,
   })
   if (error) throw error
 }

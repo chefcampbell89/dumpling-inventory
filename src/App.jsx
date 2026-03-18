@@ -1,4 +1,4 @@
-// APP VERSION: v111
+// APP VERSION: v112
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -21,7 +21,7 @@ import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
   ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
-  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles, TrendingUp, ChevronLeft, Calendar,
+  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles, TrendingUp, ChevronLeft, Calendar, LayoutDashboard,
 } from "lucide-react";
 
 // ============================================================
@@ -227,14 +227,14 @@ const SEED_VENDORS = [
 ];
 
 const SEED_ORDERS = [
-  { id: "ORD-001", customer: "Green Grocer Market", item: "400-CB Pack", qty: 48, date: "2026-03-10", status: "Pending", notes: "Weekly standing order" },
-  { id: "ORD-002", customer: "Dumpling Festival", item: "400-CB Food Service Case", qty: 10, date: "2026-03-15", status: "Confirmed", notes: "Event — deliver by 8am" },
-  { id: "ORD-003", customer: "Happy Belly Restaurant", item: "400-LG Food Service Case", qty: 4, date: "2026-03-12", status: "Fulfilled", notes: "" },
-  { id: "ORD-004", customer: "Whole Foods Northeast", item: "500-CB Retail Case", qty: 20, date: "2026-03-18", status: "Pending", notes: "New account trial" },
-  { id: "ORD-005", customer: "Whole Foods Northeast", item: "500-CH Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial" },
-  { id: "ORD-006", customer: "Whole Foods Northeast", item: "500-GC Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial" },
-  { id: "ORD-007", customer: "Whole Foods Northeast", item: "500-LG Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial" },
-  { id: "ORD-008", customer: "Whole Foods Northeast", item: "500-TM Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial" },
+  { id: "ORD-001", customer: "Green Grocer Market", item: "400-CB Pack", qty: 48, date: "2026-03-10", status: "Pending", notes: "Weekly standing order", shipDate: null },
+  { id: "ORD-002", customer: "Dumpling Festival", item: "400-CB Food Service Case", qty: 10, date: "2026-03-15", status: "Confirmed", notes: "Event — deliver by 8am", shipDate: null },
+  { id: "ORD-003", customer: "Happy Belly Restaurant", item: "400-LG Food Service Case", qty: 4, date: "2026-03-12", status: "Fulfilled", notes: "", shipDate: null },
+  { id: "ORD-004", customer: "Whole Foods Northeast", item: "500-CB Retail Case", qty: 20, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
+  { id: "ORD-005", customer: "Whole Foods Northeast", item: "500-CH Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
+  { id: "ORD-006", customer: "Whole Foods Northeast", item: "500-GC Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
+  { id: "ORD-007", customer: "Whole Foods Northeast", item: "500-LG Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
+  { id: "ORD-008", customer: "Whole Foods Northeast", item: "500-TM Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
 ];
 
 // ============================================================
@@ -399,7 +399,7 @@ export default function App() {
   const [newPw, setNewPw] = useState("");
   const [newPwConfirm, setNewPwConfirm] = useState("");
   const isAdmin = profile?.role === "admin";
-  const [tab, setTab] = useState("inventory");
+  const [tab, setTab] = useState("dashboard");
   const [parts, setParts] = useState(SEED_PARTS);
   const [assemblies, setAssemblies] = useState(SEED_ASSEMBLIES);
   const [vendors, setVendors] = useState(SEED_VENDORS);
@@ -477,6 +477,13 @@ export default function App() {
   const [dailyEdits, setDailyEdits] = useState({});
   const [forecastConfig, setForecastConfig] = useState({ horizonWeeks: 4, lookbackWeeks: 8, workDays: ["Mon","Tue","Wed","Thu","Fri"] });
 
+  // ---- Dashboard State ----
+  const [dashView, setDashView] = useState("daily");
+  const [dailyNote, setDailyNote] = useState({ text: "", updatedAt: null, updatedBy: "" });
+  const [editingNote, setEditingNote] = useState(false);
+  const [noteText, setNoteText] = useState("");
+  const [blockersOpen, setBlockersOpen] = useState(false);
+
   // Config aliases (so existing JSX references keep working)
   const LEVELS = cfgLevels;
   const ORD_STATUSES = cfgOrdStatuses;
@@ -546,6 +553,7 @@ export default function App() {
       getConfig("sku_levels").then(r => { if (r) setCfgLevels(r); }).catch(() => {});
       getConfig("app_name").then(r => { if (r) setAppName(r); }).catch(() => {});
       getConfig("forecast_config").then(r => { if (r) setForecastConfig(prev => ({ ...prev, ...r })); }).catch(() => {});
+      getConfig("daily_note").then(r => { if (r) setDailyNote(r); }).catch(() => {});
       // Load forecast data for a wide window
       const _fd = (dt) => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
       const fcStart = (() => { const d = new Date(); d.setDate(d.getDate() - 56); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return _fd(d); })();
@@ -935,6 +943,66 @@ export default function App() {
     });
   }, [productLines, allItems, autoForecast]);
 
+  // ---- Dashboard Computed Data ----
+  const todayStr = useMemo(() => fmtDate(new Date()), []);
+
+  const todaysForecast = useMemo(() => {
+    return forecastDays.filter(fd => fd.dayDate === todayStr);
+  }, [forecastDays, todayStr]);
+
+  const todaysShipments = useMemo(() => {
+    return orders.filter(o => o.shipDate === todayStr);
+  }, [orders, todayStr]);
+
+  const weekShipments = useMemo(() => {
+    const monday = getMonday(todayStr);
+    const sunday = addDays(monday, 6);
+    return orders.filter(o => o.shipDate && o.shipDate >= monday && o.shipDate <= sunday);
+  }, [orders, todayStr]);
+
+  const weekForecast = useMemo(() => {
+    const monday = getMonday(todayStr);
+    const sunday = addDays(monday, 6);
+    const weekDays = forecastDays.filter(fd => fd.dayDate >= monday && fd.dayDate <= sunday);
+    const byLine = {};
+    for (const fd of weekDays) {
+      if (!byLine[fd.productLine]) byLine[fd.productLine] = { planned: 0, actual: 0 };
+      byLine[fd.productLine].planned += fd.plannedQty;
+      if (fd.actualQty !== null && fd.actualQty !== undefined) byLine[fd.productLine].actual += fd.actualQty;
+    }
+    return { days: weekDays, byLine };
+  }, [forecastDays, todayStr]);
+
+  const todaysBlockers = useMemo(() => {
+    const planned = forecastDays.filter(fd => fd.dayDate === todayStr && fd.plannedQty > 0);
+    if (planned.length === 0) return [];
+    const rawNeeds = {};
+    const explodeToRaw = (id, mult) => {
+      const it = allItems.find(i => i.id === id);
+      if (!it) return;
+      if (getLevel(it.id) === 100) {
+        if (!rawNeeds[it.id]) rawNeeds[it.id] = { item: it, needed: 0 };
+        rawNeeds[it.id].needed += mult;
+        return;
+      }
+      if (it.bom) for (const l of it.bom) explodeToRaw(l.partId, l.qty * mult);
+    };
+    for (const fd of planned) {
+      const batchId = `250-${fd.productLine} Batch`;
+      explodeToRaw(batchId, fd.plannedQty);
+    }
+    return Object.values(rawNeeds)
+      .filter(r => r.item.qty < r.needed)
+      .map(r => ({
+        id: r.item.id, name: r.item.name,
+        needed: Math.ceil(r.needed * 1000) / 1000,
+        onHand: r.item.qty,
+        shortfall: Math.ceil((r.needed - r.item.qty) * 1000) / 1000,
+        unit: r.item.unit,
+      }))
+      .sort((a, b) => b.shortfall - a.shortfall);
+  }, [forecastDays, allItems, todayStr]);
+
   // ---- CRUD with Supabase persistence ----
   const bomItemsForLevel = (level) => {
     if (level <= 200) return parts;
@@ -1052,6 +1120,7 @@ export default function App() {
           item: l.item,
           qty: Number(l.qty),
           notes: l.notes || "",
+          shipDate: null,
         }));
         for (const o of newOrders) {
           try { await upsertOrder(o); } catch (e) { console.warn("DB save failed:", e.message); }
@@ -1980,16 +2049,17 @@ export default function App() {
         </div>
       </div>
 
-      {/* Stats */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
+      {/* Stats (hidden on dashboard) */}
+      {tab !== "dashboard" && <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
         <Stat icon={<Package size={18} />} label="Total SKUs" value={stats.total} accent="#6366f1" />
         <Stat icon={<AlertTriangle size={18} />} label="Low Stock" value={stats.low} accent={stats.low > 0 ? "#ef4444" : "#22c55e"} />
         <Stat icon={<span style={{ fontSize: 18 }}>&#129791;</span>} label="Total Dumplings" value={stats.totalPcs.toLocaleString()} accent="#f59e0b" />
         <Stat icon={<ShoppingCart size={18} />} label="Open Orders" value={orderStats.pending} accent="#ec4899" />
-      </div>
+      </div>}
 
       {/* Tab Bar */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {tabBtn("dashboard", "Dashboard", <LayoutDashboard size={14} />)}
         {tabBtn("inventory", "Inventory", <Package size={14} />)}
         {tabBtn("items", "Item Master", <Layers size={14} />)}
         {tabBtn("orders", "Orders", <ShoppingCart size={14} />)}
@@ -2003,8 +2073,8 @@ export default function App() {
         {isAdmin && tabBtn("admin", "Admin Config", <Settings size={14} />)}
       </div>
 
-      {/* Filters */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+      {/* Filters (hidden on dashboard) */}
+      {tab !== "dashboard" && <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
         <div style={{ position: "relative", flex: "1 1 200px", minWidth: 180 }}>
           <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#555" }} />
           <input placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...IS, paddingLeft: 32 }} />
@@ -2036,7 +2106,222 @@ export default function App() {
         {tab === "receiving" && <button onClick={openReceiveManual} style={B1}><Plus size={14} /> Manual Receipt</button>}
         {tab === "pos" && <button onClick={openManualPO} style={B1}><Plus size={14} /> Create PO</button>}
         {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setProdDate(fmtDate(new Date())); setProdModal(true); }} style={B1}><Hammer size={14} /> Run Production</button>}
-      </div>
+      </div>}
+
+      {/* ================== DASHBOARD ================== */}
+      {tab === "dashboard" && (() => {
+        const todayDisplay = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+        const isStale = dailyNote.updatedAt && dailyNote.updatedAt.slice(0, 10) !== todayStr;
+
+        // Group shipments by customer+shipDate
+        const shipSource = dashView === "daily" ? todaysShipments : weekShipments;
+        const shipGroups = {};
+        for (const o of shipSource) {
+          const key = `${o.customer}|||${o.shipDate}`;
+          if (!shipGroups[key]) shipGroups[key] = { customer: o.customer, shipDate: o.shipDate, lines: [] };
+          shipGroups[key].lines.push(o);
+        }
+        const shipGroupArr = Object.values(shipGroups);
+
+        // Pieces calculator
+        const calcPieces = (productLine, batches) => {
+          const batchItem = allItems.find(i => i.id === `250-${productLine} Batch`);
+          return batchItem && batchItem.piecesPerUnit > 0 ? Math.round(batches * batchItem.piecesPerUnit) : 0;
+        };
+
+        // Actual production logged today
+        const todayRuns = prodRuns.filter(r => r.date === todayStr);
+        const actualByLine = {};
+        for (const r of todayRuns) {
+          const m = r.assemblyId.match(/^250-(\w+)/);
+          if (m) actualByLine[m[1]] = (actualByLine[m[1]] || 0) + r.qtyProduced;
+        }
+
+        // Forecast data for the active view
+        const forecastRows = dashView === "daily" ? todaysForecast : Object.entries(weekForecast.byLine).sort().map(([pl, d]) => ({ productLine: pl, plannedQty: d.planned, actualQty: d.actual }));
+        const totalBatches = dashView === "daily" ? todaysForecast.reduce((s, fd) => s + fd.plannedQty, 0) : Object.values(weekForecast.byLine).reduce((s, v) => s + v.planned, 0);
+        const totalPieces = forecastRows.reduce((s, fd) => s + calcPieces(fd.productLine, fd.plannedQty), 0);
+
+        return (
+          <div>
+            {/* Header + Toggle */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h2 style={{ margin: 0, fontSize: 18, color: "#e0e0e0" }}>{todayDisplay}</h2>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button onClick={() => setDashView("daily")} style={{ ...B2, background: dashView === "daily" ? "#6366f1" : "#2a2a3a", color: dashView === "daily" ? "#fff" : "#ccc", borderColor: dashView === "daily" ? "#6366f1" : "#333", fontSize: 12, padding: "6px 14px" }}>Daily</button>
+                <button onClick={() => setDashView("weekly")} style={{ ...B2, background: dashView === "weekly" ? "#6366f1" : "#2a2a3a", color: dashView === "weekly" ? "#fff" : "#ccc", borderColor: dashView === "weekly" ? "#6366f1" : "#333", fontSize: 12, padding: "6px 14px" }}>Weekly</button>
+              </div>
+            </div>
+
+            {/* Manager's Note */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: isStale ? "1px solid #f59e0b33" : "1px solid #2a2a3a", padding: "16px 20px", marginBottom: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                <div style={{ fontSize: 11, color: "#888", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  {"Manager's Note"}
+                  {isStale && <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 10, fontWeight: 400 }}>(stale)</span>}
+                </div>
+                {dailyNote.updatedAt && (
+                  <span style={{ fontSize: 10, color: "#555" }}>
+                    Updated {new Date(dailyNote.updatedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                    {dailyNote.updatedBy && ` by ${dailyNote.updatedBy}`}
+                  </span>
+                )}
+              </div>
+              {editingNote ? (
+                <div>
+                  <textarea value={noteText} onChange={e => setNoteText(e.target.value)} rows={3} style={{ ...IS, resize: "vertical", fontSize: 14, lineHeight: 1.6 }} autoFocus />
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+                    <button onClick={() => setEditingNote(false)} style={B2}>Cancel</button>
+                    <button onClick={async () => {
+                      const note = { text: noteText, updatedAt: new Date().toISOString(), updatedBy: profile?.name || profile?.email || "" };
+                      setDailyNote(note);
+                      try { await saveConfig("daily_note", note); show("Note saved"); } catch (e) { show(e.message, "error"); }
+                      setEditingNote(false);
+                    }} style={B1}><Check size={14} /> Save</button>
+                  </div>
+                </div>
+              ) : (
+                <div onClick={() => { if (isAdmin) { setNoteText(dailyNote.text || ""); setEditingNote(true); } }} style={{ fontSize: 14, color: "#d0d0d0", lineHeight: 1.6, whiteSpace: "pre-wrap", cursor: isAdmin ? "pointer" : "default", minHeight: 20 }}>
+                  {dailyNote.text || (isAdmin ? <span style={{ color: "#555", fontStyle: "italic" }}>Click to add a note...</span> : <span style={{ color: "#555", fontStyle: "italic" }}>No note set.</span>)}
+                </div>
+              )}
+            </div>
+
+            {/* Summary Stats */}
+            <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+              <Stat icon={<Hammer size={18} />} label={dashView === "daily" ? "Batches Planned" : "Week Batches"} value={totalBatches} accent="#8b5cf6" />
+              <Stat icon={<span style={{ fontSize: 18 }}>&#129791;</span>} label="Expected Pieces" value={totalPieces > 0 ? totalPieces.toLocaleString() : "\u2014"} accent="#f59e0b" />
+              <Stat icon={<PackageCheck size={18} />} label={dashView === "daily" ? "Shipments Today" : "Shipments This Week"} value={shipGroupArr.length} accent="#22c55e" />
+              {todaysBlockers.length > 0 && <Stat icon={<AlertTriangle size={18} />} label="Blockers" value={todaysBlockers.length} accent="#ef4444" />}
+            </div>
+
+            {/* Production Plan Table */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
+              <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>
+                {dashView === "daily" ? "Today's Production Plan" : "This Week's Production Plan"}
+              </div>
+              {forecastRows.length === 0 ? (
+                <div style={{ padding: 24, textAlign: "center", color: "#555", fontSize: 13 }}>No production planned. Set up in the Planning tab.</div>
+              ) : (
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={TH}>Product Line</th>
+                    <th style={{ ...TH, textAlign: "center" }}>Planned</th>
+                    <th style={{ ...TH, textAlign: "center" }}>Actual</th>
+                    <th style={{ ...TH, textAlign: "center" }}>Expected Pcs</th>
+                  </tr></thead>
+                  <tbody>
+                    {forecastRows.map(fd => {
+                      const actual = dashView === "daily" ? (actualByLine[fd.productLine] || 0) : (fd.actualQty || 0);
+                      const pcs = calcPieces(fd.productLine, fd.plannedQty);
+                      return (
+                        <tr key={fd.productLine}>
+                          <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{fd.productLine} Batch</td>
+                          <td style={{ ...TD, textAlign: "center", fontWeight: 600 }}>{fd.plannedQty}</td>
+                          <td style={{ ...TD, textAlign: "center", color: actual >= fd.plannedQty ? "#22c55e" : "#f59e0b", fontWeight: 600 }}>{actual}</td>
+                          <td style={{ ...TD, textAlign: "center", color: "#888" }}>{pcs > 0 ? pcs.toLocaleString() : "\u2014"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Shipments */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
+              <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>
+                {dashView === "daily" ? "Today's Shipments" : "This Week's Shipments"}
+                {shipGroupArr.length > 0 && <span style={{ marginLeft: 8, fontSize: 11, color: "#888" }}>({shipGroupArr.length} order{shipGroupArr.length !== 1 ? "s" : ""})</span>}
+              </div>
+              {shipGroupArr.length === 0 ? (
+                <div style={{ padding: 24, textAlign: "center", color: "#555", fontSize: 13 }}>No shipments scheduled. Set ship dates in the Orders tab.</div>
+              ) : (
+                <div>
+                  {shipGroupArr.map((sg, i) => {
+                    const allDone = sg.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
+                    return (
+                      <div key={i} style={{ padding: "12px 16px", borderBottom: i < shipGroupArr.length - 1 ? "1px solid #1a1a2a" : "none", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                        <div>
+                          <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 14 }}>{sg.customer}</div>
+                          <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
+                            {sg.lines.map(o => { const it = gi(o.item); return `${o.qty}x ${it?.name || o.item}`; }).join(", ")}
+                          </div>
+                          {dashView === "weekly" && <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>Ship: {sg.shipDate}</div>}
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          {allDone ? (
+                            <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>Shipped</span>
+                          ) : (
+                            <button onClick={() => shipAllLines(sg.lines)} style={{ ...B1, padding: "6px 14px", background: "#22c55e", fontSize: 12 }}>
+                              <PackageCheck size={13} /> Ship All
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Runway (weekly only) */}
+            {dashView === "weekly" && runwayData.length > 0 && (
+              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Inventory Runway</div>
+                <div style={{ display: "flex", flexWrap: "wrap" }}>
+                  {runwayData.map(r => {
+                    const color = r.weeksLeft === Infinity ? "#6366f1" : r.weeksLeft < 1 ? "#ef4444" : r.weeksLeft < 2 ? "#f59e0b" : r.weeksLeft < 4 ? "#22c55e" : "#6366f1";
+                    return (
+                      <div key={r.productLine} style={{ flex: "1 1 120px", padding: "14px 18px", borderRight: "1px solid #2a2a3a", textAlign: "center" }}>
+                        <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>{r.productLine}</div>
+                        <div style={{ fontSize: 20, fontWeight: 700, color }}>{r.weeksLeft === Infinity ? "\u221E" : r.weeksLeft.toFixed(1)}</div>
+                        <div style={{ fontSize: 10, color: "#666" }}>weeks</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Production Blockers (collapsible) */}
+            {todaysBlockers.length > 0 && (
+              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #ef444433", overflow: "hidden" }}>
+                <div onClick={() => setBlockersOpen(o => !o)} style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {blockersOpen ? <ChevronDown size={14} style={{ color: "#888" }} /> : <ChevronRight size={14} style={{ color: "#888" }} />}
+                    <span style={{ fontSize: 13, fontWeight: 600, color: "#ef4444" }}>
+                      <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
+                      Production Blockers
+                    </span>
+                  </div>
+                  <span style={{ background: "#ef444422", color: "#ef4444", padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{todaysBlockers.length}</span>
+                </div>
+                {blockersOpen && (
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead><tr>
+                      <th style={TH}>Material</th>
+                      <th style={{ ...TH, textAlign: "center" }}>Needed</th>
+                      <th style={{ ...TH, textAlign: "center" }}>On Hand</th>
+                      <th style={{ ...TH, textAlign: "center" }}>Short</th>
+                    </tr></thead>
+                    <tbody>
+                      {todaysBlockers.map(b => (
+                        <tr key={b.id}>
+                          <td style={{ ...TD, fontWeight: 500 }}>{b.name}</td>
+                          <td style={{ ...TD, textAlign: "center" }}>{b.needed} {b.unit}</td>
+                          <td style={{ ...TD, textAlign: "center", color: "#f59e0b" }}>{b.onHand} {b.unit}</td>
+                          <td style={{ ...TD, textAlign: "center", color: "#ef4444", fontWeight: 600 }}>{b.shortfall} {b.unit}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ================== INVENTORY TABLE ================== */}
       {tab === "inventory" && (
@@ -2209,6 +2494,17 @@ export default function App() {
                           <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
                             {group.date} • {group.lines.length} line{group.lines.length > 1 ? "s" : ""} • {totalItems} total units
                             {notes && <span style={{ marginLeft: 8, color: "#666" }}>— {notes.slice(0, 60)}{notes.length > 60 ? "..." : ""}</span>}
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                            <span style={{ fontSize: 11, color: "#666" }}>Ship:</span>
+                            <input type="date" value={group.lines[0]?.shipDate || ""} onClick={e => e.stopPropagation()} onChange={async (e) => {
+                              e.stopPropagation();
+                              const nd = e.target.value || null;
+                              const updated = group.lines.map(o => ({ ...o, shipDate: nd }));
+                              setOrders(prev => prev.map(o => { const m = updated.find(u => u.id === o.id); return m || o; }));
+                              for (const o of updated) { try { await upsertOrder(o); } catch (err) { console.warn(err); } }
+                              show(nd ? `Ship date set to ${nd}` : "Ship date cleared");
+                            }} style={{ ...IS, width: "auto", padding: "2px 6px", fontSize: 11, background: "#16161e" }} />
                           </div>
                         </div>
                       </div>
