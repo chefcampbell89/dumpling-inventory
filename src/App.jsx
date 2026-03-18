@@ -1,4 +1,4 @@
-// APP VERSION: v112
+// APP VERSION: v113
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -879,17 +879,40 @@ export default function App() {
     return lines.sort();
   }, [assemblies]);
 
-  // Auto-forecast: avg batches per week from fulfilled order history
+  // Configurable plan item per product line (defaults to 250-{pl} Batch)
+  const planItems = useMemo(() => {
+    const map = {};
+    for (const pl of productLines) {
+      const configured = forecastConfig.planItems?.[pl];
+      // Verify configured item still exists
+      if (configured && allItems.find(i => i.id === configured)) map[pl] = configured;
+      else map[pl] = `250-${pl} Batch`;
+    }
+    return map;
+  }, [productLines, forecastConfig.planItems, allItems]);
+
+  // Available items per product line for the selector (levels 200-500)
+  const plItemOptions = useMemo(() => {
+    const map = {};
+    for (const pl of productLines) {
+      map[pl] = assemblies.filter(a => {
+        const m = a.id.match(/^\d+-(\w+)/);
+        return m && m[1] === pl;
+      }).sort((a, b) => getLevel(a.id) - getLevel(b.id));
+    }
+    return map;
+  }, [productLines, assemblies]);
+
+  // Auto-forecast: avg units per week from fulfilled order history (in plan item equivalents)
   const autoForecast = useMemo(() => {
     const result = {};
     const lookback = forecastConfig.lookbackWeeks || 8;
     const cutoff = addDays(fmtDate(new Date()), -(lookback * 7));
     const fulfilled = orders.filter(o => o.status === "Fulfilled" && o.date >= cutoff);
-    // BOM explosion to batch equivalents
-    const explodeToBatch = (itemId, qty, targetLine) => {
-      const batchId = `250-${targetLine} Batch`;
+    // BOM explosion to plan-item equivalents
+    const explodeToTarget = (itemId, qty, targetId) => {
       const walk = (id, mult) => {
-        if (id === batchId) return mult;
+        if (id === targetId) return mult;
         const it = allItems.find(i => i.id === id);
         if (!it || !it.bom || it.bom.length === 0) return 0;
         let total = 0;
@@ -899,49 +922,49 @@ export default function App() {
       return walk(itemId, qty);
     };
     for (const pl of productLines) {
+      const targetId = planItems[pl];
       const plOrders = fulfilled.filter(o => {
         const m = o.item.match(/^\d+-(\w+)/); return m && m[1] === pl;
       });
-      let totalBatches = 0;
-      for (const o of plOrders) totalBatches += explodeToBatch(o.item, o.qty, pl);
+      let totalUnits = 0;
+      for (const o of plOrders) totalUnits += explodeToTarget(o.item, o.qty, targetId);
       const weeksSet = new Set(plOrders.map(o => getMonday(o.date)));
       const weeks = Math.max(weeksSet.size, 1);
-      result[pl] = Math.round((totalBatches / weeks) * 2) / 2;
+      result[pl] = Math.round((totalUnits / weeks) * 2) / 2;
     }
     return result;
-  }, [orders, allItems, productLines, forecastConfig.lookbackWeeks]);
+  }, [orders, allItems, productLines, planItems, forecastConfig.lookbackWeeks]);
 
-  // Runway: current stock per product line in batch equivalents and weeks until out
+  // Runway: current stock per product line in plan-item equivalents and weeks until out
   const runwayData = useMemo(() => {
     return productLines.map(pl => {
-      // Sum stock at all levels for this product line, converted to batch equivalents
-      const batchItem = allItems.find(i => i.id === `250-${pl} Batch`);
-      let batchEquiv = batchItem ? batchItem.qty : 0;
-      // Add stock from higher levels converted down to batches
+      const targetId = planItems[pl];
+      const targetLevel = getLevel(targetId);
+      // Sum stock at target level and higher, converted to plan-item equivalents
+      const targetItem = allItems.find(i => i.id === targetId);
+      let equiv = targetItem ? targetItem.qty : 0;
+      // Add stock from higher levels converted down to plan-item equivalents
       for (const item of allItems) {
-        if (item.id === `250-${pl} Batch`) continue;
+        if (item.id === targetId) continue;
         const m = item.id.match(/^\d+-(\w+)/);
         if (!m || m[1] !== pl) continue;
         const lvl = getLevel(item.id);
-        if (lvl < 250 || item.qty <= 0) continue;
-        // Walk BOM from this item down to the batch level
+        if (lvl < targetLevel || item.qty <= 0) continue;
         const walk = (id, mult) => {
-          if (id === `250-${pl} Batch`) return mult;
+          if (id === targetId) return mult;
           const it = allItems.find(i => i.id === id);
           if (!it || !it.bom) return 0;
           let t = 0; for (const l of it.bom) t += walk(l.partId, l.qty * mult); return t;
         };
-        // Reverse: how many batches does this stock represent?
-        // item.qty units at this level; use BOM to see how many batches per unit
-        const batchesPerUnit = walk(item.id, 1);
-        if (batchesPerUnit > 0) batchEquiv += item.qty * batchesPerUnit;
+        const unitsPerItem = walk(item.id, 1);
+        if (unitsPerItem > 0) equiv += item.qty * unitsPerItem;
       }
       const demandPerWeek = autoForecast[pl] || 0;
-      const weeksLeft = demandPerWeek > 0 ? batchEquiv / demandPerWeek : Infinity;
+      const weeksLeft = demandPerWeek > 0 ? equiv / demandPerWeek : Infinity;
       const stockoutDate = demandPerWeek > 0 ? addDays(fmtDate(new Date()), Math.round(weeksLeft * 7)) : null;
-      return { productLine: pl, batchEquiv: Math.round(batchEquiv * 100) / 100, demandPerWeek, weeksLeft: Math.round(weeksLeft * 10) / 10, stockoutDate };
+      return { productLine: pl, itemId: targetId, equiv: Math.round(equiv * 100) / 100, demandPerWeek, weeksLeft: Math.round(weeksLeft * 10) / 10, stockoutDate };
     });
-  }, [productLines, allItems, autoForecast]);
+  }, [productLines, planItems, allItems, autoForecast]);
 
   // ---- Dashboard Computed Data ----
   const todayStr = useMemo(() => fmtDate(new Date()), []);
@@ -2502,8 +2525,10 @@ export default function App() {
                               const nd = e.target.value || null;
                               const updated = group.lines.map(o => ({ ...o, shipDate: nd }));
                               setOrders(prev => prev.map(o => { const m = updated.find(u => u.id === o.id); return m || o; }));
-                              for (const o of updated) { try { await upsertOrder(o); } catch (err) { console.warn(err); } }
-                              show(nd ? `Ship date set to ${nd}` : "Ship date cleared");
+                              let saveErr = null;
+                              for (const o of updated) { try { await upsertOrder(o); } catch (err) { saveErr = err; console.warn(err); } }
+                              if (saveErr) show("Ship date save failed — run: ALTER TABLE orders ADD COLUMN ship_date DATE;", "error");
+                              else show(nd ? `Ship date set to ${nd}` : "Ship date cleared");
                             }} style={{ ...IS, width: "auto", padding: "2px 6px", fontSize: 11, background: "#16161e" }} />
                           </div>
                         </div>
@@ -3024,7 +3049,7 @@ export default function App() {
                 const existing = weekLookup[editKey];
                 await upsertForecastWeek({
                   id: existing?.id, weekStart: ws, productLine: pl,
-                  itemId: `250-${pl} Batch`, forecastQty: Number(val),
+                  itemId: planItems[pl], forecastQty: Number(val),
                   autoQty: autoForecast[pl] || 0, createdBy: profile?.email || "",
                 });
               }
@@ -3123,6 +3148,28 @@ export default function App() {
               <button onClick={() => setPlanWeekStart(getMonday(todayStr))} style={{ ...B2, fontSize: 11, padding: "5px 10px" }}>Today</button>
             </div>
 
+            {/* Plan Item Selector */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "10px 16px", marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: "#888", marginBottom: 6 }}>Plan items (one per product line):</div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                {productLines.map(pl => (
+                  <div key={pl} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: "#ccc", minWidth: 28 }}>{pl}:</span>
+                    <select value={planItems[pl]} onChange={async (e) => {
+                      const newPlanItems = { ...forecastConfig.planItems, [pl]: e.target.value };
+                      const updated = { ...forecastConfig, planItems: newPlanItems };
+                      setForecastConfig(updated);
+                      try { await saveConfig("forecast_config", updated); } catch (err) { console.warn(err); }
+                    }} style={{ ...IS, width: "auto", padding: "3px 8px", fontSize: 12 }}>
+                      {(plItemOptions[pl] || []).map(item => (
+                        <option key={item.id} value={item.id}>{item.name} ({getLevel(item.id)})</option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             {fulfilledWeeks < 4 && planView === "weekly" && (
               <div style={{ background: "#2a2a1a", border: "1px solid #f59e0b33", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#f59e0b" }}>
                 <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
@@ -3148,7 +3195,7 @@ export default function App() {
                       <tbody>
                         {productLines.map(pl => (
                           <tr key={pl}>
-                            <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{pl} Batch</td>
+                            <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{allItems.find(i => i.id === planItems[pl])?.name || planItems[pl]}</td>
                             {weekStarts.map(ws => {
                               const val = getWeekVal(pl, ws);
                               const auto = autoForecast[pl] || 0;
@@ -3196,7 +3243,7 @@ export default function App() {
                           const rowTotal = selectedWeekDays.reduce((s, d) => s + (Number(getDayVal(pl, d.date)) || 0), 0);
                           return (
                             <tr key={pl}>
-                              <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{pl} Batch</td>
+                              <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{allItems.find(i => i.id === planItems[pl])?.name || planItems[pl]}</td>
                               {selectedWeekDays.map(d => {
                                 const val = getDayVal(pl, d.date);
                                 const saved = dayLookup[`${pl}|${d.date}`];
@@ -3254,8 +3301,8 @@ export default function App() {
                   <div style={{ overflowX: "auto" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse" }}>
                       <thead><tr>
-                        <th style={TH}>Product Line</th>
-                        <th style={{ ...TH, textAlign: "center" }}>Stock (Batches)</th>
+                        <th style={TH}>Plan Item</th>
+                        <th style={{ ...TH, textAlign: "center" }}>Stock (Units)</th>
                         <th style={{ ...TH, textAlign: "center" }}>Avg Demand/wk</th>
                         <th style={{ ...TH, textAlign: "center" }}>Weeks Left</th>
                         <th style={{ ...TH, textAlign: "center" }}>Est. Stockout</th>
@@ -3265,9 +3312,9 @@ export default function App() {
                           const color = r.weeksLeft === Infinity ? "#6366f1" : r.weeksLeft < 1 ? "#ef4444" : r.weeksLeft < 2 ? "#f59e0b" : r.weeksLeft < 4 ? "#22c55e" : "#6366f1";
                           return (
                             <tr key={r.productLine}>
-                              <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{r.productLine}</td>
-                              <td style={{ ...TD, textAlign: "center", fontWeight: 600 }}>{r.batchEquiv}</td>
-                              <td style={{ ...TD, textAlign: "center", color: "#ccc" }}>{r.demandPerWeek > 0 ? `${r.demandPerWeek} batches` : "No data"}</td>
+                              <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{allItems.find(i => i.id === r.itemId)?.name || r.productLine}</td>
+                              <td style={{ ...TD, textAlign: "center", fontWeight: 600 }}>{r.equiv}</td>
+                              <td style={{ ...TD, textAlign: "center", color: "#ccc" }}>{r.demandPerWeek > 0 ? `${r.demandPerWeek}/wk` : "No data"}</td>
                               <td style={{ ...TD, textAlign: "center" }}>
                                 <span style={{ fontWeight: 700, color, fontSize: 14 }}>{r.weeksLeft === Infinity ? "∞" : r.weeksLeft}</span>
                                 {r.weeksLeft !== Infinity && <span style={{ color: "#888", fontSize: 11, marginLeft: 4 }}>wks</span>}
