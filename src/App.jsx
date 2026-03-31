@@ -380,7 +380,7 @@ function MultiSelectDropdown({ options, selected, onChange, placeholder }) {
 // SKU AUTOCOMPLETE (used in Planning tab)
 // ============================================================
 
-const IS_AC = { width: 180, padding: "4px 8px", fontSize: 12, background: "#16161e", color: "#e0e0e0", border: "1px solid #333", borderRadius: 6, outline: "none" };
+const IS_AC = { width: "100%", padding: "5px 8px", fontSize: 12, background: "#16161e", color: "#e0e0e0", border: "1px solid #333", borderRadius: 6, outline: "none", boxSizing: "border-box" };
 
 function SkuAutocomplete({ value, onChange, skuOpts }) {
   const [inputVal, setInputVal] = useState("");
@@ -411,7 +411,7 @@ function SkuAutocomplete({ value, onChange, skuOpts }) {
         style={IS_AC}
       />
       {open && filtered.length > 0 && (
-        <div style={{ position: "absolute", top: "100%", left: 0, width: 280, zIndex: 100, background: "#1e1e2e", border: "1px solid #444", borderRadius: 6, maxHeight: 250, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.5)" }}>
+        <div style={{ position: "absolute", top: "100%", left: 0, minWidth: 300, zIndex: 100, background: "#1e1e2e", border: "1px solid #444", borderRadius: 6, maxHeight: 300, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.5)" }}>
           {filtered.map(item => (
             <div key={item.id}
               onMouseDown={() => { onChange(item.id); setInputVal(item.id); setUserTyping(false); setOpen(false); }}
@@ -3354,21 +3354,23 @@ export default function App() {
                     const rows = planDayRows[day.date] || [];
                     const isToday = day.date === _todayStr;
                     return (
-                      <div key={day.date} style={{ background: "#1e1e2e", borderRadius: 10, border: isToday ? "2px solid #6366f1" : "1px solid #2a2a3a", overflow: "hidden" }}>
+                      <div key={day.date} style={{ background: "#1e1e2e", borderRadius: 10, border: isToday ? "2px solid #6366f1" : "1px solid #2a2a3a" }}>
                         <div style={{ padding: "8px 12px", borderBottom: "1px solid #2a2a3a", background: isToday ? "#1a1a3a" : "#16161e" }}>
                           <div style={{ fontSize: 13, fontWeight: 700, color: "#e0e0e0" }}>{day.dayName}</div>
                           <div style={{ fontSize: 11, color: "#888" }}>{new Date(day.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}</div>
                         </div>
                         <div style={{ padding: 8, minHeight: 100 }}>
                           {rows.map((row, idx) => (
-                            <div key={row._key || idx} style={{ display: "flex", gap: 4, marginBottom: 6, alignItems: "center" }}>
-                              <SkuAutocomplete value={row.skuId} skuOpts={skuOptions} onChange={val => {
-                                setPlanDayRows(prev => {
-                                  const updated = [...(prev[day.date] || [])];
-                                  updated[idx] = { ...updated[idx], skuId: val };
-                                  return { ...prev, [day.date]: updated };
-                                });
-                              }} />
+                            <div key={row._key || idx} style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "center" }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <SkuAutocomplete value={row.skuId} skuOpts={skuOptions} onChange={val => {
+                                  setPlanDayRows(prev => {
+                                    const updated = [...(prev[day.date] || [])];
+                                    updated[idx] = { ...updated[idx], skuId: val };
+                                    return { ...prev, [day.date]: updated };
+                                  });
+                                }} />
+                              </div>
                               <input type="number" min={0} step={1} value={row.qty || ""} placeholder="Qty"
                                 onChange={e => {
                                   setPlanDayRows(prev => {
@@ -3377,7 +3379,7 @@ export default function App() {
                                     return { ...prev, [day.date]: updated };
                                   });
                                 }}
-                                style={{ ...IS, width: 50, textAlign: "center", padding: "4px 6px", fontSize: 12 }}
+                                style={{ ...IS, width: 60, textAlign: "center", padding: "5px 6px", fontSize: 13, fontWeight: 600, flexShrink: 0 }}
                               />
                               <button onClick={() => {
                                 setPlanDayRows(prev => ({
