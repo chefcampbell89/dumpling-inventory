@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v100
+// SUPABASE VERSION: v101
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -223,6 +223,8 @@ export async function fetchProductionRuns() {
     id: r.id, assemblyId: r.assembly_id, assemblyName: r.assembly_name,
     qtyProduced: Number(r.qty_produced), date: r.run_date, notes: r.notes,
     createdBy: r.created_by, createdAt: r.created_at, lotNumber: r.lot_number || "",
+    status: r.status || "Complete", plannedDate: r.planned_date || null,
+    sourcePlanWeek: r.source_plan_week || null,
     consumed: consumed.filter(c => c.run_id === r.id).map(c => ({
       partId: c.part_id, name: c.part_name, qty: Number(c.qty_consumed), unit: c.unit,
     })),
@@ -234,12 +236,64 @@ export async function createProductionRun(run) {
     id: run.id, assembly_id: run.assemblyId, assembly_name: run.assemblyName,
     qty_produced: run.qtyProduced, run_date: run.date, notes: run.notes,
     created_by: run.createdBy || "", lot_number: run.lotNumber || "",
+    status: run.status || "Complete", planned_date: run.plannedDate || null,
+    source_plan_week: run.sourcePlanWeek || null,
   })
   if (rErr) throw rErr
-  if (run.consumed.length > 0) {
+  if (run.consumed && run.consumed.length > 0) {
     const { error: cErr } = await supabase.from("production_consumed").insert(
       run.consumed.map(c => ({
         run_id: run.id, part_id: c.partId, part_name: c.name,
+        qty_consumed: c.qty, unit: c.unit,
+      }))
+    )
+    if (cErr) throw cErr
+  }
+}
+
+export async function updateProductionRun(runId, updates) {
+  const row = {}
+  if (updates.qtyProduced !== undefined) row.qty_produced = updates.qtyProduced
+  if (updates.date !== undefined) row.run_date = updates.date
+  if (updates.lotNumber !== undefined) row.lot_number = updates.lotNumber
+  if (updates.status !== undefined) row.status = updates.status
+  if (updates.plannedDate !== undefined) row.planned_date = updates.plannedDate
+  if (updates.notes !== undefined) row.notes = updates.notes
+  if (updates.assemblyId !== undefined) row.assembly_id = updates.assemblyId
+  if (updates.assemblyName !== undefined) row.assembly_name = updates.assemblyName
+  const { error } = await supabase.from("production_runs").update(row).eq("id", runId)
+  if (error) throw error
+}
+
+export async function deleteProductionRuns(runIds) {
+  const { error: cErr } = await supabase.from("production_consumed").delete().in("run_id", runIds)
+  if (cErr) throw cErr
+  const { error } = await supabase.from("production_runs").delete().in("id", runIds)
+  if (error) throw error
+}
+
+export async function fetchDraftRunsForWeek(weekStart) {
+  const { data, error } = await supabase.from("production_runs")
+    .select("*").eq("source_plan_week", weekStart).eq("status", "Draft")
+    .order("planned_date")
+  if (error) throw error
+  return data.map(r => ({
+    id: r.id, assemblyId: r.assembly_id, assemblyName: r.assembly_name,
+    qtyProduced: Number(r.qty_produced), date: r.run_date, notes: r.notes,
+    createdBy: r.created_by, createdAt: r.created_at, lotNumber: r.lot_number || "",
+    status: r.status, plannedDate: r.planned_date, sourcePlanWeek: r.source_plan_week,
+    consumed: [],
+  }))
+}
+
+export async function completeProductionRun(runId, consumed) {
+  const { error: sErr } = await supabase.from("production_runs")
+    .update({ status: "Complete" }).eq("id", runId)
+  if (sErr) throw sErr
+  if (consumed.length > 0) {
+    const { error: cErr } = await supabase.from("production_consumed").insert(
+      consumed.map(c => ({
+        run_id: runId, part_id: c.partId, part_name: c.name,
         qty_consumed: c.qty, unit: c.unit,
       }))
     )

@@ -1,4 +1,4 @@
-// APP VERSION: v113
+// APP VERSION: v114
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -7,13 +7,12 @@ import {
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
-  fetchProductionRuns, createProductionRun,
+  fetchProductionRuns, createProductionRun, updateProductionRun, deleteProductionRuns, fetchDraftRunsForWeek, completeProductionRun,
   fetchInventoryLots, adjustLotQty,
   zeroAllInventory, bulkUpdateItemQtys,
   fetchWishes, createWish, countUserWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles, deleteProfile as dbDeleteProfile,
-  fetchForecastWeeks, upsertForecastWeek, fetchForecastDays, upsertForecastDays,
-  getInviteCode, setInviteCode, getLocations, saveLocations, getConfig, saveConfig, changePassword, supabase,
+  getInviteCode, setInviteCode, getLocations, getConfig, saveConfig, changePassword, supabase,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
@@ -466,16 +465,22 @@ export default function App() {
   const MAX_WISHES = 3;
 
   // ---- Planning / Forecast State ----
-  const [planView, setPlanView] = useState("weekly");
-  const [forecastWeeks, setForecastWeeks] = useState([]);
-  const [forecastDays, setForecastDays] = useState([]);
+  const [forecastConfig, setForecastConfig] = useState({ horizonWeeks: 4, lookbackWeeks: 8, workDays: ["Mon","Tue","Wed","Thu","Fri"] });
   const [planWeekStart, setPlanWeekStart] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   });
-  const [weeklyEdits, setWeeklyEdits] = useState({});
-  const [dailyEdits, setDailyEdits] = useState({});
-  const [forecastConfig, setForecastConfig] = useState({ horizonWeeks: 4, lookbackWeeks: 8, workDays: ["Mon","Tue","Wed","Thu","Fri"] });
+  const [planDayRows, setPlanDayRows] = useState({});
+  const [weekDrafts, setWeekDrafts] = useState([]);
+  const [planConfirmModal, setPlanConfirmModal] = useState(false);
+  const [planSubmitting, setPlanSubmitting] = useState(false);
+  const [planLoading, setPlanLoading] = useState(false);
+  // Production tab: status filter + draft modals
+  const [prodStatusFilter, setProdStatusFilter] = useState("All");
+  const [completeDraftModal, setCompleteDraftModal] = useState(false);
+  const [draftToComplete, setDraftToComplete] = useState(null);
+  const [editDraftModal, setEditDraftModal] = useState(false);
+  const [editDraftForm, setEditDraftForm] = useState({});
 
   // ---- Dashboard State ----
   const [dashView, setDashView] = useState("daily");
@@ -554,12 +559,6 @@ export default function App() {
       getConfig("app_name").then(r => { if (r) setAppName(r); }).catch(() => {});
       getConfig("forecast_config").then(r => { if (r) setForecastConfig(prev => ({ ...prev, ...r })); }).catch(() => {});
       getConfig("daily_note").then(r => { if (r) setDailyNote(r); }).catch(() => {});
-      // Load forecast data for a wide window
-      const _fd = (dt) => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
-      const fcStart = (() => { const d = new Date(); d.setDate(d.getDate() - 56); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return _fd(d); })();
-      const fcEnd = (() => { const d = new Date(); d.setDate(d.getDate() + 84); return _fd(d); })();
-      fetchForecastWeeks(fcStart, fcEnd).then(r => setForecastWeeks(r)).catch(() => {});
-      fetchForecastDays(fcStart, fcEnd).then(r => setForecastDays(r)).catch(() => {});
     } catch (err) {
       console.warn("Supabase load failed, using seed data:", err.message);
     }
@@ -891,18 +890,6 @@ export default function App() {
     return map;
   }, [productLines, forecastConfig.planItems, allItems]);
 
-  // Available items per product line for the selector (levels 200-500)
-  const plItemOptions = useMemo(() => {
-    const map = {};
-    for (const pl of productLines) {
-      map[pl] = assemblies.filter(a => {
-        const m = a.id.match(/^\d+-(\w+)/);
-        return m && m[1] === pl;
-      }).sort((a, b) => getLevel(a.id) - getLevel(b.id));
-    }
-    return map;
-  }, [productLines, assemblies]);
-
   // Auto-forecast: avg units per week from fulfilled order history (in plan item equivalents)
   const autoForecast = useMemo(() => {
     const result = {};
@@ -966,12 +953,23 @@ export default function App() {
     });
   }, [productLines, planItems, allItems, autoForecast]);
 
-  // ---- Dashboard Computed Data ----
+  // ---- Dashboard Computed Data (sourced from draft production runs) ----
   const todayStr = useMemo(() => fmtDate(new Date()), []);
 
+  const todaysDraftRuns = useMemo(() => {
+    return prodRuns.filter(r => (r.status || "Complete") === "Draft" && r.plannedDate === todayStr);
+  }, [prodRuns, todayStr]);
+
   const todaysForecast = useMemo(() => {
-    return forecastDays.filter(fd => fd.dayDate === todayStr);
-  }, [forecastDays, todayStr]);
+    const byLine = {};
+    for (const r of todaysDraftRuns) {
+      const m = r.assemblyId.match(/^\d+-(\w+)/);
+      const pl = m ? m[1] : "?";
+      if (!byLine[pl]) byLine[pl] = { productLine: pl, plannedQty: 0 };
+      byLine[pl].plannedQty += r.qtyProduced;
+    }
+    return Object.values(byLine);
+  }, [todaysDraftRuns]);
 
   const todaysShipments = useMemo(() => {
     return orders.filter(o => o.shipDate === todayStr);
@@ -986,19 +984,26 @@ export default function App() {
   const weekForecast = useMemo(() => {
     const monday = getMonday(todayStr);
     const sunday = addDays(monday, 6);
-    const weekDays = forecastDays.filter(fd => fd.dayDate >= monday && fd.dayDate <= sunday);
+    const weekDraftRuns = prodRuns.filter(r => (r.status || "Complete") === "Draft" && r.plannedDate && r.plannedDate >= monday && r.plannedDate <= sunday);
+    const weekCompleteRuns = prodRuns.filter(r => (r.status || "Complete") === "Complete" && r.date && r.date >= monday && r.date <= sunday);
     const byLine = {};
-    for (const fd of weekDays) {
-      if (!byLine[fd.productLine]) byLine[fd.productLine] = { planned: 0, actual: 0 };
-      byLine[fd.productLine].planned += fd.plannedQty;
-      if (fd.actualQty !== null && fd.actualQty !== undefined) byLine[fd.productLine].actual += fd.actualQty;
+    for (const r of weekDraftRuns) {
+      const m = r.assemblyId.match(/^\d+-(\w+)/);
+      const pl = m ? m[1] : "?";
+      if (!byLine[pl]) byLine[pl] = { planned: 0, actual: 0 };
+      byLine[pl].planned += r.qtyProduced;
     }
-    return { days: weekDays, byLine };
-  }, [forecastDays, todayStr]);
+    for (const r of weekCompleteRuns) {
+      const m = r.assemblyId.match(/^\d+-(\w+)/);
+      const pl = m ? m[1] : "?";
+      if (!byLine[pl]) byLine[pl] = { planned: 0, actual: 0 };
+      byLine[pl].actual += r.qtyProduced;
+    }
+    return { byLine };
+  }, [prodRuns, todayStr]);
 
   const todaysBlockers = useMemo(() => {
-    const planned = forecastDays.filter(fd => fd.dayDate === todayStr && fd.plannedQty > 0);
-    if (planned.length === 0) return [];
+    if (todaysDraftRuns.length === 0) return [];
     const rawNeeds = {};
     const explodeToRaw = (id, mult) => {
       const it = allItems.find(i => i.id === id);
@@ -1010,9 +1015,8 @@ export default function App() {
       }
       if (it.bom) for (const l of it.bom) explodeToRaw(l.partId, l.qty * mult);
     };
-    for (const fd of planned) {
-      const batchId = `250-${fd.productLine} Batch`;
-      explodeToRaw(batchId, fd.plannedQty);
+    for (const r of todaysDraftRuns) {
+      explodeToRaw(r.assemblyId, r.qtyProduced);
     }
     return Object.values(rawNeeds)
       .filter(r => r.item.qty < r.needed)
@@ -1024,7 +1028,23 @@ export default function App() {
         unit: r.item.unit,
       }))
       .sort((a, b) => b.shortfall - a.shortfall);
-  }, [forecastDays, allItems, todayStr]);
+  }, [todaysDraftRuns, allItems]);
+
+  // Load drafts for the currently viewed planning week
+  useEffect(() => {
+    if (!planWeekStart) return;
+    setPlanLoading(true);
+    fetchDraftRunsForWeek(planWeekStart).then(drafts => {
+      setWeekDrafts(drafts);
+      const rows = {};
+      for (const d of drafts) {
+        const date = d.plannedDate;
+        if (!rows[date]) rows[date] = [];
+        rows[date].push({ skuId: d.assemblyId, qty: d.qtyProduced, _key: d.id, lotNumber: d.lotNumber });
+      }
+      setPlanDayRows(rows);
+    }).catch(() => {}).finally(() => setPlanLoading(false));
+  }, [planWeekStart]);
 
   // ---- CRUD with Supabase persistence ----
   const bomItemsForLevel = (level) => {
@@ -1446,6 +1466,157 @@ export default function App() {
     try { await createProductionRun(run); } catch (e) { console.warn("Production save failed:", e.message); }
     show(`Produced ${prodQty} × ${prodAssemblyItem.name}${lotNum ? " (Lot: " + lotNum + ")" : ""}`);
     setProdModal(false);
+  };
+
+  // ---- Weekly Plan Submission ----
+  const submitWeeklyPlan = async () => {
+    setPlanSubmitting(true);
+    try {
+      // Delete existing draft runs for this week
+      if (weekDrafts.length > 0) {
+        await deleteProductionRuns(weekDrafts.map(d => d.id));
+      }
+      const workDays = forecastConfig.workDays || ["Mon","Tue","Wed","Thu","Fri"];
+      const selectedWeekDays = Array.from({ length: 7 }, (_, i) => {
+        const d = addDays(planWeekStart, i);
+        const dayName = DAY_NAMES[parseDate(d).getDay()];
+        return { date: d, dayName, isWorkDay: workDays.includes(dayName) };
+      }).filter(d => d.isWorkDay);
+
+      let counter = 1;
+      const newRuns = [];
+      for (const day of selectedWeekDays) {
+        const rows = planDayRows[day.date] || [];
+        for (const row of rows) {
+          if (!row.skuId || row.qty <= 0) continue;
+          const item = allItems.find(i => i.id === row.skuId);
+          if (!item) continue;
+          const pl = row.skuId.match(/^\d+-(\w+)/)?.[1] || "XX";
+          const dateStr = day.date.replace(/-/g, "");
+          const lotNumber = `${pl}-${dateStr}-${String(counter).padStart(3, "0")}`;
+          const runId = `DRAFT-${day.date}-${String(counter).padStart(3, "0")}`;
+          const run = {
+            id: runId, assemblyId: row.skuId, assemblyName: item.name,
+            qtyProduced: row.qty, date: day.date, lotNumber, plannedDate: day.date,
+            sourcePlanWeek: planWeekStart, status: "Draft",
+            notes: "", createdBy: profile?.email || "", consumed: [],
+          };
+          await createProductionRun(run);
+          newRuns.push({ ...run, createdAt: new Date().toISOString() });
+          counter++;
+        }
+      }
+      // Reload
+      const freshDrafts = await fetchDraftRunsForWeek(planWeekStart);
+      setWeekDrafts(freshDrafts);
+      const freshRuns = await fetchProductionRuns();
+      setProdRuns(freshRuns);
+      show(`Plan submitted — ${newRuns.length} draft production run${newRuns.length !== 1 ? "s" : ""} created`);
+      setPlanConfirmModal(false);
+    } catch (e) { show(e.message, "error"); }
+    setPlanSubmitting(false);
+  };
+
+  // ---- Complete a Draft Run (same consumption logic as submitProduction) ----
+  const submitCompleteDraft = async () => {
+    const draft = draftToComplete;
+    if (!draft) return;
+    if (!prodAssemblyItem) { show("Select an assembly", "error"); return; }
+    if (prodQty <= 0) { show("Qty must be > 0", "error"); return; }
+    if (!prodLotNumber.trim()) { show("Batch / Lot number is required", "error"); return; }
+    const validationErrors = getValidationErrors(prodAssemblyItem.bom, prodQty);
+    if (validationErrors.length > 0) { show("Not all materials are accounted for: " + validationErrors[0], "error"); return; }
+    const consumed = getConsumedItems(prodAssemblyItem.bom, prodQty);
+    if (consumed.length === 0) { show("Nothing to consume", "error"); return; }
+
+    const shortages = consumed.filter(c => c.qty > c.currentQty);
+    if (shortages.length > 0) {
+      const names = shortages.map(s => `${s.name} (need ${s.qty.toFixed(2)}, have ${s.currentQty})`).join(", ");
+      if (!window.confirm(`Warning: insufficient stock for: ${names}. Inventory will go negative. Continue?`)) return;
+    }
+
+    const runDate = prodDate;
+    const lotNum = prodLotNumber.trim();
+    const updParts = [...parts];
+    const updAsm = [...assemblies];
+    const updLots = [...lots];
+
+    // Consume items from inventory and lots (same as submitProduction)
+    for (const c of consumed) {
+      const pi = updParts.findIndex(p => p.id === c.partId);
+      if (pi >= 0) { updParts[pi] = { ...updParts[pi], qty: updParts[pi].qty - c.qty }; try { await updateItemQty(c.partId, updParts[pi].qty); } catch (e) { console.warn(e.message); } }
+      const ai = updAsm.findIndex(a => a.id === c.partId);
+      if (ai >= 0) { updAsm[ai] = { ...updAsm[ai], qty: updAsm[ai].qty - c.qty }; try { await updateItemQty(c.partId, updAsm[ai].qty); } catch (e) { console.warn(e.message); } }
+      const itemLots = updLots.filter(l => l.itemId === c.partId && l.qty > 0).sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+      let remain = c.qty;
+      for (const lot of itemLots) {
+        if (remain <= 0) break;
+        const deduct = Math.min(lot.qty, remain);
+        lot.qty -= deduct; remain -= deduct;
+        try { await adjustLotQty(c.partId, lot.lotNumber, -deduct, null, null); } catch (e) { console.warn("Lot deduct failed:", e.message); }
+      }
+    }
+
+    // Add produced item to inventory and lot
+    const prodIdx = updAsm.findIndex(a => a.id === prodAssemblyItem.id);
+    if (prodIdx >= 0) { updAsm[prodIdx] = { ...updAsm[prodIdx], qty: updAsm[prodIdx].qty + prodQty }; try { await updateItemQty(prodAssemblyItem.id, updAsm[prodIdx].qty); } catch (e) { console.warn(e.message); } }
+    if (lotNum) {
+      const existingLot = updLots.find(l => l.itemId === prodAssemblyItem.id && l.lotNumber === lotNum);
+      if (existingLot) { existingLot.qty += prodQty; }
+      else { updLots.push({ id: Date.now(), itemId: prodAssemblyItem.id, lotNumber: lotNum, qty: prodQty, productionDate: runDate, sourceRunId: draft.id }); }
+      try { await adjustLotQty(prodAssemblyItem.id, lotNum, prodQty, runDate, draft.id); } catch (e) { console.warn("Lot add failed:", e.message); }
+    }
+
+    const cleanLots = updLots.filter(l => l.qty > 0);
+    setParts(updParts); setAssemblies(updAsm); setLots(cleanLots);
+
+    // Update the run in DB
+    try {
+      await updateProductionRun(draft.id, { qtyProduced: prodQty, date: runDate, lotNumber: lotNum, status: "Complete", assemblyId: prodAssemblyItem.id, assemblyName: prodAssemblyItem.name, notes: prodNotes });
+      await completeProductionRun(draft.id, consumed);
+    } catch (e) { console.warn("Complete draft DB update failed:", e.message); }
+
+    setProdRuns(prev => prev.map(r => r.id === draft.id ? {
+      ...r, status: "Complete", qtyProduced: prodQty, date: runDate, lotNumber: lotNum,
+      assemblyId: prodAssemblyItem.id, assemblyName: prodAssemblyItem.name, notes: prodNotes,
+      consumed: consumed.map(c => ({ partId: c.partId, name: c.name, qty: c.qty, unit: c.unit })),
+    } : r));
+
+    show(`Completed: ${prodQty} × ${prodAssemblyItem.name}`);
+    setCompleteDraftModal(false); setDraftToComplete(null);
+  };
+
+  // ---- Draft Edit Save ----
+  const saveEditDraft = async () => {
+    const d = editDraftForm;
+    if (!d.id) return;
+    try {
+      const item = allItems.find(i => i.id === d.assemblyId);
+      await updateProductionRun(d.id, {
+        assemblyId: d.assemblyId, assemblyName: item?.name || d.assemblyName,
+        qtyProduced: d.qty, plannedDate: d.plannedDate, lotNumber: d.lotNumber, notes: d.notes || "",
+      });
+      setProdRuns(prev => prev.map(r => r.id === d.id ? {
+        ...r, assemblyId: d.assemblyId, assemblyName: item?.name || d.assemblyName,
+        qtyProduced: d.qty, plannedDate: d.plannedDate, lotNumber: d.lotNumber, notes: d.notes || "",
+      } : r));
+      // Also refresh week drafts if on planning tab
+      const freshDrafts = await fetchDraftRunsForWeek(planWeekStart);
+      setWeekDrafts(freshDrafts);
+      show("Draft updated");
+      setEditDraftModal(false);
+    } catch (e) { show(e.message, "error"); }
+  };
+
+  // ---- Delete Draft ----
+  const deleteDraft = async (run) => {
+    if (!window.confirm(`Delete draft run ${run.id}?`)) return;
+    try {
+      await deleteProductionRuns([run.id]);
+      setProdRuns(prev => prev.filter(r => r.id !== run.id));
+      setWeekDrafts(prev => prev.filter(d => d.id !== run.id));
+      show("Draft deleted");
+    } catch (e) { show(e.message, "error"); }
   };
 
   const renderConsumptionTree = (bom, multiplier, depth = 0) => (
@@ -2128,7 +2299,7 @@ export default function App() {
         {tab === "vendors" && <button onClick={() => openAdd("vendor")} style={B1}><Plus size={14} /> Vendor</button>}
         {tab === "receiving" && <button onClick={openReceiveManual} style={B1}><Plus size={14} /> Manual Receipt</button>}
         {tab === "pos" && <button onClick={openManualPO} style={B1}><Plus size={14} /> Create PO</button>}
-        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setProdDate(fmtDate(new Date())); setProdModal(true); }} style={B1}><Hammer size={14} /> Run Production</button>}
+        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setProdDate(fmtDate(new Date())); setProdModal(true); }} style={B1}><Hammer size={14} /> Manual Production Entry</button>}
       </div>}
 
       {/* ================== DASHBOARD ================== */}
@@ -2152,16 +2323,18 @@ export default function App() {
           return batchItem && batchItem.piecesPerUnit > 0 ? Math.round(batches * batchItem.piecesPerUnit) : 0;
         };
 
-        // Actual production logged today
-        const todayRuns = prodRuns.filter(r => r.date === todayStr);
+        // Actual production logged today/week (completed runs)
+        const todayCompletedRuns = prodRuns.filter(r => (r.status || "Complete") === "Complete" && r.date === todayStr);
         const actualByLine = {};
-        for (const r of todayRuns) {
-          const m = r.assemblyId.match(/^250-(\w+)/);
+        for (const r of todayCompletedRuns) {
+          const m = r.assemblyId.match(/^\d+-(\w+)/);
           if (m) actualByLine[m[1]] = (actualByLine[m[1]] || 0) + r.qtyProduced;
         }
 
-        // Forecast data for the active view
-        const forecastRows = dashView === "daily" ? todaysForecast : Object.entries(weekForecast.byLine).sort().map(([pl, d]) => ({ productLine: pl, plannedQty: d.planned, actualQty: d.actual }));
+        // Forecast data from draft runs
+        const forecastRows = dashView === "daily"
+          ? todaysForecast
+          : Object.entries(weekForecast.byLine).sort().map(([pl, d]) => ({ productLine: pl, plannedQty: d.planned, actualQty: d.actual }));
         const totalBatches = dashView === "daily" ? todaysForecast.reduce((s, fd) => s + fd.plannedQty, 0) : Object.values(weekForecast.byLine).reduce((s, v) => s + v.planned, 0);
         const totalPieces = forecastRows.reduce((s, fd) => s + calcPieces(fd.productLine, fd.plannedQty), 0);
 
@@ -2239,7 +2412,7 @@ export default function App() {
                       const pcs = calcPieces(fd.productLine, fd.plannedQty);
                       return (
                         <tr key={fd.productLine}>
-                          <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{fd.productLine} Batch</td>
+                          <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{fd.productLine}</td>
                           <td style={{ ...TD, textAlign: "center", fontWeight: 600 }}>{fd.plannedQty}</td>
                           <td style={{ ...TD, textAlign: "center", color: actual >= fd.plannedQty ? "#22c55e" : "#f59e0b", fontWeight: 600 }}>{actual}</td>
                           <td style={{ ...TD, textAlign: "center", color: "#888" }}>{pcs > 0 ? pcs.toLocaleString() : "\u2014"}</td>
@@ -2827,76 +3000,126 @@ export default function App() {
       )}
 
       {/* ================== PRODUCTION TAB ================== */}
-      {tab === "production" && (
-        <div>
-          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-            <Stat icon={<Hammer size={18} />} label="Total Runs" value={prodRuns.length} accent="#8b5cf6" />
-            <Stat icon={<Layers size={18} />} label="This Week" value={prodRuns.filter(r => { const d = new Date(r.date); const now = new Date(); const weekAgo = new Date(now - 7 * 86400000); return d >= weekAgo; }).length} accent="#6366f1" />
-          </div>
+      {tab === "production" && (() => {
+        const draftCount = prodRuns.filter(r => (r.status || "Complete") === "Draft").length;
+        const completeCount = prodRuns.filter(r => (r.status || "Complete") === "Complete").length;
+        const filteredRuns = prodStatusFilter === "All" ? prodRuns
+          : prodRuns.filter(r => (r.status || "Complete") === prodStatusFilter);
+        const isDraft = (r) => (r.status || "Complete") === "Draft";
 
-          <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
-            <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Production Log</div>
-            {prodRuns.length === 0 ? (
-              <div style={{ padding: 40, textAlign: "center", color: "#555" }}>
-                <Hammer size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
-                <p style={{ margin: 0 }}>No production runs recorded yet.</p>
-              </div>
-            ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}>
-                  <thead><tr>
-                    {["Run ID", "Date", "Assembly", "Lot #", "Qty", "Items Consumed", "Notes", ""].map(h => <th key={h} style={TH}>{h}</th>)}
-                  </tr></thead>
-                  <tbody>
-                    {prodRuns.map(r => {
-                      const isExp = expanded[`prod-${r.id}`];
-                      return (
-                        <React.Fragment key={r.id}>
-                          <tr>
-                            <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#8b5cf6", cursor: "pointer" }} onClick={() => tog(`prod-${r.id}`)}>
-                              {isExp ? <ChevronDown size={12} style={{ marginRight: 4 }} /> : <ChevronRight size={12} style={{ marginRight: 4 }} />}
-                              {r.id}
-                            </td>
-                            <td style={{ ...TD, fontSize: 12, color: "#888" }}>{r.date}</td>
-                            <td style={TD}>
-                              <span style={{ fontWeight: 500 }}>{r.assemblyName}</span>
-                              <span style={{ color: "#888", fontSize: 11, marginLeft: 6 }}>({r.assemblyId})</span>
-                            </td>
-                            <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: r.lotNumber ? "#a78bfa" : "#555" }}>{r.lotNumber || "—"}</td>
-                            <td style={{ ...TD, fontWeight: 600, color: "#22c55e" }}>+{r.qtyProduced}</td>
-                            <td style={{ ...TD, fontSize: 12 }}>{r.consumed.length} items</td>
-                            <td style={{ ...TD, fontSize: 12, color: "#888", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.notes || "—"}</td>
-                            <td style={{ ...TD, fontSize: 11, color: "#666" }}>{r.createdBy || ""}</td>
-                          </tr>
-                          {isExp && (
-                            <tr><td colSpan={8} style={{ ...TD, background: "#16161e", paddingLeft: 40 }}>
-                              <div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>CONSUMED</div>
-                              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                                <thead><tr>{["Part ID", "Name", "Qty Used", "Unit"].map(h => <th key={h} style={{ ...TH, fontSize: 10 }}>{h}</th>)}</tr></thead>
-                                <tbody>{r.consumed.map((c, i) => (
-                                  <tr key={i}>
-                                    <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#6366f1" }}>{c.partId}</td>
-                                    <td style={{ ...TD, fontSize: 12 }}>{c.name}</td>
-                                    <td style={{ ...TD, fontSize: 12, fontWeight: 600, color: "#ef4444" }}>-{c.qty.toFixed(3)}</td>
-                                    <td style={{ ...TD, fontSize: 12, color: "#888" }}>{c.unit}</td>
-                                  </tr>
-                                ))}</tbody>
-                              </table>
-                            </td></tr>
-                          )}
-                        </React.Fragment>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+        return (
+          <div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+              <Stat icon={<Hammer size={18} />} label="Total Runs" value={prodRuns.length} accent="#8b5cf6" />
+              <Stat icon={<ClipboardList size={18} />} label="Draft" value={draftCount} accent="#f59e0b" />
+              <Stat icon={<CheckCircle size={18} />} label="Complete" value={completeCount} accent="#22c55e" />
+            </div>
+
+            {/* Status filter */}
+            <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
+              {["All", "Draft", "Complete"].map(s => (
+                <button key={s} onClick={() => setProdStatusFilter(s)}
+                  style={{ ...B2, background: prodStatusFilter === s ? "#6366f1" : "#2a2a3a", color: prodStatusFilter === s ? "#fff" : "#ccc", borderColor: prodStatusFilter === s ? "#6366f1" : "#333", fontSize: 12, padding: "6px 14px" }}>
+                  {s}{s === "Draft" ? ` (${draftCount})` : s === "Complete" ? ` (${completeCount})` : ""}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+              <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Production Log</div>
+              {filteredRuns.length === 0 ? (
+                <div style={{ padding: 40, textAlign: "center", color: "#555" }}>
+                  <Hammer size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
+                  <p style={{ margin: 0 }}>No {prodStatusFilter !== "All" ? prodStatusFilter.toLowerCase() + " " : ""}production runs found.</p>
+                </div>
+              ) : (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 800 }}>
+                    <thead><tr>
+                      {["Run ID", "Status", "Planned", "Date", "Assembly", "Lot #", "Qty", "Consumed", "Actions"].map(h => <th key={h} style={TH}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>
+                      {filteredRuns.map(r => {
+                        const isExp = expanded[`prod-${r.id}`];
+                        const draft = isDraft(r);
+                        return (
+                          <React.Fragment key={r.id}>
+                            <tr style={{ background: draft ? "#1a1a10" : undefined }}>
+                              <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#8b5cf6", cursor: "pointer" }} onClick={() => tog(`prod-${r.id}`)}>
+                                {isExp ? <ChevronDown size={12} style={{ marginRight: 4 }} /> : <ChevronRight size={12} style={{ marginRight: 4 }} />}
+                                {r.id}
+                              </td>
+                              <td style={TD}>
+                                <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 10, fontSize: 11, fontWeight: 600,
+                                  background: draft ? "#f59e0b22" : "#22c55e22", color: draft ? "#f59e0b" : "#22c55e",
+                                  border: `1px solid ${draft ? "#f59e0b44" : "#22c55e44"}` }}>
+                                  {draft ? "Draft" : "Complete"}
+                                </span>
+                              </td>
+                              <td style={{ ...TD, fontSize: 12, color: "#888" }}>{r.plannedDate || "—"}</td>
+                              <td style={{ ...TD, fontSize: 12, color: "#888" }}>{r.date}</td>
+                              <td style={TD}>
+                                <span style={{ fontWeight: 500 }}>{r.assemblyName}</span>
+                                <span style={{ color: "#888", fontSize: 11, marginLeft: 6 }}>({r.assemblyId})</span>
+                              </td>
+                              <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: r.lotNumber ? "#a78bfa" : "#555" }}>{r.lotNumber || "—"}</td>
+                              <td style={{ ...TD, fontWeight: 600, color: draft ? "#f59e0b" : "#22c55e" }}>{draft ? "" : "+"}{r.qtyProduced}</td>
+                              <td style={{ ...TD, fontSize: 12 }}>{r.consumed?.length || 0} items</td>
+                              <td style={{ ...TD, whiteSpace: "nowrap" }}>
+                                {draft && (
+                                  <div style={{ display: "flex", gap: 4 }}>
+                                    <button onClick={() => {
+                                      setDraftToComplete(r);
+                                      setProdAssembly(r.assemblyId); setProdQty(r.qtyProduced);
+                                      setProdDate(r.plannedDate || r.date); setProdLotNumber(r.lotNumber || "");
+                                      setProdNotes(r.notes || ""); setProdConsume(initConsume(r.assemblyId));
+                                      setCompleteDraftModal(true);
+                                    }} style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#22c55e", borderColor: "#22c55e44" }}>
+                                      <Check size={12} /> Complete
+                                    </button>
+                                    <button onClick={() => {
+                                      setEditDraftForm({ id: r.id, assemblyId: r.assemblyId, assemblyName: r.assemblyName, qty: r.qtyProduced, plannedDate: r.plannedDate || r.date, lotNumber: r.lotNumber || "", notes: r.notes || "" });
+                                      setEditDraftModal(true);
+                                    }} style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#6366f1", borderColor: "#6366f144" }}>
+                                      <Edit2 size={12} />
+                                    </button>
+                                    <button onClick={() => deleteDraft(r)} style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#ef4444", borderColor: "#ef444444" }}>
+                                      <Trash2 size={12} />
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                            {isExp && r.consumed && r.consumed.length > 0 && (
+                              <tr><td colSpan={9} style={{ ...TD, background: "#16161e", paddingLeft: 40 }}>
+                                <div style={{ fontSize: 11, color: "#888", marginBottom: 6, fontWeight: 600 }}>CONSUMED</div>
+                                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                                  <thead><tr>{["Part ID", "Name", "Qty Used", "Unit"].map(h => <th key={h} style={{ ...TH, fontSize: 10 }}>{h}</th>)}</tr></thead>
+                                  <tbody>{r.consumed.map((c, i) => (
+                                    <tr key={i}>
+                                      <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#6366f1" }}>{c.partId}</td>
+                                      <td style={{ ...TD, fontSize: 12 }}>{c.name}</td>
+                                      <td style={{ ...TD, fontSize: 12, fontWeight: 600, color: "#ef4444" }}>-{c.qty.toFixed(3)}</td>
+                                      <td style={{ ...TD, fontSize: 12, color: "#888" }}>{c.unit}</td>
+                                    </tr>
+                                  ))}</tbody>
+                                </table>
+                              </td></tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ================== PRODUCTION MODAL ================== */}
-      <Modal open={prodModal} onClose={() => setProdModal(false)} title="Run Production" wide>
+      <Modal open={prodModal} onClose={() => setProdModal(false)} title="Manual Production Entry" wide>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
@@ -2996,350 +3219,346 @@ export default function App() {
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button onClick={() => setProdModal(false)} style={B2}>Cancel</button>
-          <button onClick={submitProduction} disabled={!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)} style={{ ...B1, background: "#8b5cf6", opacity: (!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}><Hammer size={14} /> Run Production</button>
+          <button onClick={submitProduction} disabled={!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)} style={{ ...B1, background: "#8b5cf6", opacity: (!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}><Hammer size={14} /> Submit</button>
         </div>
       </Modal>
 
-      {/* ================== PLANNING ================== */}
+      {/* ================== PLANNING (Weekly Production Plan) ================== */}
       {tab === "planning" && (() => {
-        const horizon = forecastConfig.horizonWeeks || 4;
         const workDays = forecastConfig.workDays || ["Mon","Tue","Wed","Thu","Fri"];
-        const weekStarts = Array.from({ length: horizon }, (_, i) => addDays(planWeekStart, i * 7));
-        const todayStr = fmtDate(new Date());
+        const _todayStr = fmtDate(new Date());
 
-        // Get days for the currently selected week
         const selectedWeekDays = Array.from({ length: 7 }, (_, i) => {
           const d = addDays(planWeekStart, i);
           const dayName = DAY_NAMES[parseDate(d).getDay()];
           return { date: d, dayName, isWorkDay: workDays.includes(dayName) };
         }).filter(d => d.isWorkDay);
 
-        // Build lookup for saved forecast data
-        const weekLookup = {};
-        for (const fw of forecastWeeks) weekLookup[`${fw.productLine}|${fw.weekStart}`] = fw;
-        const dayLookup = {};
-        for (const fd of forecastDays) dayLookup[`${fd.productLine}|${fd.dayDate}`] = fd;
+        // SKU options for autocomplete (levels 200-500)
+        const skuOptions = allItems.filter(i => getLevel(i.id) >= 200);
 
-        const getWeekVal = (pl, ws) => {
-          const editKey = `${pl}|${ws}`;
-          if (weeklyEdits[editKey] !== undefined) return weeklyEdits[editKey];
-          const saved = weekLookup[editKey];
-          return saved ? saved.forecastQty : "";
-        };
-        const getDayVal = (pl, date) => {
-          const editKey = `${pl}|${date}`;
-          if (dailyEdits[editKey] !== undefined) return dailyEdits[editKey];
-          const saved = dayLookup[editKey];
-          return saved ? saved.plannedQty : "";
-        };
-
-        // Fulfilled order weeks count for history warning
-        const lookback = forecastConfig.lookbackWeeks || 8;
-        const cutoffDate = addDays(todayStr, -(lookback * 7));
-        const fulfilledWeeks = new Set(orders.filter(o => o.status === "Fulfilled" && o.date >= cutoffDate).map(o => getMonday(o.date))).size;
-
-        // Save weekly plan
-        const saveWeeklyPlan = async () => {
-          try {
-            for (const pl of productLines) {
-              for (const ws of weekStarts) {
-                const editKey = `${pl}|${ws}`;
-                const val = getWeekVal(pl, ws);
-                if (val === "" || val === undefined) continue;
-                const existing = weekLookup[editKey];
-                await upsertForecastWeek({
-                  id: existing?.id, weekStart: ws, productLine: pl,
-                  itemId: planItems[pl], forecastQty: Number(val),
-                  autoQty: autoForecast[pl] || 0, createdBy: profile?.email || "",
-                });
-              }
-            }
-            // Reload
-            const fcStart = addDays(planWeekStart, -7);
-            const fcEnd = addDays(planWeekStart, (horizon + 1) * 7);
-            const fresh = await fetchForecastWeeks(fcStart, fcEnd);
-            setForecastWeeks(fresh);
-            setWeeklyEdits({});
-            show("Plan saved");
-          } catch (e) { show(e.message, "error"); }
-        };
-
-        // Auto-fill weekly from history
-        const autoFillWeekly = () => {
-          const edits = { ...weeklyEdits };
-          for (const pl of productLines) {
-            for (const ws of weekStarts) {
-              const key = `${pl}|${ws}`;
-              if (!weekLookup[key] && edits[key] === undefined) {
-                edits[key] = autoForecast[pl] || 0;
-              }
-            }
+        // Plan totals by product line
+        const planTotals = {};
+        for (const [, rows] of Object.entries(planDayRows)) {
+          for (const row of rows) {
+            if (!row.skuId || row.qty <= 0) continue;
+            const m = row.skuId.match(/^\d+-(\w+)/);
+            const pl = m ? m[1] : "?";
+            planTotals[pl] = (planTotals[pl] || 0) + row.qty;
           }
-          setWeeklyEdits(edits);
-          show("Auto-filled from history");
-        };
+        }
 
-        // Spread weekly plan evenly across work days
-        const spreadEvenly = () => {
-          const edits = { ...dailyEdits };
-          for (const pl of productLines) {
-            const weekVal = Number(getWeekVal(pl, planWeekStart)) || 0;
-            const days = selectedWeekDays.length;
-            const base = Math.floor(weekVal / days);
-            const remainder = weekVal - base * days;
-            selectedWeekDays.forEach((d, i) => {
-              edits[`${pl}|${d.date}`] = base + (i < remainder ? 1 : 0);
-            });
-          }
-          setDailyEdits(edits);
-          show("Schedule spread evenly");
-        };
+        const totalPlanRows = Object.values(planDayRows).reduce((s, rows) => s + rows.filter(r => r.skuId && r.qty > 0).length, 0);
 
-        // Save daily schedule
-        const saveDailySchedule = async () => {
-          try {
-            const rows = [];
-            for (const pl of productLines) {
-              for (const d of selectedWeekDays) {
-                const val = getDayVal(pl, d.date);
-                if (val === "" || val === undefined) continue;
-                const weekKey = `${pl}|${planWeekStart}`;
-                const weekRow = weekLookup[weekKey];
-                const existing = dayLookup[`${pl}|${d.date}`];
-                rows.push({
-                  id: existing?.id, forecastWeekId: weekRow?.id || null,
-                  dayDate: d.date, productLine: pl, plannedQty: Number(val),
-                  actualQty: existing?.actualQty ?? null, notes: "",
-                });
-              }
-            }
-            if (rows.length > 0) await upsertForecastDays(rows);
-            const fcStart = addDays(planWeekStart, -1);
-            const fcEnd = addDays(planWeekStart, 8);
-            const fresh = await fetchForecastDays(fcStart, fcEnd);
-            setForecastDays(prev => {
-              const freshIds = new Set(fresh.map(f => f.id));
-              return [...prev.filter(p => !freshIds.has(p.id) && (p.dayDate < fcStart || p.dayDate > fcEnd)), ...fresh];
-            });
-            setDailyEdits({});
-            show("Schedule saved");
-          } catch (e) { show(e.message, "error"); }
-        };
+        // Autocomplete component rendered inline
+        const SkuAutocomplete = ({ value, onChange, skuOpts }) => {
+          const [inputVal, setInputVal] = React.useState(() => {
+            const item = skuOpts.find(i => i.id === value);
+            return item ? `${item.name} (${item.id})` : "";
+          });
+          const [open, setOpen] = React.useState(false);
+          const filtered = skuOpts.filter(i => {
+            if (!inputVal) return true;
+            const q = inputVal.toLowerCase();
+            return i.id.toLowerCase().includes(q) || i.name.toLowerCase().includes(q);
+          }).slice(0, 15);
 
-        // Sub-tab style
-        const planTabBtn = (k, lbl, ico) => (
-          <button onClick={() => setPlanView(k)} style={{ ...B2, background: planView === k ? "#6366f1" : "#2a2a3a", color: planView === k ? "#fff" : "#ccc", borderColor: planView === k ? "#6366f1" : "#333", fontSize: 12, padding: "6px 14px" }}>{ico} {lbl}</button>
-        );
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+          React.useEffect(() => {
+            const item = skuOpts.find(i => i.id === value);
+            if (item) setInputVal(`${item.name} (${item.id})`);
+          }, [value]);
+
+          return (
+            <div style={{ position: "relative" }}>
+              <input value={inputVal} placeholder="Type SKU..."
+                onChange={e => { setInputVal(e.target.value); setOpen(true); onChange(""); }}
+                onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 200)}
+                style={{ ...IS, width: 180, padding: "4px 8px", fontSize: 12 }}
+              />
+              {open && filtered.length > 0 && (
+                <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 100, background: "#1e1e2e", border: "1px solid #444", borderRadius: 6, maxHeight: 200, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.5)" }}>
+                  {filtered.map(item => (
+                    <div key={item.id} onMouseDown={() => { onChange(item.id); setInputVal(`${item.name} (${item.id})`); setOpen(false); }}
+                      style={{ padding: "6px 10px", cursor: "pointer", fontSize: 12, borderBottom: "1px solid #2a2a3a", color: "#e0e0e0" }}
+                      onMouseEnter={e => e.currentTarget.style.background = "#2a2a3a"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                      <span style={{ fontWeight: 500 }}>{item.name}</span>
+                      <span style={{ color: "#888", marginLeft: 6, fontSize: 11 }}>{item.id}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        };
 
         return (
           <div>
-            {/* Sub-tabs */}
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-              {planTabBtn("weekly", "Weekly Plan", <Calendar size={13} />)}
-              {planTabBtn("daily", "Daily Schedule", <ClipboardList size={13} />)}
-              {planTabBtn("runway", "Inventory Runway", <TrendingUp size={13} />)}
-            </div>
-
             {/* Week Navigator */}
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
               <button onClick={() => setPlanWeekStart(addDays(planWeekStart, -7))} style={{ ...B2, padding: "6px 10px" }}><ChevronLeft size={14} /></button>
               <span style={{ fontSize: 14, fontWeight: 600, color: "#e0e0e0" }}>Week of {new Date(planWeekStart + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
               <button onClick={() => setPlanWeekStart(addDays(planWeekStart, 7))} style={{ ...B2, padding: "6px 10px" }}><ChevronRight size={14} /></button>
-              <button onClick={() => setPlanWeekStart(getMonday(todayStr))} style={{ ...B2, fontSize: 11, padding: "5px 10px" }}>Today</button>
+              <button onClick={() => setPlanWeekStart(getMonday(_todayStr))} style={{ ...B2, fontSize: 11, padding: "5px 10px" }}>Today</button>
+              {weekDrafts.length > 0 && <span style={{ fontSize: 11, color: "#f59e0b", marginLeft: 8 }}>{weekDrafts.length} draft run{weekDrafts.length !== 1 ? "s" : ""} submitted</span>}
             </div>
 
-            {/* Plan Item Selector */}
-            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "10px 16px", marginBottom: 14 }}>
-              <div style={{ fontSize: 11, color: "#888", marginBottom: 6 }}>Plan items (one per product line):</div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                {productLines.map(pl => (
-                  <div key={pl} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: "#ccc", minWidth: 28 }}>{pl}:</span>
-                    <select value={planItems[pl]} onChange={async (e) => {
-                      const newPlanItems = { ...forecastConfig.planItems, [pl]: e.target.value };
-                      const updated = { ...forecastConfig, planItems: newPlanItems };
-                      setForecastConfig(updated);
-                      try { await saveConfig("forecast_config", updated); } catch (err) { console.warn(err); }
-                    }} style={{ ...IS, width: "auto", padding: "3px 8px", fontSize: 12 }}>
-                      {(plItemOptions[pl] || []).map(item => (
-                        <option key={item.id} value={item.id}>{item.name} ({getLevel(item.id)})</option>
-                      ))}
-                    </select>
-                  </div>
-                ))}
+            {/* Suggested Quantities + Plan Totals */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "12px 16px", marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: "#888", marginBottom: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Suggested vs Planned (weekly)</div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                {productLines.map(pl => {
+                  const suggested = autoForecast[pl] || 0;
+                  const planned = planTotals[pl] || 0;
+                  const met = suggested > 0 && planned >= suggested;
+                  return (
+                    <div key={pl} style={{ minWidth: 100, padding: "6px 12px", borderRadius: 8, background: "#16161e", border: "1px solid #2a2a3a" }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#e0e0e0", marginBottom: 2 }}>{pl}</div>
+                      <div style={{ fontSize: 11, color: "#888" }}>Suggested: <strong style={{ color: "#ccc" }}>{suggested}</strong>/wk</div>
+                      <div style={{ fontSize: 11, color: met ? "#22c55e" : planned > 0 ? "#f59e0b" : "#555" }}>
+                        Planned: <strong>{planned}</strong>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
-            {fulfilledWeeks < 4 && planView === "weekly" && (
-              <div style={{ background: "#2a2a1a", border: "1px solid #f59e0b33", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#f59e0b" }}>
-                <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
-                Limited order history ({fulfilledWeeks} week{fulfilledWeeks !== 1 ? "s" : ""}) — consider setting forecasts manually.
-              </div>
-            )}
+            {/* Runway summary row */}
+            <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+              {runwayData.filter(r => r.weeksLeft !== Infinity && r.weeksLeft < 3).map(r => (
+                <div key={r.productLine} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, background: r.weeksLeft < 1 ? "#2a1a1a" : "#2a2a1a", border: `1px solid ${r.weeksLeft < 1 ? "#ef444433" : "#f59e0b33"}`, color: r.weeksLeft < 1 ? "#ef4444" : "#f59e0b" }}>
+                  <AlertTriangle size={11} style={{ verticalAlign: "middle", marginRight: 4 }} />
+                  {r.productLine}: {r.weeksLeft} wks runway
+                </div>
+              ))}
+            </div>
 
-            {/* ---- WEEKLY PLAN VIEW ---- */}
-            {planView === "weekly" && (
-              <div>
-                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                  <button onClick={autoFillWeekly} style={{ ...B2, fontSize: 12, color: "#f59e0b", borderColor: "#f59e0b44" }}><Sparkles size={13} /> Auto-Fill from History</button>
-                  <button onClick={saveWeeklyPlan} style={{ ...B1, fontSize: 12 }}><Check size={13} /> Save Plan</button>
+            {planLoading ? (
+              <div style={{ textAlign: "center", padding: 40, color: "#888" }}><Loader2 size={24} style={{ animation: "spin 1s linear infinite" }} /> Loading plan...</div>
+            ) : (
+              <>
+                {/* Day Grid */}
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${selectedWeekDays.length}, 1fr)`, gap: 10, marginBottom: 16 }}>
+                  {selectedWeekDays.map(day => {
+                    const rows = planDayRows[day.date] || [];
+                    const isToday = day.date === _todayStr;
+                    return (
+                      <div key={day.date} style={{ background: "#1e1e2e", borderRadius: 10, border: isToday ? "2px solid #6366f1" : "1px solid #2a2a3a", overflow: "hidden" }}>
+                        <div style={{ padding: "8px 12px", borderBottom: "1px solid #2a2a3a", background: isToday ? "#1a1a3a" : "#16161e" }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: "#e0e0e0" }}>{day.dayName}</div>
+                          <div style={{ fontSize: 11, color: "#888" }}>{new Date(day.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}</div>
+                        </div>
+                        <div style={{ padding: 8, minHeight: 100 }}>
+                          {rows.map((row, idx) => (
+                            <div key={row._key || idx} style={{ display: "flex", gap: 4, marginBottom: 6, alignItems: "center" }}>
+                              <SkuAutocomplete value={row.skuId} skuOpts={skuOptions} onChange={val => {
+                                setPlanDayRows(prev => {
+                                  const updated = [...(prev[day.date] || [])];
+                                  updated[idx] = { ...updated[idx], skuId: val };
+                                  return { ...prev, [day.date]: updated };
+                                });
+                              }} />
+                              <input type="number" min={0} step={1} value={row.qty || ""} placeholder="Qty"
+                                onChange={e => {
+                                  setPlanDayRows(prev => {
+                                    const updated = [...(prev[day.date] || [])];
+                                    updated[idx] = { ...updated[idx], qty: Number(e.target.value) || 0 };
+                                    return { ...prev, [day.date]: updated };
+                                  });
+                                }}
+                                style={{ ...IS, width: 50, textAlign: "center", padding: "4px 6px", fontSize: 12 }}
+                              />
+                              <button onClick={() => {
+                                setPlanDayRows(prev => ({
+                                  ...prev, [day.date]: (prev[day.date] || []).filter((_, i) => i !== idx)
+                                }));
+                              }} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 2 }}>
+                                <X size={14} />
+                              </button>
+                            </div>
+                          ))}
+                          <button onClick={() => {
+                            setPlanDayRows(prev => ({
+                              ...prev, [day.date]: [...(prev[day.date] || []), { skuId: "", qty: 0, _key: Date.now() + Math.random() }]
+                            }));
+                          }} style={{ ...B2, width: "100%", fontSize: 11, padding: "4px 8px", color: "#888" }}>
+                            <Plus size={12} /> Add
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                      <thead><tr>
-                        <th style={TH}>Product</th>
-                        {weekStarts.map(ws => <th key={ws} style={{ ...TH, textAlign: "center", minWidth: 90 }}>{new Date(ws + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}</th>)}
-                        <th style={{ ...TH, textAlign: "center", color: "#888" }}>Auto Avg</th>
-                      </tr></thead>
-                      <tbody>
-                        {productLines.map(pl => (
-                          <tr key={pl}>
-                            <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{allItems.find(i => i.id === planItems[pl])?.name || planItems[pl]}</td>
-                            {weekStarts.map(ws => {
-                              const val = getWeekVal(pl, ws);
-                              const auto = autoForecast[pl] || 0;
-                              const isOverride = val !== "" && val !== undefined && Number(val) !== auto;
-                              return (
-                                <td key={ws} style={{ ...TD, textAlign: "center", padding: "4px 6px" }}>
-                                  <input type="number" min={0} step={0.5} value={val} placeholder="—"
-                                    onChange={e => setWeeklyEdits(prev => ({ ...prev, [`${pl}|${ws}`]: e.target.value === "" ? "" : Number(e.target.value) }))}
-                                    style={{ ...IS, width: 64, textAlign: "center", padding: "4px 6px", fontSize: 13, fontWeight: 600, borderColor: isOverride ? "#f59e0b55" : undefined }}
-                                  />
-                                </td>
-                              );
-                            })}
-                            <td style={{ ...TD, textAlign: "center", fontSize: 12, color: "#888" }}>{autoForecast[pl] || 0}/wk</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            )}
 
-            {/* ---- DAILY SCHEDULE VIEW ---- */}
-            {planView === "daily" && (
-              <div>
-                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                  <button onClick={spreadEvenly} style={{ ...B2, fontSize: 12, color: "#6366f1", borderColor: "#6366f144" }}><Layers size={13} /> Spread Evenly</button>
-                  <button onClick={saveDailySchedule} style={{ ...B1, fontSize: 12 }}><Check size={13} /> Save Schedule</button>
+                {/* Submit Button */}
+                <div style={{ display: "flex", justifyContent: "center", marginTop: 8 }}>
+                  <button onClick={() => {
+                    if (totalPlanRows === 0) { show("Add at least one SKU row to the plan", "error"); return; }
+                    // Check for incomplete rows
+                    for (const [, rows] of Object.entries(planDayRows)) {
+                      for (const row of rows) {
+                        if (row.skuId && row.qty <= 0) { show("All rows must have a quantity > 0", "error"); return; }
+                        if (!row.skuId && row.qty > 0) { show("All rows must have a SKU selected", "error"); return; }
+                      }
+                    }
+                    setPlanConfirmModal(true);
+                  }} disabled={totalPlanRows === 0}
+                    style={{ ...B1, fontSize: 14, padding: "12px 32px", background: "#6366f1", opacity: totalPlanRows === 0 ? 0.4 : 1, borderRadius: 10 }}>
+                    <Calendar size={16} /> Submit Plan for Week ({totalPlanRows} run{totalPlanRows !== 1 ? "s" : ""})
+                  </button>
                 </div>
-                <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                      <thead><tr>
-                        <th style={TH}>Product</th>
-                        {selectedWeekDays.map(d => (
-                          <th key={d.date} style={{ ...TH, textAlign: "center", minWidth: 80, borderLeft: d.date === todayStr ? "2px solid #6366f1" : undefined }}>
-                            {d.dayName} {new Date(d.date + "T12:00:00").getDate()}
-                          </th>
-                        ))}
-                        <th style={{ ...TH, textAlign: "center", fontWeight: 700 }}>TOTAL</th>
-                      </tr></thead>
-                      <tbody>
-                        {productLines.map(pl => {
-                          const rowTotal = selectedWeekDays.reduce((s, d) => s + (Number(getDayVal(pl, d.date)) || 0), 0);
-                          return (
-                            <tr key={pl}>
-                              <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{allItems.find(i => i.id === planItems[pl])?.name || planItems[pl]}</td>
-                              {selectedWeekDays.map(d => {
-                                const val = getDayVal(pl, d.date);
-                                const saved = dayLookup[`${pl}|${d.date}`];
-                                const isDone = saved && saved.actualQty !== null;
-                                return (
-                                  <td key={d.date} style={{ ...TD, textAlign: "center", padding: "4px 6px", borderLeft: d.date === todayStr ? "2px solid #6366f1" : undefined, background: isDone ? "#16261e" : undefined }}>
-                                    {isDone ? (
-                                      <span style={{ color: "#22c55e", fontWeight: 600, fontSize: 12 }}>DONE ({saved.actualQty})</span>
-                                    ) : (
-                                      <input type="number" min={0} step={1} value={val} placeholder="—"
-                                        onChange={e => setDailyEdits(prev => ({ ...prev, [`${pl}|${d.date}`]: e.target.value === "" ? "" : Number(e.target.value) }))}
-                                        style={{ ...IS, width: 54, textAlign: "center", padding: "4px 6px", fontSize: 13, fontWeight: 600 }}
-                                      />
-                                    )}
-                                  </td>
-                                );
-                              })}
-                              <td style={{ ...TD, textAlign: "center", fontWeight: 700, color: "#e0e0e0", fontSize: 14 }}>{rowTotal}</td>
-                            </tr>
-                          );
-                        })}
-                        {/* Day totals row */}
-                        <tr style={{ background: "#16161e" }}>
-                          <td style={{ ...TD, fontWeight: 600, color: "#888", fontSize: 11 }}>DAY TOTAL</td>
-                          {selectedWeekDays.map(d => {
-                            const colTotal = productLines.reduce((s, pl) => s + (Number(getDayVal(pl, d.date)) || 0), 0);
-                            return <td key={d.date} style={{ ...TD, textAlign: "center", fontWeight: 700, color: "#ccc", borderLeft: d.date === todayStr ? "2px solid #6366f1" : undefined }}>{colTotal}</td>;
-                          })}
-                          <td style={{ ...TD, textAlign: "center", fontWeight: 700, color: "#f59e0b", fontSize: 14 }}>
-                            {productLines.reduce((s, pl) => s + selectedWeekDays.reduce((s2, d) => s2 + (Number(getDayVal(pl, d.date)) || 0), 0), 0)}
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* ---- RUNWAY VIEW ---- */}
-            {planView === "runway" && (
-              <div>
-                <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-                  {(() => {
-                    const urgent = runwayData.filter(r => r.weeksLeft < 2 && r.weeksLeft !== Infinity);
-                    const ok = runwayData.filter(r => r.weeksLeft >= 2 || r.weeksLeft === Infinity);
-                    return <>
-                      <Stat icon={<TrendingUp size={18} />} label="Product Lines" value={productLines.length} accent="#6366f1" />
-                      <Stat icon={<AlertTriangle size={18} />} label="Low Runway" value={urgent.length} accent={urgent.length > 0 ? "#ef4444" : "#22c55e"} />
-                      <Stat icon={<CheckCircle size={18} />} label="Healthy" value={ok.length} accent="#22c55e" />
-                    </>;
-                  })()}
-                </div>
-                <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                      <thead><tr>
-                        <th style={TH}>Plan Item</th>
-                        <th style={{ ...TH, textAlign: "center" }}>Stock (Units)</th>
-                        <th style={{ ...TH, textAlign: "center" }}>Avg Demand/wk</th>
-                        <th style={{ ...TH, textAlign: "center" }}>Weeks Left</th>
-                        <th style={{ ...TH, textAlign: "center" }}>Est. Stockout</th>
-                      </tr></thead>
-                      <tbody>
-                        {runwayData.map(r => {
-                          const color = r.weeksLeft === Infinity ? "#6366f1" : r.weeksLeft < 1 ? "#ef4444" : r.weeksLeft < 2 ? "#f59e0b" : r.weeksLeft < 4 ? "#22c55e" : "#6366f1";
-                          return (
-                            <tr key={r.productLine}>
-                              <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{allItems.find(i => i.id === r.itemId)?.name || r.productLine}</td>
-                              <td style={{ ...TD, textAlign: "center", fontWeight: 600 }}>{r.equiv}</td>
-                              <td style={{ ...TD, textAlign: "center", color: "#ccc" }}>{r.demandPerWeek > 0 ? `${r.demandPerWeek}/wk` : "No data"}</td>
-                              <td style={{ ...TD, textAlign: "center" }}>
-                                <span style={{ fontWeight: 700, color, fontSize: 14 }}>{r.weeksLeft === Infinity ? "∞" : r.weeksLeft}</span>
-                                {r.weeksLeft !== Infinity && <span style={{ color: "#888", fontSize: 11, marginLeft: 4 }}>wks</span>}
-                              </td>
-                              <td style={{ ...TD, textAlign: "center", fontSize: 12, color: "#888" }}>
-                                {r.stockoutDate ? new Date(r.stockoutDate + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "—"}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-                {runwayData.some(r => r.weeksLeft !== Infinity && r.weeksLeft < 2) && (
-                  <div style={{ marginTop: 12, background: "#2a1a1a", border: "1px solid #ef444433", borderRadius: 8, padding: "10px 14px", fontSize: 12, color: "#ef4444" }}>
-                    <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
-                    {runwayData.filter(r => r.weeksLeft !== Infinity && r.weeksLeft < 2).map(r => r.productLine).join(", ")} — less than 2 weeks of stock remaining.
-                  </div>
-                )}
-              </div>
+              </>
             )}
           </div>
         );
       })()}
+
+      {/* Plan Confirm Modal */}
+      <Modal open={planConfirmModal} onClose={() => setPlanConfirmModal(false)} title="Submit Weekly Plan">
+        <div style={{ marginBottom: 16 }}>
+          {weekDrafts.length > 0 ? (
+            <div style={{ background: "#2a2a1a", border: "1px solid #f59e0b33", borderRadius: 8, padding: "12px 16px", marginBottom: 12 }}>
+              <div style={{ fontSize: 13, color: "#f59e0b", fontWeight: 600, marginBottom: 4 }}>
+                <AlertTriangle size={14} style={{ verticalAlign: "middle", marginRight: 6 }} />
+                This week already has {weekDrafts.length} drafted production run{weekDrafts.length !== 1 ? "s" : ""}.
+              </div>
+              <div style={{ fontSize: 12, color: "#ccc" }}>
+                Submitting will <strong>replace all Draft runs</strong> for this week. Completed runs are not affected.
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 13, color: "#ccc" }}>
+              This will create draft production runs for each planned item. You can then complete them during the week from the Production tab.
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={() => setPlanConfirmModal(false)} style={B2}>Cancel</button>
+          <button onClick={submitWeeklyPlan} disabled={planSubmitting}
+            style={{ ...B1, background: "#6366f1", opacity: planSubmitting ? 0.5 : 1 }}>
+            {planSubmitting ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Submitting...</> : <><Check size={14} /> Confirm &amp; Submit</>}
+          </button>
+        </div>
+      </Modal>
+
+      {/* Complete Draft Modal */}
+      <Modal open={completeDraftModal} onClose={() => { setCompleteDraftModal(false); setDraftToComplete(null); }} title="Complete Production Run" wide>
+        {draftToComplete && (
+          <div style={{ marginBottom: 12, padding: "8px 12px", background: "#1a2a1a", borderRadius: 6, fontSize: 12, color: "#22c55e", border: "1px solid #22c55e33" }}>
+            Completing draft: <strong>{draftToComplete.id}</strong> — {draftToComplete.assemblyName}
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
+            <select value={prodAssembly} onChange={e => { const id = e.target.value; setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); }} style={IS}>
+              <option value="">Select assembly...</option>
+              {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity *</label>
+            <input type="number" step="any" min="0" value={prodQty} onChange={e => setProdQty(Number(e.target.value))} style={IS} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Production Date</label>
+            <input type="date" value={prodDate} onChange={e => setProdDate(e.target.value)} style={IS} />
+          </div>
+        </div>
+        {prodAssemblyItem && (
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Lot / Batch Number <span style={{ color: "#ef4444" }}>*</span></label>
+            <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} placeholder="Edit lot number" style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
+          </div>
+        )}
+        {prodAssemblyItem && (
+          <div style={{ marginBottom: 12, padding: "8px 12px", background: "#16161e", borderRadius: 6, fontSize: 12, color: "#888", display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <span>Current stock: <strong style={{ color: "#e0e0e0" }}>{prodAssemblyItem.qty} {prodAssemblyItem.unit}</strong></span>
+            <span>After production: <strong style={{ color: "#22c55e" }}>{prodAssemblyItem.qty + prodQty} {prodAssemblyItem.unit}</strong></span>
+          </div>
+        )}
+        {prodAssemblyItem && prodAssemblyItem.bom && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 4 }}>Materials to Consume</div>
+            <div style={{ border: "1px solid #2a2a3a", borderRadius: 8, padding: 12, background: "#16161e", maxHeight: 400, overflow: "auto" }}>
+              {renderConsumptionTree(prodAssemblyItem.bom, prodQty)}
+            </div>
+          </div>
+        )}
+        {prodAssemblyItem && (() => {
+          const consumed = getConsumedItems(prodAssemblyItem.bom, prodQty);
+          const valErrors = getValidationErrors(prodAssemblyItem.bom, prodQty);
+          const shortages = consumed.filter(c => c.qty > c.currentQty);
+          return (
+            <>
+              {valErrors.length > 0 && (
+                <div style={{ background: "#2a1a1a", border: "1px solid #ef444433", borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, color: "#ef4444", fontWeight: 600, marginBottom: 4 }}>Incomplete — some materials are not checked:</div>
+                  {valErrors.map((e, i) => <div key={i} style={{ fontSize: 12, color: "#f87171" }}>{e}</div>)}
+                </div>
+              )}
+              {valErrors.length === 0 && shortages.length > 0 && (
+                <div style={{ background: "#2a2a1a", border: "1px solid #f59e0b33", borderRadius: 8, padding: "10px 14px", marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, color: "#f59e0b", fontWeight: 600, marginBottom: 4 }}>Insufficient Stock (will go negative)</div>
+                  {shortages.map((s, i) => <div key={i} style={{ fontSize: 12, color: "#fbbf24" }}>{s.name}: need {s.qty.toFixed(3)}, have {s.currentQty}</div>)}
+                </div>
+              )}
+              {valErrors.length === 0 && (<div style={{ fontSize: 12, color: "#22c55e", marginBottom: 12, fontWeight: 500 }}>Will consume {consumed.length} items</div>)}
+            </>
+          );
+        })()}
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes (optional)</label>
+          <input value={prodNotes} onChange={e => setProdNotes(e.target.value)} placeholder="Batch notes" style={IS} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={() => { setCompleteDraftModal(false); setDraftToComplete(null); }} style={B2}>Cancel</button>
+          <button onClick={submitCompleteDraft} disabled={!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)}
+            style={{ ...B1, background: "#22c55e", opacity: (!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}>
+            <Check size={14} /> Complete Run
+          </button>
+        </div>
+      </Modal>
+
+      {/* Edit Draft Modal */}
+      <Modal open={editDraftModal} onClose={() => setEditDraftModal(false)} title="Edit Draft Run">
+        <div style={{ display: "grid", gap: 12, marginBottom: 16 }}>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly</label>
+            <select value={editDraftForm.assemblyId || ""} onChange={e => {
+              const item = allItems.find(i => i.id === e.target.value);
+              setEditDraftForm(prev => ({ ...prev, assemblyId: e.target.value, assemblyName: item?.name || "" }));
+            }} style={IS}>
+              <option value="">Select...</option>
+              {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
+            </select>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity</label>
+              <input type="number" min={0} value={editDraftForm.qty || ""} onChange={e => setEditDraftForm(prev => ({ ...prev, qty: Number(e.target.value) || 0 }))} style={IS} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Planned Date</label>
+              <input type="date" value={editDraftForm.plannedDate || ""} onChange={e => setEditDraftForm(prev => ({ ...prev, plannedDate: e.target.value }))} style={IS} />
+            </div>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Lot Number</label>
+            <input value={editDraftForm.lotNumber || ""} onChange={e => setEditDraftForm(prev => ({ ...prev, lotNumber: e.target.value }))} style={IS} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label>
+            <input value={editDraftForm.notes || ""} onChange={e => setEditDraftForm(prev => ({ ...prev, notes: e.target.value }))} style={IS} />
+          </div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={() => setEditDraftModal(false)} style={B2}>Cancel</button>
+          <button onClick={saveEditDraft} style={B1}><Check size={14} /> Save</button>
+        </div>
+      </Modal>
 
       {/* ================== TRANSACTION LOG ================== */}
       {tab === "log" && (
