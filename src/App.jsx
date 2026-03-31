@@ -377,6 +377,58 @@ function MultiSelectDropdown({ options, selected, onChange, placeholder }) {
 }
 
 // ============================================================
+// SKU AUTOCOMPLETE (used in Planning tab)
+// ============================================================
+
+const IS_AC = { width: 180, padding: "4px 8px", fontSize: 12, background: "#16161e", color: "#e0e0e0", border: "1px solid #333", borderRadius: 6, outline: "none" };
+
+function SkuAutocomplete({ value, onChange, skuOpts }) {
+  const [inputVal, setInputVal] = useState("");
+  const [open, setOpen] = useState(false);
+  const [userTyping, setUserTyping] = useState(false);
+
+  // Sync display text from value prop (when not actively typing)
+  useEffect(() => {
+    if (!userTyping) {
+      const item = skuOpts.find(i => i.id === value);
+      setInputVal(item ? item.id : "");
+    }
+  }, [value, skuOpts, userTyping]);
+
+  // Filter: when user is typing, filter by their input; when not, show all
+  const query = userTyping ? inputVal.toLowerCase() : "";
+  const filtered = skuOpts.filter(i => {
+    if (!query) return true;
+    return i.id.toLowerCase().includes(query) || i.name.toLowerCase().includes(query);
+  });
+
+  return (
+    <div style={{ position: "relative" }}>
+      <input value={inputVal} placeholder="Type SKU..."
+        onChange={e => { setInputVal(e.target.value); setUserTyping(true); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => { setTimeout(() => { setOpen(false); setUserTyping(false); }, 200); }}
+        style={IS_AC}
+      />
+      {open && filtered.length > 0 && (
+        <div style={{ position: "absolute", top: "100%", left: 0, width: 280, zIndex: 100, background: "#1e1e2e", border: "1px solid #444", borderRadius: 6, maxHeight: 250, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.5)" }}>
+          {filtered.map(item => (
+            <div key={item.id}
+              onMouseDown={() => { onChange(item.id); setInputVal(item.id); setUserTyping(false); setOpen(false); }}
+              style={{ padding: "6px 10px", cursor: "pointer", fontSize: 12, borderBottom: "1px solid #2a2a3a", color: "#e0e0e0" }}
+              onMouseEnter={e => { e.currentTarget.style.background = "#2a2a3a"; }}
+              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}>
+              <span style={{ fontFamily: "monospace", fontSize: 11, color: "#8b5cf6" }}>{item.id}</span>
+              <span style={{ color: "#ccc", marginLeft: 8 }}>{item.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // MAIN APP
 // ============================================================
 
@@ -3234,8 +3286,8 @@ export default function App() {
           return { date: d, dayName, isWorkDay: workDays.includes(dayName) };
         }).filter(d => d.isWorkDay);
 
-        // SKU options for autocomplete (levels 200-500)
-        const skuOptions = allItems.filter(i => getLevel(i.id) >= 200);
+        // SKU options for autocomplete (levels 200-500, sorted by ID ascending)
+        const skuOptions = allItems.filter(i => getLevel(i.id) >= 200).sort((a, b) => a.id.localeCompare(b.id));
 
         // Plan totals by product line
         const planTotals = {};
@@ -3249,49 +3301,6 @@ export default function App() {
         }
 
         const totalPlanRows = Object.values(planDayRows).reduce((s, rows) => s + rows.filter(r => r.skuId && r.qty > 0).length, 0);
-
-        // Autocomplete component rendered inline
-        const SkuAutocomplete = ({ value, onChange, skuOpts }) => {
-          const [inputVal, setInputVal] = React.useState(() => {
-            const item = skuOpts.find(i => i.id === value);
-            return item ? `${item.name} (${item.id})` : "";
-          });
-          const [open, setOpen] = React.useState(false);
-          const filtered = skuOpts.filter(i => {
-            if (!inputVal) return true;
-            const q = inputVal.toLowerCase();
-            return i.id.toLowerCase().includes(q) || i.name.toLowerCase().includes(q);
-          }).slice(0, 15);
-
-          // eslint-disable-next-line react-hooks/exhaustive-deps
-          React.useEffect(() => {
-            const item = skuOpts.find(i => i.id === value);
-            if (item) setInputVal(`${item.name} (${item.id})`);
-          }, [value]);
-
-          return (
-            <div style={{ position: "relative" }}>
-              <input value={inputVal} placeholder="Type SKU..."
-                onChange={e => { setInputVal(e.target.value); setOpen(true); onChange(""); }}
-                onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 200)}
-                style={{ ...IS, width: 180, padding: "4px 8px", fontSize: 12 }}
-              />
-              {open && filtered.length > 0 && (
-                <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 100, background: "#1e1e2e", border: "1px solid #444", borderRadius: 6, maxHeight: 200, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.5)" }}>
-                  {filtered.map(item => (
-                    <div key={item.id} onMouseDown={() => { onChange(item.id); setInputVal(`${item.name} (${item.id})`); setOpen(false); }}
-                      style={{ padding: "6px 10px", cursor: "pointer", fontSize: 12, borderBottom: "1px solid #2a2a3a", color: "#e0e0e0" }}
-                      onMouseEnter={e => e.currentTarget.style.background = "#2a2a3a"}
-                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                      <span style={{ fontWeight: 500 }}>{item.name}</span>
-                      <span style={{ color: "#888", marginLeft: 6, fontSize: 11 }}>{item.id}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        };
 
         return (
           <div>
