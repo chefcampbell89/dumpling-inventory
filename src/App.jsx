@@ -2750,7 +2750,7 @@ export default function App() {
                               setOrders(prev => prev.map(o => { const m = updated.find(u => u.id === o.id); return m || o; }));
                               for (const o of updated) { try { await upsertOrder(o); } catch (err) { console.warn(err); } }
                               show(`Renamed to ${nv}`);
-                            }
+                            }}
                             onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }}
                             style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 15, background: "transparent", border: "1px solid transparent", borderRadius: 4, padding: "2px 6px", outline: "none", width: "100%", maxWidth: 300, cursor: "text" }}
                             onFocus={e => { e.target.style.borderColor = "#6366f144"; e.target.style.background = "#16161e"; }}
