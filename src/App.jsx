@@ -1,4 +1,4 @@
-// APP VERSION: v114
+// APP VERSION: v115
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -2738,7 +2738,25 @@ export default function App() {
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                         {isExp ? <ChevronDown size={16} style={{ color: "#888" }} /> : <ChevronRight size={16} style={{ color: "#888" }} />}
                         <div>
-                          <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 15 }}>{group.customer}</div>
+                          <input
+                            type="text"
+                            defaultValue={group.customer}
+                            onClick={e => e.stopPropagation()}
+                            onBlur={async (e) => {
+                              e.target.style.borderColor = "transparent"; e.target.style.background = "transparent";
+                              const nv = e.target.value.trim();
+                              if (!nv || nv === group.customer) { e.target.value = group.customer; return; }
+                              const updated = group.lines.map(o => ({ ...o, customer: nv }));
+                              setOrders(prev => prev.map(o => { const m = updated.find(u => u.id === o.id); return m || o; }));
+                              for (const o of updated) { try { await upsertOrder(o); } catch (err) { console.warn(err); } }
+                              show(`Renamed to ${nv}`);
+                            }
+                            onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }}
+                            style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 15, background: "transparent", border: "1px solid transparent", borderRadius: 4, padding: "2px 6px", outline: "none", width: "100%", maxWidth: 300, cursor: "text" }}
+                            onFocus={e => { e.target.style.borderColor = "#6366f144"; e.target.style.background = "#16161e"; }}
+                            onMouseLeave={e => { if (document.activeElement !== e.target) { e.target.style.borderColor = "transparent"; e.target.style.background = "transparent"; } }}
+                            onMouseEnter={e => { if (document.activeElement !== e.target) { e.target.style.borderColor = "#333"; } }}
+                          />
                           <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
                             {group.date} • {group.lines.length} line{group.lines.length > 1 ? "s" : ""} • {totalItems} total units
                             {notes && <span style={{ marginLeft: 8, color: "#666" }}>— {notes.slice(0, 60)}{notes.length > 60 ? "..." : ""}</span>}
