@@ -1,4 +1,4 @@
-// APP VERSION: v115
+// APP VERSION: v116
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -47,11 +47,35 @@ function getLevel(id) {
   return m ? Number(m[1]) : 100;
 }
 
+function findLotSourceInBom(assemblyId, allItems) {
+  const visited = new Set();
+  const walk = (itemId) => {
+    if (visited.has(itemId)) return null;
+    visited.add(itemId);
+    const item = allItems.find(i => i.id === itemId);
+    if (!item) return null;
+    if (item.lotSource) return item;
+    if (!item.bom) return null;
+    for (const line of item.bom) {
+      const found = walk(line.partId);
+      if (found) return found;
+    }
+    return null;
+  };
+  const assembly = allItems.find(i => i.id === assemblyId);
+  if (!assembly || !assembly.bom) return null;
+  for (const line of assembly.bom) {
+    const found = walk(line.partId);
+    if (found) return found;
+  }
+  return null;
+}
+
 // ============================================================
 // SAMPLE / SEED DATA (used as fallback if Supabase is empty)
 // ============================================================
 
-const R = (id,name,cost,unit,supplier="",minStock=0,qty=0) => ({id,name,category:"Raw Material",type:"Stock",costing:"FIFO",location:"Dumpling Factory",supplier,supplierCode:"",avgCost:cost,unit,minStock,qty,notes:"",status:"Active",lotTracking:false,piecesPerUnit:0});
+const R = (id,name,cost,unit,supplier="",minStock=0,qty=0) => ({id,name,category:"Raw Material",type:"Stock",costing:"FIFO",location:"Dumpling Factory",supplier,supplierCode:"",avgCost:cost,unit,minStock,qty,notes:"",status:"Active",lotTracking:false,piecesPerUnit:0,lotSource:false});
 const SEED_PARTS = [
   R("100-Baking Soda","Baking Soda",38.71,"24 LB","Baldor Boston, LLC",2,10),
   R("100-Blk Pepper 5 LB","Black Pepper",46.05,"5 LB","Chef's Warehouse",2,8),
@@ -109,7 +133,7 @@ const SEED_PARTS = [
   R("100-Kadoya Sesame Oil Case","Sesame Oil",213.95,"Case","",1,3),
 ];
 
-const A = (id,name,cat,unit,cost,loc,notes,bom,pcs) => ({id,name,category:cat,type:"Stock",costing:cat==="Raw Material"?"FIFO":"FEFO - Batch",location:loc||"Dumpling Factory",supplier:"",supplierCode:"",avgCost:cost,unit,minStock:0,qty:0,notes:notes||"",status:"Active",lotTracking:true,piecesPerUnit:pcs||0,bom});
+const A = (id,name,cat,unit,cost,loc,notes,bom,pcs) => ({id,name,category:cat,type:"Stock",costing:cat==="Raw Material"?"FIFO":"FEFO - Batch",location:loc||"Dumpling Factory",supplier:"",supplierCode:"",avgCost:cost,unit,minStock:0,qty:0,notes:notes||"",status:"Active",lotTracking:true,piecesPerUnit:pcs||0,lotSource:false,bom});
 const SEED_ASSEMBLIES = [
   // ---- CB (Cheeseburger) ----
   A("200-CB Dough","CB Dough","Sub-Recipe","Batch",0,"Dumpling Factory","",
@@ -475,6 +499,7 @@ export default function App() {
   const [prodNotes, setProdNotes] = useState("");
   const [prodConsume, setProdConsume] = useState({});
   const [prodLotNumber, setProdLotNumber] = useState("");
+  const [freshLotNumber, setFreshLotNumber] = useState("");
   const [prodDate, setProdDate] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; });
   const [lots, setLots] = useState([]);
   const [search, setSearch] = useState("");
@@ -1111,7 +1136,7 @@ export default function App() {
     setEditItem(null);
     if (type === "item") {
       const lvl = initLevel || 100;
-      setForm({ id: `${lvl}-`, name: "", category: LEVELS[lvl]?.cat || "Raw Material", type: "Stock", costing: lvl >= 250 ? "FEFO - Batch" : "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active", lotTracking: lvl >= 200, piecesPerUnit: 0 });
+      setForm({ id: `${lvl}-`, name: "", category: LEVELS[lvl]?.cat || "Raw Material", type: "Stock", costing: lvl >= 250 ? "FEFO - Batch" : "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active", lotTracking: lvl >= 200, piecesPerUnit: 0, lotSource: false });
       setBomForm([]);
     }
     else if (type === "order") {
@@ -1324,48 +1349,21 @@ export default function App() {
   // ---- PRODUCTION ----
   const prodAssemblyItem = useMemo(() => assemblies.find(a => a.id === prodAssembly), [assemblies, prodAssembly]);
 
-  // Find available lots from 200-level ancestors for lot inheritance
+  // Find the designated lot source item in the BOM tree
+  const lotSourceItem = useMemo(() => {
+    if (!prodAssemblyItem) return null;
+    if (prodAssemblyItem.lotSource) return null; // Lot source items get manual entry
+    const lvl = getLevel(prodAssemblyItem.id);
+    if (lvl <= 200) return null; // 200-level = manual entry
+    return findLotSourceInBom(prodAssemblyItem.id, allItems);
+  }, [prodAssemblyItem, allItems]);
+
+  // Get available lots from the lot source item only
   const suggestedLots = useMemo(() => {
-    if (!prodAssemblyItem || !prodAssemblyItem.bom) return [];
-    const prodLvl = getLevel(prodAssemblyItem.id);
-    if (prodLvl <= 200) return []; // 200-level = manual entry
-
-    // Find lots from 200-level components in the BOM tree
-    const find200Lots = (bom) => {
-      const result = [];
-      for (const line of bom) {
-        const item = allItems.find(i => i.id === line.partId);
-        if (!item) continue;
-        if (getLevel(item.id) === 200) {
-          const itemLots = (lotsByItem[item.id] || []).filter(l => l.qty > 0);
-          result.push(...itemLots);
-        } else if (item.bom) {
-          result.push(...find200Lots(item.bom));
-        }
-      }
-      return result;
-    };
-
-    // Also check direct BOM components for any level that has lots
-    const findDirectLots = (bom) => {
-      const result = [];
-      for (const line of bom) {
-        const itemLots = (lotsByItem[line.partId] || []).filter(l => l.qty > 0);
-        result.push(...itemLots);
-      }
-      return result;
-    };
-
-    const allLots = [...find200Lots(prodAssemblyItem.bom), ...findDirectLots(prodAssemblyItem.bom)];
-    // Deduplicate by lot number, keep oldest
-    const unique = {};
-    for (const l of allLots) {
-      if (!unique[l.lotNumber] || (l.productionDate || "") < (unique[l.lotNumber].productionDate || "")) {
-        unique[l.lotNumber] = l;
-      }
-    }
-    return Object.values(unique).sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
-  }, [prodAssemblyItem, allItems, lotsByItem]);
+    if (!lotSourceItem) return [];
+    const itemLots = (lotsByItem[lotSourceItem.id] || []).filter(l => l.qty > 0);
+    return itemLots.sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+  }, [lotSourceItem, lotsByItem]);
 
   // prodConsume is { [partId]: true/false } — true means "consume this item from inventory"
   const initConsume = useCallback((assemblyId) => {
@@ -1449,7 +1447,8 @@ export default function App() {
   const submitProduction = async () => {
     if (!prodAssemblyItem) { show("Select an assembly", "error"); return; }
     if (prodQty <= 0) { show("Qty must be > 0", "error"); return; }
-    if (!prodLotNumber.trim()) { show("Batch / Lot number is required", "error"); return; }
+    const lotNum = (prodLotNumber === "__FRESH__" ? freshLotNumber.trim() : prodLotNumber.trim());
+    if (!lotNum) { show("Batch / Lot number is required", "error"); return; }
     const validationErrors = getValidationErrors(prodAssemblyItem.bom, prodQty);
     if (validationErrors.length > 0) { show("Not all materials are accounted for: " + validationErrors[0], "error"); return; }
     const consumed = getConsumedItems(prodAssemblyItem.bom, prodQty);
@@ -1463,7 +1462,6 @@ export default function App() {
 
     const runId = `PROD-${prodDate}-${String(prodRuns.length + 1).padStart(3, "0")}`;
     const runDate = prodDate;
-    const lotNum = prodLotNumber.trim();
     const run = {
       id: runId, assemblyId: prodAssemblyItem.id, assemblyName: prodAssemblyItem.name,
       qtyProduced: prodQty, date: runDate, lotNumber: lotNum,
@@ -1481,8 +1479,14 @@ export default function App() {
       const ai = updAsm.findIndex(a => a.id === c.partId);
       if (ai >= 0) { updAsm[ai] = { ...updAsm[ai], qty: updAsm[ai].qty - c.qty }; try { await updateItemQty(c.partId, updAsm[ai].qty); } catch (e) { console.warn(e.message); } }
 
-      // Deduct from lots (FIFO - oldest first)
-      const itemLots = updLots.filter(l => l.itemId === c.partId && l.qty > 0).sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+      // Deduct from lots (FIFO - oldest first, but prioritize selected lot for lot source item)
+      const itemLots = updLots.filter(l => l.itemId === c.partId && l.qty > 0).sort((a, b) => {
+        if (lotSourceItem && c.partId === lotSourceItem.id) {
+          if (a.lotNumber === lotNum && b.lotNumber !== lotNum) return -1;
+          if (b.lotNumber === lotNum && a.lotNumber !== lotNum) return 1;
+        }
+        return (a.productionDate || "").localeCompare(b.productionDate || "");
+      });
       let remain = c.qty;
       for (const lot of itemLots) {
         if (remain <= 0) break;
@@ -1543,13 +1547,10 @@ export default function App() {
           if (!row.skuId || row.qty <= 0) continue;
           const item = allItems.find(i => i.id === row.skuId);
           if (!item) continue;
-          const pl = row.skuId.match(/^\d+-(\w+)/)?.[1] || "XX";
-          const dateStr = day.date.replace(/-/g, "");
-          const lotNumber = `${pl}-${dateStr}-${String(counter).padStart(3, "0")}`;
           const runId = `DRAFT-${day.date}-${String(counter).padStart(3, "0")}`;
           const run = {
             id: runId, assemblyId: row.skuId, assemblyName: item.name,
-            qtyProduced: row.qty, date: day.date, lotNumber, plannedDate: day.date,
+            qtyProduced: row.qty, date: day.date, lotNumber: "", plannedDate: day.date,
             sourcePlanWeek: planWeekStart, status: "Draft",
             notes: "", createdBy: profile?.email || "", consumed: [],
           };
@@ -1575,7 +1576,8 @@ export default function App() {
     if (!draft) return;
     if (!prodAssemblyItem) { show("Select an assembly", "error"); return; }
     if (prodQty <= 0) { show("Qty must be > 0", "error"); return; }
-    if (!prodLotNumber.trim()) { show("Batch / Lot number is required", "error"); return; }
+    const lotNum = (prodLotNumber === "__FRESH__" ? freshLotNumber.trim() : prodLotNumber.trim());
+    if (!lotNum) { show("Batch / Lot number is required", "error"); return; }
     const validationErrors = getValidationErrors(prodAssemblyItem.bom, prodQty);
     if (validationErrors.length > 0) { show("Not all materials are accounted for: " + validationErrors[0], "error"); return; }
     const consumed = getConsumedItems(prodAssemblyItem.bom, prodQty);
@@ -1588,18 +1590,23 @@ export default function App() {
     }
 
     const runDate = prodDate;
-    const lotNum = prodLotNumber.trim();
     const updParts = [...parts];
     const updAsm = [...assemblies];
     const updLots = [...lots];
 
-    // Consume items from inventory and lots (same as submitProduction)
+    // Consume items from inventory and lots (prioritize selected lot for lot source item)
     for (const c of consumed) {
       const pi = updParts.findIndex(p => p.id === c.partId);
       if (pi >= 0) { updParts[pi] = { ...updParts[pi], qty: updParts[pi].qty - c.qty }; try { await updateItemQty(c.partId, updParts[pi].qty); } catch (e) { console.warn(e.message); } }
       const ai = updAsm.findIndex(a => a.id === c.partId);
       if (ai >= 0) { updAsm[ai] = { ...updAsm[ai], qty: updAsm[ai].qty - c.qty }; try { await updateItemQty(c.partId, updAsm[ai].qty); } catch (e) { console.warn(e.message); } }
-      const itemLots = updLots.filter(l => l.itemId === c.partId && l.qty > 0).sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+      const itemLots = updLots.filter(l => l.itemId === c.partId && l.qty > 0).sort((a, b) => {
+        if (lotSourceItem && c.partId === lotSourceItem.id) {
+          if (a.lotNumber === lotNum && b.lotNumber !== lotNum) return -1;
+          if (b.lotNumber === lotNum && a.lotNumber !== lotNum) return 1;
+        }
+        return (a.productionDate || "").localeCompare(b.productionDate || "");
+      });
       let remain = c.qty;
       for (const lot of itemLots) {
         if (remain <= 0) break;
@@ -2351,7 +2358,7 @@ export default function App() {
         {tab === "vendors" && <button onClick={() => openAdd("vendor")} style={B1}><Plus size={14} /> Vendor</button>}
         {tab === "receiving" && <button onClick={openReceiveManual} style={B1}><Plus size={14} /> Manual Receipt</button>}
         {tab === "pos" && <button onClick={openManualPO} style={B1}><Plus size={14} /> Create PO</button>}
-        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setProdDate(fmtDate(new Date())); setProdModal(true); }} style={B1}><Hammer size={14} /> Manual Production Entry</button>}
+        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setFreshLotNumber(""); setProdDate(fmtDate(new Date())); setProdModal(true); }} style={B1}><Hammer size={14} /> Manual Production Entry</button>}
       </div>}
 
       {/* ================== DASHBOARD ================== */}
@@ -3141,7 +3148,7 @@ export default function App() {
                                     <button onClick={() => {
                                       setDraftToComplete(r);
                                       setProdAssembly(r.assemblyId); setProdQty(r.qtyProduced);
-                                      setProdDate(r.plannedDate || r.date); setProdLotNumber(r.lotNumber || "");
+                                      setProdDate(r.plannedDate || r.date); setProdLotNumber(r.lotNumber || ""); setFreshLotNumber("");
                                       setProdNotes(r.notes || ""); setProdConsume(initConsume(r.assemblyId));
                                       setCompleteDraftModal(true);
                                     }} style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#22c55e", borderColor: "#22c55e44" }}>
@@ -3193,7 +3200,7 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
-            <select value={prodAssembly} onChange={e => { const id = e.target.value; setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); }} style={IS}>
+            <select value={prodAssembly} onChange={e => { const id = e.target.value; setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber(""); }} style={IS}>
               <option value="">Select assembly...</option>
               {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
             </select>
@@ -3212,26 +3219,38 @@ export default function App() {
         {prodAssemblyItem && (
           <div style={{ marginBottom: 16 }}>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>
-              Lot / Batch Number <span style={{ color: "#ef4444" }}>*</span> {getLevel(prodAssemblyItem.id) === 200 ? "(new lot)" : "(inherited from 200-level)"}
+              Lot / Batch Number <span style={{ color: "#ef4444" }}>*</span>
+              {lotSourceItem
+                ? ` (inherited from ${lotSourceItem.name})`
+                : (prodAssemblyItem.lotSource || getLevel(prodAssemblyItem.id) <= 200)
+                  ? " (new lot)"
+                  : " (manual — no lot source in BOM)"}
             </label>
-            {getLevel(prodAssemblyItem.id) === 200 ? (
-              <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} placeholder="Enter lot number (e.g. CB-20260315-01)" style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
-            ) : (
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <select value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} style={{ ...IS, flex: 1, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }}>
-                  <option value="">Select lot...</option>
+            {lotSourceItem ? (
+              <div>
+                <select value={prodLotNumber} onChange={e => { setProdLotNumber(e.target.value); if (e.target.value !== "__FRESH__") setFreshLotNumber(""); }}
+                  style={{ ...IS, borderColor: !prodLotNumber ? "#ef4444" : "#f59e0b", background: "#1a1a2e" }}>
+                  <option value="">Select lot from {lotSourceItem.name}...</option>
                   {suggestedLots.map(l => (
                     <option key={l.lotNumber} value={l.lotNumber}>{l.lotNumber} ({l.qty} avail, {l.productionDate || "?"})</option>
                   ))}
+                  <option value="__FRESH__">⊕ Make from fresh raw materials (new lot)</option>
                 </select>
-                <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} placeholder="Or type manually" style={{ ...IS, flex: 1 }} />
+                {prodLotNumber === "__FRESH__" && (
+                  <input value={freshLotNumber} onChange={e => setFreshLotNumber(e.target.value)}
+                    placeholder="Enter new lot number (e.g. CB-20260331-01)" style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
+                )}
+                <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 4 }}>
+                  🔒 Lot number inherited from {lotSourceItem.name}
+                </div>
               </div>
+            ) : (
+              <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)}
+                placeholder="Enter lot number (e.g. CB-20260315-01)"
+                style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
             )}
-            {!prodLotNumber.trim() && <div style={{ fontSize: 11, color: "#ef4444", marginTop: 4 }}>Required - enter or select a batch number</div>}
-            {suggestedLots.length > 0 && getLevel(prodAssemblyItem.id) > 200 && !prodLotNumber && (
-              <button onClick={() => setProdLotNumber(suggestedLots[0].lotNumber)} style={{ marginTop: 4, background: "none", border: "none", cursor: "pointer", color: "#6366f1", fontSize: 12, padding: 0 }}>
-                Auto-select oldest (FIFO): {suggestedLots[0].lotNumber}
-              </button>
+            {(lotSourceItem ? (prodLotNumber === "__FRESH__" ? !freshLotNumber.trim() : !prodLotNumber) : !prodLotNumber.trim()) && (
+              <div style={{ fontSize: 11, color: "#ef4444", marginTop: 4 }}>Required — enter or select a batch number</div>
             )}
           </div>
         )}
@@ -3289,7 +3308,7 @@ export default function App() {
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button onClick={() => setProdModal(false)} style={B2}>Cancel</button>
-          <button onClick={submitProduction} disabled={!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)} style={{ ...B1, background: "#8b5cf6", opacity: (!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}><Hammer size={14} /> Submit</button>
+          <button onClick={submitProduction} disabled={!prodAssemblyItem || prodQty <= 0 || !(prodLotNumber === "__FRESH__" ? freshLotNumber.trim() : prodLotNumber.trim()) || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)} style={{ ...B1, background: "#8b5cf6", opacity: (!prodAssemblyItem || prodQty <= 0 || !(prodLotNumber === "__FRESH__" ? freshLotNumber.trim() : prodLotNumber.trim()) || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}><Hammer size={14} /> Submit</button>
         </div>
       </Modal>
 
@@ -3482,7 +3501,7 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
-            <select value={prodAssembly} onChange={e => { const id = e.target.value; setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); }} style={IS}>
+            <select value={prodAssembly} onChange={e => { const id = e.target.value; setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber(""); }} style={IS}>
               <option value="">Select assembly...</option>
               {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
             </select>
@@ -3498,8 +3517,37 @@ export default function App() {
         </div>
         {prodAssemblyItem && (
           <div style={{ marginBottom: 16 }}>
-            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Lot / Batch Number <span style={{ color: "#ef4444" }}>*</span></label>
-            <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)} placeholder="Edit lot number" style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>
+              Lot / Batch Number <span style={{ color: "#ef4444" }}>*</span>
+              {lotSourceItem
+                ? ` (inherited from ${lotSourceItem.name})`
+                : (prodAssemblyItem.lotSource || getLevel(prodAssemblyItem.id) <= 200)
+                  ? " (new lot)"
+                  : " (manual — no lot source in BOM)"}
+            </label>
+            {lotSourceItem ? (
+              <div>
+                <select value={prodLotNumber} onChange={e => { setProdLotNumber(e.target.value); if (e.target.value !== "__FRESH__") setFreshLotNumber(""); }}
+                  style={{ ...IS, borderColor: !prodLotNumber ? "#ef4444" : "#f59e0b", background: "#1a1a2e" }}>
+                  <option value="">Select lot from {lotSourceItem.name}...</option>
+                  {suggestedLots.map(l => (
+                    <option key={l.lotNumber} value={l.lotNumber}>{l.lotNumber} ({l.qty} avail, {l.productionDate || "?"})</option>
+                  ))}
+                  <option value="__FRESH__">⊕ Make from fresh raw materials (new lot)</option>
+                </select>
+                {prodLotNumber === "__FRESH__" && (
+                  <input value={freshLotNumber} onChange={e => setFreshLotNumber(e.target.value)}
+                    placeholder="Enter new lot number (e.g. CB-20260331-01)" style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
+                )}
+                <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 4 }}>
+                  🔒 Lot number inherited from {lotSourceItem.name}
+                </div>
+              </div>
+            ) : (
+              <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)}
+                placeholder="Enter lot number (e.g. CB-20260315-01)"
+                style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
+            )}
           </div>
         )}
         {prodAssemblyItem && (
@@ -3544,8 +3592,8 @@ export default function App() {
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button onClick={() => { setCompleteDraftModal(false); setDraftToComplete(null); }} style={B2}>Cancel</button>
-          <button onClick={submitCompleteDraft} disabled={!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)}
-            style={{ ...B1, background: "#22c55e", opacity: (!prodAssemblyItem || prodQty <= 0 || !prodLotNumber.trim() || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}>
+          <button onClick={submitCompleteDraft} disabled={!prodAssemblyItem || prodQty <= 0 || !(prodLotNumber === "__FRESH__" ? freshLotNumber.trim() : prodLotNumber.trim()) || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)}
+            style={{ ...B1, background: "#22c55e", opacity: (!prodAssemblyItem || prodQty <= 0 || !(prodLotNumber === "__FRESH__" ? freshLotNumber.trim() : prodLotNumber.trim()) || (prodAssemblyItem && getValidationErrors(prodAssemblyItem.bom, prodQty).length > 0)) ? 0.4 : 1 }}>
             <Check size={14} /> Complete Run
           </button>
         </div>
@@ -4113,6 +4161,10 @@ export default function App() {
                   <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, color: form.lotTracking ? "#a78bfa" : "#888" }}>
                     <input type="checkbox" checked={form.lotTracking || false} onChange={(e) => setForm((f) => ({ ...f, lotTracking: e.target.checked }))} style={{ accentColor: "#a78bfa", width: 15, height: 15 }} />
                     Lot Tracking
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, color: form.lotSource ? "#f59e0b" : "#888" }}>
+                    <input type="checkbox" checked={form.lotSource || false} onChange={(e) => setForm((f) => ({ ...f, lotSource: e.target.checked }))} style={{ accentColor: "#f59e0b", width: 15, height: 15 }} />
+                    Lot Source
                   </label>
                 </div>
               )}

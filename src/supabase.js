@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v101
+// SUPABASE VERSION: v102
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -18,6 +18,7 @@ export async function fetchItems() {
     unit: row.unit, minStock: Number(row.min_stock), qty: Number(row.qty),
     notes: row.notes, status: row.status, lotTracking: !!row.lot_tracking,
     piecesPerUnit: Number(row.pieces_per_unit) || 0,
+    lotSource: !!row.lot_source,
   }))
 }
 
@@ -30,6 +31,7 @@ export async function upsertItem(item) {
     notes: item.notes, status: item.status || "Active",
     lot_tracking: item.lotTracking || false,
     pieces_per_unit: item.piecesPerUnit || 0,
+    lot_source: item.lotSource || false,
   })
   if (error) throw error
 }
@@ -164,6 +166,7 @@ export async function bulkInsertItems(items) {
     notes: item.notes, status: item.status || "Active",
     lot_tracking: item.lotTracking || false,
     pieces_per_unit: item.piecesPerUnit || 0,
+    lot_source: item.lotSource || false,
   }))
   const batchSize = 500
   for (let i = 0; i < rows.length; i += batchSize) {
