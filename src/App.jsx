@@ -3908,63 +3908,69 @@ export default function App() {
               {/* Pricing Matrix */}
               {cfgSection === "pricing" && (() => {
                 const pricingItems = [...parts, ...assemblies].filter(a => getLevel(a.id) >= 300).sort((a, b) => a.id.localeCompare(b.id));
-                const [selPriceType, setSelPriceType] = [
-                  cfgPriceMatrix._selType || ORDER_TYPES[0] || "",
-                  (v) => setCfgPriceMatrix(prev => ({ ...prev, _selType: v }))
-                ];
+                const totalPricesSet = Object.keys(cfgPriceMatrix).filter(k => k.includes("|")).length;
                 return (
                   <div>
                     <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Pricing Matrix</h3>
                     <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Set unit prices per order type and SKU.</p>
                     {ORDER_TYPES.length === 0 ? (
                       <p style={{ color: "#f59e0b", fontSize: 13 }}>Add order types first in the Order Types config.</p>
+                    ) : pricingItems.length === 0 ? (
+                      <p style={{ color: "#555", fontSize: 13 }}>No items at level 300+ found.</p>
                     ) : (
                       <>
-                        <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
-                          {ORDER_TYPES.map(t => (
-                            <button key={t} onClick={() => setSelPriceType(t)} style={{ ...((selPriceType === t) ? B1 : B2), padding: "5px 14px", fontSize: 12 }}>{t}</button>
-                          ))}
+                        <div style={{ maxHeight: 500, overflowY: "auto", border: "1px solid #2a2a3a", borderRadius: 8 }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr style={{ position: "sticky", top: 0, zIndex: 1, background: "#1e1e2e" }}>
+                                <th style={{ ...TH, textAlign: "left", minWidth: 100 }}>SKU</th>
+                                <th style={{ ...TH, textAlign: "left", minWidth: 120 }}>Item</th>
+                                {ORDER_TYPES.map(t => (
+                                  <th key={t} style={{ ...TH, textAlign: "right", minWidth: 100 }}>{t}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {pricingItems.map(item => (
+                                <tr key={item.id}>
+                                  <td style={{ ...TD, fontSize: 11, color: "#888", fontFamily: "monospace" }}>{item.id}</td>
+                                  <td style={{ ...TD, fontSize: 13, color: "#e0e0e0" }}>{item.name}</td>
+                                  {ORDER_TYPES.map(t => {
+                                    const key = `${t}|${item.id}`;
+                                    return (
+                                      <td key={t} style={{ ...TD, padding: "4px 6px" }}>
+                                        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
+                                          <span style={{ fontSize: 12, color: "#555" }}>$</span>
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            min="0"
+                                            value={cfgPriceMatrix[key] || ""}
+                                            placeholder="0.00"
+                                            onChange={(e) => {
+                                              const val = e.target.value === "" ? "" : Number(e.target.value);
+                                              setCfgPriceMatrix(prev => {
+                                                const next = { ...prev, [key]: val };
+                                                if (val === "" || val === 0) delete next[key];
+                                                return next;
+                                              });
+                                            }}
+                                            onBlur={async () => {
+                                              try { await saveConfig("price_matrix", cfgPriceMatrix); } catch (err) { console.warn(err); }
+                                            }}
+                                            style={{ ...IS, width: 80, textAlign: "right", fontSize: 13 }}
+                                          />
+                                        </div>
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
                         </div>
-                        {pricingItems.length === 0 ? (
-                          <p style={{ color: "#555", fontSize: 13 }}>No items at level 300+ found.</p>
-                        ) : (
-                          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 400, overflowY: "auto" }}>
-                            {pricingItems.map(item => {
-                              const key = `${selPriceType}|${item.id}`;
-                              const price = cfgPriceMatrix[key] || "";
-                              return (
-                                <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", background: "#16161e", borderRadius: 6, border: "1px solid #2a2a3a" }}>
-                                  <span style={{ fontSize: 11, color: "#888", fontFamily: "monospace", minWidth: 120 }}>{item.id}</span>
-                                  <span style={{ fontSize: 13, color: "#e0e0e0", flex: 1 }}>{item.name}</span>
-                                  <span style={{ fontSize: 13, color: "#888" }}>$</span>
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
-                                    value={price}
-                                    placeholder="0.00"
-                                    onChange={(e) => {
-                                      const val = e.target.value === "" ? "" : Number(e.target.value);
-                                      setCfgPriceMatrix(prev => {
-                                        const next = { ...prev, [key]: val };
-                                        if (val === "" || val === 0) delete next[key];
-                                        return next;
-                                      });
-                                    }}
-                                    onBlur={async () => {
-                                      const toSave = { ...cfgPriceMatrix };
-                                      delete toSave._selType;
-                                      try { await saveConfig("price_matrix", toSave); } catch (err) { console.warn(err); }
-                                    }}
-                                    style={{ ...IS, width: 100, textAlign: "right" }}
-                                  />
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
                         <div style={{ fontSize: 11, color: "#666", marginTop: 8 }}>
-                          {Object.keys(cfgPriceMatrix).filter(k => k.startsWith(selPriceType + "|")).length} prices set for {selPriceType}
+                          {pricingItems.length} SKUs × {ORDER_TYPES.length} types • {totalPricesSet} prices set
                         </div>
                       </>
                     )}
