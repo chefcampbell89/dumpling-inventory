@@ -1,4 +1,4 @@
-// APP VERSION: v116
+// APP VERSION: v118
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1547,7 +1547,7 @@ export default function App() {
           if (!row.skuId || row.qty <= 0) continue;
           const item = allItems.find(i => i.id === row.skuId);
           if (!item) continue;
-          const runId = `DRAFT-${day.date}-${String(counter).padStart(3, "0")}`;
+          const runId = `PROD-${day.date}-${String(counter).padStart(3, "0")}-${Date.now()}`;
           const run = {
             id: runId, assemblyId: row.skuId, assemblyName: item.name,
             qtyProduced: row.qty, date: day.date, lotNumber: "", plannedDate: day.date,
