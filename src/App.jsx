@@ -453,6 +453,37 @@ function SkuAutocomplete({ value, onChange, skuOpts }) {
   );
 }
 
+// Generic list editor for admin config (defined outside App to avoid re-creation on render)
+function ListEditor({ items, setItems, configKey, label }) {
+  const [newVal, setNewVal] = useState("");
+  const addItem = async () => {
+    if (!newVal.trim()) return;
+    const updated = [...items, newVal.trim()];
+    setItems(updated);
+    try { await saveConfig(configKey, updated); } catch (err) { console.warn(err); }
+    setNewVal("");
+  };
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <input value={newVal} onChange={e => setNewVal(e.target.value)} placeholder={`New ${label.toLowerCase()}...`} style={{ ...IS, flex: 1 }} onKeyDown={e => { if (e.key === "Enter") addItem(); }} />
+        <button onClick={addItem} style={B1}><Plus size={14} /> Add</button>
+      </div>
+      {items.length === 0 ? <p style={{ color: "#555", fontSize: 13 }}>None defined.</p> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {items.map((item, idx) => (
+            <div key={idx} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "#16161e", borderRadius: 6, border: "1px solid #2a2a3a" }}>
+              <span style={{ fontSize: 13, color: "#e0e0e0" }}>{item}</span>
+              <button onClick={async () => { const updated = items.filter((_, j) => j !== idx); setItems(updated); try { await saveConfig(configKey, updated); } catch (err) { console.warn(err); } }} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: "#666", marginTop: 8 }}>{items.length} items</div>
+    </div>
+  );
+}
+
 // ============================================================
 // MAIN APP
 // ============================================================
@@ -536,7 +567,6 @@ export default function App() {
   const [cfgReceiptTypes, setCfgReceiptTypes] = useState(DEFAULT_RECEIPT_TYPES);
   const [cfgCosting, setCfgCosting] = useState(DEFAULT_COSTING);
   const [cfgSection, setCfgSection] = useState("appName");
-  const [cfgNewItem, setCfgNewItem] = useState("");
   const [appName, setAppName] = useState("Dumpling Genie");
   const [wishModal, setWishModal] = useState(false);
   const [wishText, setWishText] = useState("");
@@ -3757,27 +3787,6 @@ export default function App() {
           { id: "planning", label: "Planning", icon: <TrendingUp size={14} /> },
           { id: "wishes", label: "Wishes", icon: <Sparkles size={14} /> },
         ];
-
-        // Generic list editor
-        const ListEditor = ({ items, setItems, configKey, label }) => (
-          <div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-              <input value={cfgNewItem} onChange={e => setCfgNewItem(e.target.value)} placeholder={`New ${label.toLowerCase()}...`} style={{ ...IS, flex: 1 }} onKeyDown={async e => { if (e.key === "Enter" && cfgNewItem.trim()) { const updated = [...items, cfgNewItem.trim()]; setItems(updated); try { await saveConfig(configKey, updated); } catch (err) { console.warn(err); } setCfgNewItem(""); } }} />
-              <button onClick={async () => { if (cfgNewItem.trim()) { const updated = [...items, cfgNewItem.trim()]; setItems(updated); try { await saveConfig(configKey, updated); } catch (err) { console.warn(err); } setCfgNewItem(""); } }} style={B1}><Plus size={14} /> Add</button>
-            </div>
-            {items.length === 0 ? <p style={{ color: "#555", fontSize: 13 }}>None defined.</p> : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {items.map((item, idx) => (
-                  <div key={idx} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "#16161e", borderRadius: 6, border: "1px solid #2a2a3a" }}>
-                    <span style={{ fontSize: 13, color: "#e0e0e0" }}>{item}</span>
-                    <button onClick={async () => { const updated = items.filter((_, j) => j !== idx); setItems(updated); try { await saveConfig(configKey, updated); } catch (err) { console.warn(err); } }} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div style={{ fontSize: 11, color: "#666", marginTop: 8 }}>{items.length} items</div>
-          </div>
-        );
 
         return (
           <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
