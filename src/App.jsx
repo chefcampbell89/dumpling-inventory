@@ -1,4 +1,4 @@
-// APP VERSION: v120
+// APP VERSION: v121
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -2443,6 +2443,58 @@ export default function App() {
           return batchItem && batchItem.piecesPerUnit > 0 ? Math.round(batches * batchItem.piecesPerUnit) : 0;
         };
 
+        // Calculate dumplings per unit for any item by walking BOM tree
+        const _dpCache = {};
+        const dumplingsPer = (itemId) => {
+          if (_dpCache[itemId] !== undefined) return _dpCache[itemId];
+          const item = gi(itemId);
+          if (!item) return (_dpCache[itemId] = 0);
+          if (item.piecesPerUnit > 0) return (_dpCache[itemId] = item.piecesPerUnit);
+          if (!item.bom || item.bom.length === 0) return (_dpCache[itemId] = 0);
+          let total = 0;
+          for (const b of item.bom) total += b.qty * dumplingsPer(b.partId);
+          return (_dpCache[itemId] = total);
+        };
+
+        // Flavor breakdown: on-order vs in-inventory dumplings
+        const flavorBreakdown = productLines.map(pl => {
+          // On order (pending + confirmed)
+          const onOrderItems = orders.filter(o => {
+            if (o.status !== "Pending" && o.status !== "Confirmed") return false;
+            const m = o.item.match(/^\d+-(\w+)/);
+            return m && m[1] === pl;
+          });
+          const onOrderPcs = onOrderItems.reduce((s, o) => s + o.qty * dumplingsPer(o.item), 0);
+
+          // In inventory: all items with this product line that have dumplings
+          const invPcs = allItems.filter(i => {
+            const m = i.id.match(/^\d+-(\w+)/);
+            return m && m[1] === pl && i.qty > 0 && dumplingsPer(i.id) > 0;
+          }).reduce((s, i) => s + i.qty * dumplingsPer(i.id), 0);
+
+          return { pl, onOrderPcs: Math.round(onOrderPcs), invPcs: Math.round(invPcs) };
+        }).filter(fb => fb.onOrderPcs > 0 || fb.invPcs > 0);
+
+        // Tomorrow's shipments
+        const tomorrowStr = addDays(todayStr, 1);
+        const tomorrowShipments = orders.filter(o => o.shipDate === tomorrowStr);
+        const todayShipPcs = todaysShipments.reduce((s, o) => s + o.qty * dumplingsPer(o.item), 0);
+        const tomorrowShipPcs = tomorrowShipments.reduce((s, o) => s + o.qty * dumplingsPer(o.item), 0);
+        const todayShipGroups = {};
+        for (const o of todaysShipments) {
+          const key = `${o.customer}|||${o.shipDate}`;
+          if (!todayShipGroups[key]) todayShipGroups[key] = { customer: o.customer, shipDate: o.shipDate, lines: [] };
+          todayShipGroups[key].lines.push(o);
+        }
+        const todayShipGroupArr = Object.values(todayShipGroups);
+        const tomorrowShipGroups = {};
+        for (const o of tomorrowShipments) {
+          const key = `${o.customer}|||${o.shipDate}`;
+          if (!tomorrowShipGroups[key]) tomorrowShipGroups[key] = { customer: o.customer, shipDate: o.shipDate, lines: [] };
+          tomorrowShipGroups[key].lines.push(o);
+        }
+        const tomorrowShipGroupArr = Object.values(tomorrowShipGroups);
+
         // Actual production logged today/week (completed runs)
         const todayCompletedRuns = prodRuns.filter(r => (r.status || "Complete") === "Complete" && r.date === todayStr);
         const actualByLine = {};
@@ -2507,9 +2559,37 @@ export default function App() {
             <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
               <Stat icon={<Hammer size={18} />} label={dashView === "daily" ? "Batches Planned" : "Week Batches"} value={totalBatches} accent="#8b5cf6" />
               <Stat icon={<span style={{ fontSize: 18 }}>&#129791;</span>} label="Expected Pieces" value={totalPieces > 0 ? totalPieces.toLocaleString() : "\u2014"} accent="#f59e0b" />
-              <Stat icon={<PackageCheck size={18} />} label={dashView === "daily" ? "Shipments Today" : "Shipments This Week"} value={shipGroupArr.length} accent="#22c55e" />
+              <Stat icon={<PackageCheck size={18} />} label={dashView === "daily" ? "Shipments Today" : "Shipments This Week"} value={dashView === "daily" ? todayShipGroupArr.length : shipGroupArr.length} accent="#22c55e" />
               {todaysBlockers.length > 0 && <Stat icon={<AlertTriangle size={18} />} label="Blockers" value={todaysBlockers.length} accent="#ef4444" />}
             </div>
+
+            {/* Dumplings by Flavor */}
+            {flavorBreakdown.length > 0 && (
+              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Dumplings by Flavor</div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={TH}>Flavor</th>
+                    <th style={{ ...TH, textAlign: "center" }}>On Order</th>
+                    <th style={{ ...TH, textAlign: "center" }}>In Inventory</th>
+                    <th style={{ ...TH, textAlign: "center" }}>Difference</th>
+                  </tr></thead>
+                  <tbody>
+                    {flavorBreakdown.map(fb => {
+                      const diff = fb.invPcs - fb.onOrderPcs;
+                      return (
+                        <tr key={fb.pl}>
+                          <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{fb.pl}</td>
+                          <td style={{ ...TD, textAlign: "center", color: "#f59e0b" }}>{fb.onOrderPcs.toLocaleString()}</td>
+                          <td style={{ ...TD, textAlign: "center", color: "#22c55e" }}>{fb.invPcs.toLocaleString()}</td>
+                          <td style={{ ...TD, textAlign: "center", fontWeight: 600, color: diff >= 0 ? "#22c55e" : "#ef4444" }}>{diff >= 0 ? "+" : ""}{diff.toLocaleString()}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
             {/* Production Plan Table */}
             <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
@@ -2546,39 +2626,113 @@ export default function App() {
 
             {/* Shipments */}
             <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
-              <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>
-                {dashView === "daily" ? "Today's Shipments" : "This Week's Shipments"}
-                {shipGroupArr.length > 0 && <span style={{ marginLeft: 8, fontSize: 11, color: "#888" }}>({shipGroupArr.length} order{shipGroupArr.length !== 1 ? "s" : ""})</span>}
-              </div>
-              {shipGroupArr.length === 0 ? (
-                <div style={{ padding: 24, textAlign: "center", color: "#555", fontSize: 13 }}>No shipments scheduled. Set ship dates in the Orders tab.</div>
-              ) : (
-                <div>
-                  {shipGroupArr.map((sg, i) => {
-                    const allDone = sg.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
-                    return (
-                      <div key={i} style={{ padding: "12px 16px", borderBottom: i < shipGroupArr.length - 1 ? "1px solid #1a1a2a" : "none", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                        <div>
-                          <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 14 }}>{sg.customer}</div>
-                          <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
-                            {sg.lines.map(o => { const it = gi(o.item); return `${o.qty}x ${it?.name || o.item}`; }).join(", ")}
-                          </div>
-                          {dashView === "weekly" && <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>Ship: {sg.shipDate}</div>}
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          {allDone ? (
-                            <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>Shipped</span>
-                          ) : (
-                            <button onClick={() => shipAllLines(sg.lines)} style={{ ...B1, padding: "6px 14px", background: "#22c55e", fontSize: 12 }}>
-                              <PackageCheck size={13} /> Ship All
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
+              {dashView === "daily" ? (<>
+                {/* Today */}
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "#ccc" }}>{"Today's Shipments"}</span>
+                  <span style={{ fontSize: 11, color: "#888" }}>
+                    {todayShipGroupArr.length} order{todayShipGroupArr.length !== 1 ? "s" : ""}
+                    {todayShipPcs > 0 && <span style={{ marginLeft: 6, color: "#f59e0b" }}>{Math.round(todayShipPcs).toLocaleString()} pcs</span>}
+                  </span>
                 </div>
-              )}
+                {todayShipGroupArr.length === 0 ? (
+                  <div style={{ padding: 16, textAlign: "center", color: "#555", fontSize: 13, borderBottom: "1px solid #2a2a3a" }}>No shipments today.</div>
+                ) : (
+                  <div style={{ borderBottom: "1px solid #2a2a3a" }}>
+                    {todayShipGroupArr.map((sg, i) => {
+                      const allDone = sg.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
+                      return (
+                        <div key={i} style={{ padding: "10px 16px", borderBottom: i < todayShipGroupArr.length - 1 ? "1px solid #1a1a2a" : "none", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                          <div>
+                            <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 14 }}>{sg.customer}</div>
+                            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
+                              {sg.lines.map(o => { const it = gi(o.item); return `${o.qty}x ${it?.name || o.item}`; }).join(", ")}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            {allDone ? (
+                              <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>Shipped</span>
+                            ) : (
+                              <button onClick={() => shipAllLines(sg.lines)} style={{ ...B1, padding: "6px 14px", background: "#22c55e", fontSize: 12 }}>
+                                <PackageCheck size={13} /> Ship All
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {/* Tomorrow */}
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1a1a28" }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "#ccc" }}>{"Tomorrow's Shipments"}</span>
+                  <span style={{ fontSize: 11, color: "#888" }}>
+                    {tomorrowShipGroupArr.length} order{tomorrowShipGroupArr.length !== 1 ? "s" : ""}
+                    {tomorrowShipPcs > 0 && <span style={{ marginLeft: 6, color: "#f59e0b" }}>{Math.round(tomorrowShipPcs).toLocaleString()} pcs</span>}
+                  </span>
+                </div>
+                {tomorrowShipGroupArr.length === 0 ? (
+                  <div style={{ padding: 16, textAlign: "center", color: "#555", fontSize: 13 }}>No shipments tomorrow.</div>
+                ) : (
+                  <div>
+                    {tomorrowShipGroupArr.map((sg, i) => {
+                      const allDone = sg.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
+                      return (
+                        <div key={i} style={{ padding: "10px 16px", borderBottom: i < tomorrowShipGroupArr.length - 1 ? "1px solid #1a1a2a" : "none", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                          <div>
+                            <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 14 }}>{sg.customer}</div>
+                            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
+                              {sg.lines.map(o => { const it = gi(o.item); return `${o.qty}x ${it?.name || o.item}`; }).join(", ")}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            {allDone ? (
+                              <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>Shipped</span>
+                            ) : (
+                              <span style={{ fontSize: 11, color: "#888" }}>Upcoming</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>) : (<>
+                {/* Weekly view */}
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>
+                  {"This Week's Shipments"}
+                  {shipGroupArr.length > 0 && <span style={{ marginLeft: 8, fontSize: 11, color: "#888" }}>({shipGroupArr.length} order{shipGroupArr.length !== 1 ? "s" : ""})</span>}
+                </div>
+                {shipGroupArr.length === 0 ? (
+                  <div style={{ padding: 24, textAlign: "center", color: "#555", fontSize: 13 }}>No shipments this week.</div>
+                ) : (
+                  <div>
+                    {shipGroupArr.map((sg, i) => {
+                      const allDone = sg.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
+                      return (
+                        <div key={i} style={{ padding: "10px 16px", borderBottom: i < shipGroupArr.length - 1 ? "1px solid #1a1a2a" : "none", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                          <div>
+                            <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 14 }}>{sg.customer}</div>
+                            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
+                              {sg.lines.map(o => { const it = gi(o.item); return `${o.qty}x ${it?.name || o.item}`; }).join(", ")}
+                            </div>
+                            <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>Ship: {sg.shipDate}</div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            {allDone ? (
+                              <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>Shipped</span>
+                            ) : (
+                              <button onClick={() => shipAllLines(sg.lines)} style={{ ...B1, padding: "6px 14px", background: "#22c55e", fontSize: 12 }}>
+                                <PackageCheck size={13} /> Ship All
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>)}
             </div>
 
             {/* Runway (weekly only) */}
