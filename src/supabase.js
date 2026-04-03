@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v102
+// SUPABASE VERSION: v103
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -286,6 +286,21 @@ export async function fetchDraftRunsForWeek(weekStart) {
     createdBy: r.created_by, createdAt: r.created_at, lotNumber: r.lot_number || "",
     status: r.status, plannedDate: r.planned_date, sourcePlanWeek: r.source_plan_week,
     consumed: [],
+  }))
+}
+
+export async function fetchCompletedRunsForWeek(weekStart) {
+  const weekEnd = new Date(new Date(weekStart + "T00:00:00").getTime() + 6 * 86400000).toISOString().slice(0, 10)
+  const { data, error } = await supabase.from("production_runs")
+    .select("id, assembly_name, qty_produced, run_date, status")
+    .eq("status", "Complete")
+    .gte("run_date", weekStart)
+    .lte("run_date", weekEnd)
+    .order("run_date")
+  if (error) throw error
+  return data.map(r => ({
+    id: r.id, assemblyName: r.assembly_name,
+    qtyProduced: Number(r.qty_produced), date: r.run_date, status: r.status,
   }))
 }
 

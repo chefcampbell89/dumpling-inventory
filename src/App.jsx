@@ -1,4 +1,4 @@
-// APP VERSION: v118
+// APP VERSION: v119
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -7,7 +7,7 @@ import {
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
-  fetchProductionRuns, createProductionRun, updateProductionRun, deleteProductionRuns, fetchDraftRunsForWeek, completeProductionRun,
+  fetchProductionRuns, createProductionRun, updateProductionRun, deleteProductionRuns, fetchDraftRunsForWeek, fetchCompletedRunsForWeek, completeProductionRun,
   fetchInventoryLots, adjustLotQty,
   zeroAllInventory, bulkUpdateItemQtys,
   fetchWishes, createWish, countUserWishes,
@@ -549,6 +549,7 @@ export default function App() {
   });
   const [planDayRows, setPlanDayRows] = useState({});
   const [weekDrafts, setWeekDrafts] = useState([]);
+  const [weekCompleted, setWeekCompleted] = useState([]);
   const [planConfirmModal, setPlanConfirmModal] = useState(false);
   const [planSubmitting, setPlanSubmitting] = useState(false);
   const [planLoading, setPlanLoading] = useState(false);
@@ -1107,12 +1108,16 @@ export default function App() {
       .sort((a, b) => b.shortfall - a.shortfall);
   }, [todaysDraftRuns, allItems]);
 
-  // Load drafts for the currently viewed planning week
+  // Load drafts and completed runs for the currently viewed planning week
   useEffect(() => {
     if (!planWeekStart) return;
     setPlanLoading(true);
-    fetchDraftRunsForWeek(planWeekStart).then(drafts => {
+    Promise.all([
+      fetchDraftRunsForWeek(planWeekStart),
+      fetchCompletedRunsForWeek(planWeekStart),
+    ]).then(([drafts, completed]) => {
       setWeekDrafts(drafts);
+      setWeekCompleted(completed);
       const rows = {};
       for (const d of drafts) {
         const date = d.plannedDate;
@@ -1547,7 +1552,7 @@ export default function App() {
           if (!row.skuId || row.qty <= 0) continue;
           const item = allItems.find(i => i.id === row.skuId);
           if (!item) continue;
-          const runId = `PROD-${day.date}-${String(counter).padStart(3, "0")}-${Date.now()}`;
+          const runId = `PROD-${day.date}-${String(counter).padStart(3, "0")}-${Math.random().toString(36).slice(2, 8)}`;
           const run = {
             id: runId, assemblyId: row.skuId, assemblyName: item.name,
             qtyProduced: row.qty, date: day.date, lotNumber: "", plannedDate: day.date,
@@ -3466,6 +3471,17 @@ export default function App() {
       {/* Plan Confirm Modal */}
       <Modal open={planConfirmModal} onClose={() => setPlanConfirmModal(false)} title="Submit Weekly Plan">
         <div style={{ marginBottom: 16 }}>
+          {weekCompleted.length > 0 && (
+            <div style={{ background: "#2a1a1a", border: "1px solid #ef444433", borderRadius: 8, padding: "12px 16px", marginBottom: 12 }}>
+              <div style={{ fontSize: 13, color: "#ef4444", fontWeight: 600, marginBottom: 4 }}>
+                <AlertTriangle size={14} style={{ verticalAlign: "middle", marginRight: 6 }} />
+                This week already has {weekCompleted.length} completed production run{weekCompleted.length !== 1 ? "s" : ""}.
+              </div>
+              <div style={{ fontSize: 12, color: "#ccc" }}>
+                Completed runs will <strong>not be affected</strong>. This plan will create additional draft runs alongside the existing completed production.
+              </div>
+            </div>
+          )}
           {weekDrafts.length > 0 ? (
             <div style={{ background: "#2a2a1a", border: "1px solid #f59e0b33", borderRadius: 8, padding: "12px 16px", marginBottom: 12 }}>
               <div style={{ fontSize: 13, color: "#f59e0b", fontWeight: 600, marginBottom: 4 }}>
