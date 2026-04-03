@@ -1,4 +1,4 @@
-// APP VERSION: v119
+// APP VERSION: v120
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -39,6 +39,7 @@ const LEVEL_KEYS = [100, 200, 250, 300, 400, 500];
 const DEFAULT_COSTING = ["FIFO", "FEFO - Batch"];
 const DEFAULT_PO_STATUSES = ["Draft", "Sent", "Confirmed", "Received", "Cancelled"];
 const DEFAULT_ORD_STATUSES = ["Pending", "Confirmed", "In Production", "Fulfilled", "Cancelled"];
+const DEFAULT_ORDER_TYPES = ["Wholesale", "Retail", "Food Service"];
 const DEFAULT_RECEIPT_TYPES = ["PO Receipt", "Vendor delivery (no PO)", "Inventory adjustment", "Return from production", "Found/count correction"];
 const DEFAULT_LOCATIONS = ["Dumpling Factory", "Dumpling Factory: Walk-in Freezer", "Dumpling Factory: Dry Storage"];
 
@@ -250,14 +251,14 @@ const SEED_VENDORS = [
 ];
 
 const SEED_ORDERS = [
-  { id: "ORD-001", customer: "Green Grocer Market", item: "400-CB Pack", qty: 48, date: "2026-03-10", status: "Pending", notes: "Weekly standing order", shipDate: null },
-  { id: "ORD-002", customer: "Dumpling Festival", item: "400-CB Food Service Case", qty: 10, date: "2026-03-15", status: "Confirmed", notes: "Event — deliver by 8am", shipDate: null },
-  { id: "ORD-003", customer: "Happy Belly Restaurant", item: "400-LG Food Service Case", qty: 4, date: "2026-03-12", status: "Fulfilled", notes: "", shipDate: null },
-  { id: "ORD-004", customer: "Whole Foods Northeast", item: "500-CB Retail Case", qty: 20, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
-  { id: "ORD-005", customer: "Whole Foods Northeast", item: "500-CH Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
-  { id: "ORD-006", customer: "Whole Foods Northeast", item: "500-GC Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
-  { id: "ORD-007", customer: "Whole Foods Northeast", item: "500-LG Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
-  { id: "ORD-008", customer: "Whole Foods Northeast", item: "500-TM Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null },
+  { id: "ORD-001", customer: "Green Grocer Market", item: "400-CB Pack", qty: 48, date: "2026-03-10", status: "Pending", notes: "Weekly standing order", shipDate: null, orderType: "Wholesale" },
+  { id: "ORD-002", customer: "Dumpling Festival", item: "400-CB Food Service Case", qty: 10, date: "2026-03-15", status: "Confirmed", notes: "Event — deliver by 8am", shipDate: null, orderType: "Food Service" },
+  { id: "ORD-003", customer: "Happy Belly Restaurant", item: "400-LG Food Service Case", qty: 4, date: "2026-03-12", status: "Fulfilled", notes: "", shipDate: null, orderType: "Food Service" },
+  { id: "ORD-004", customer: "Whole Foods Northeast", item: "500-CB Retail Case", qty: 20, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null, orderType: "Retail" },
+  { id: "ORD-005", customer: "Whole Foods Northeast", item: "500-CH Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null, orderType: "Retail" },
+  { id: "ORD-006", customer: "Whole Foods Northeast", item: "500-GC Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null, orderType: "Retail" },
+  { id: "ORD-007", customer: "Whole Foods Northeast", item: "500-LG Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null, orderType: "Retail" },
+  { id: "ORD-008", customer: "Whole Foods Northeast", item: "500-TM Retail Case", qty: 15, date: "2026-03-18", status: "Pending", notes: "New account trial", shipDate: null, orderType: "Retail" },
 ];
 
 // ============================================================
@@ -529,6 +530,8 @@ export default function App() {
   const [locations, setLocations] = useState(DEFAULT_LOCATIONS);
   const [cfgLevels, setCfgLevels] = useState(DEFAULT_LEVELS);
   const [cfgOrdStatuses, setCfgOrdStatuses] = useState(DEFAULT_ORD_STATUSES);
+  const [cfgOrderTypes, setCfgOrderTypes] = useState(DEFAULT_ORDER_TYPES);
+  const [cfgPriceMatrix, setCfgPriceMatrix] = useState({});
   const [cfgPoStatuses, setCfgPoStatuses] = useState(DEFAULT_PO_STATUSES);
   const [cfgReceiptTypes, setCfgReceiptTypes] = useState(DEFAULT_RECEIPT_TYPES);
   const [cfgCosting, setCfgCosting] = useState(DEFAULT_COSTING);
@@ -570,6 +573,11 @@ export default function App() {
   // Config aliases (so existing JSX references keep working)
   const LEVELS = cfgLevels;
   const ORD_STATUSES = cfgOrdStatuses;
+  const ORDER_TYPES = cfgOrderTypes;
+  const getUnitPrice = useCallback((orderType, sku) => {
+    if (!orderType || !sku) return 0;
+    return cfgPriceMatrix[`${orderType}|${sku}`] || 0;
+  }, [cfgPriceMatrix]);
   const PO_STATUSES = cfgPoStatuses;
   const RECEIPT_TYPES = cfgReceiptTypes;
   const COSTING = cfgCosting;
@@ -630,6 +638,8 @@ export default function App() {
       // Load admin configs
       getLocations().then(r => { if (r && r.length > 0) setLocations(r); }).catch(() => {});
       getConfig("ord_statuses").then(r => { if (r) setCfgOrdStatuses(r); }).catch(() => {});
+      getConfig("order_types").then(r => { if (r) setCfgOrderTypes(r); }).catch(() => {});
+      getConfig("price_matrix").then(r => { if (r) setCfgPriceMatrix(r); }).catch(() => {});
       getConfig("po_statuses").then(r => { if (r) setCfgPoStatuses(r); }).catch(() => {});
       getConfig("receipt_types").then(r => { if (r) setCfgReceiptTypes(r); }).catch(() => {});
       getConfig("costing_methods").then(r => { if (r) setCfgCosting(r); }).catch(() => {});
@@ -844,9 +854,10 @@ export default function App() {
     for (const o of src) {
       // Group by customer + date
       const key = `${o.customer}|||${o.date}`;
-      if (!groups[key]) groups[key] = { customer: o.customer, date: o.date, lines: [], ids: [] };
+      if (!groups[key]) groups[key] = { customer: o.customer, date: o.date, lines: [], ids: [], orderType: o.orderType || null };
       groups[key].lines.push(o);
       groups[key].ids.push(o.id);
+      if (o.orderType && !groups[key].orderType) groups[key].orderType = o.orderType;
     }
     return Object.values(groups).sort((a, b) => b.date.localeCompare(a.date));
   }, [viewOrders]);
@@ -861,12 +872,14 @@ export default function App() {
       groups[key].push(o);
     }
     const gArr = Object.values(groups);
+    const totalRevenue = orders.reduce((s, o) => s + (o.qty * getUnitPrice(o.orderType, o.item)), 0);
     return {
       total: gArr.length,
       pending: gArr.filter(g => g.some(o => o.status === "Pending" || o.status === "Confirmed")).length,
       fulfilled: gArr.filter(g => g.every(o => o.status === "Fulfilled" || o.status === "Cancelled")).length,
+      totalRevenue,
     };
-  }, [orders]);
+  }, [orders, getUnitPrice]);
 
   // Unified transaction log from existing data
   const transactionLog = useMemo(() => {
@@ -1162,7 +1175,7 @@ export default function App() {
 
   const addLinesToOrder = (group) => {
     setEditItem(null);
-    setForm({ customer: group.customer, date: group.date, status: group.lines[0]?.status || "Pending", notes: "" });
+    setForm({ customer: group.customer, date: group.date, status: group.lines[0]?.status || "Pending", notes: "", orderType: group.orderType || group.lines[0]?.orderType || "" });
     setOrderLines([{ item: "", qty: 0, notes: "" }]);
     setModal("order");
   };
@@ -1177,6 +1190,18 @@ export default function App() {
       try { await upsertOrder(o); } catch (err) { console.warn(err); }
     }
     show(`Set ${updated.length} line(s) to ${newStatus}`);
+  };
+
+  const setGroupOrderType = async (group, newType) => {
+    const updated = group.lines.map(o => ({ ...o, orderType: newType }));
+    setOrders(prev => prev.map(o => {
+      const match = updated.find(u => u.id === o.id);
+      return match || o;
+    }));
+    for (const o of updated) {
+      try { await upsertOrder(o); } catch (err) { console.warn(err); }
+    }
+    show(`Order type set to ${newType}`);
   };
 
   const changeItemLevel = (newLvl) => {
@@ -1246,6 +1271,7 @@ export default function App() {
           qty: Number(l.qty),
           notes: l.notes || "",
           shipDate: null,
+          orderType: form.orderType || null,
         }));
         for (const o of newOrders) {
           try { await upsertOrder(o); } catch (e) { console.warn("DB save failed:", e.message); }
@@ -2726,6 +2752,7 @@ export default function App() {
             <Stat icon={<ShoppingCart size={18} />} label="Total Orders" value={orderStats.total} accent="#6366f1" />
             <Stat icon={<ClipboardList size={18} />} label="Pending" value={orderStats.pending} accent="#f59e0b" />
             <Stat icon={<PackageCheck size={18} />} label="Fulfilled" value={orderStats.fulfilled} accent="#22c55e" />
+            {orderStats.totalRevenue > 0 && <Stat icon={<DollarSign size={18} />} label="Total Revenue" value={`$${orderStats.totalRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} accent="#22c55e" />}
           </div>
 
           {groupedOrders.length === 0 ? (
@@ -2743,6 +2770,8 @@ export default function App() {
                 const unshippedCount = group.lines.filter(o => o.status !== "Fulfilled" && o.status !== "Cancelled").length;
                 const statuses = [...new Set(group.lines.map(o => o.status))];
                 const notes = group.lines.find(o => o.notes)?.notes || "";
+                const groupOrderType = group.orderType || "";
+                const orderTotal = group.lines.reduce((s, o) => s + (o.qty * getUnitPrice(groupOrderType, o.item)), 0);
 
                 return (
                   <div key={gKey} style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
@@ -2771,6 +2800,7 @@ export default function App() {
                           />
                           <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
                             {group.date} • {group.lines.length} line{group.lines.length > 1 ? "s" : ""} • {totalItems} total units
+                            {orderTotal > 0 && <span style={{ marginLeft: 8, color: "#22c55e", fontWeight: 600 }}>${orderTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>}
                             {notes && <span style={{ marginLeft: 8, color: "#666" }}>— {notes.slice(0, 60)}{notes.length > 60 ? "..." : ""}</span>}
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
@@ -2789,6 +2819,10 @@ export default function App() {
                         </div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <select value={groupOrderType} onClick={e => e.stopPropagation()} onChange={(e) => { e.stopPropagation(); setGroupOrderType(group, e.target.value); }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 12, background: groupOrderType ? "#6366f111" : "#1a1a2a", color: groupOrderType ? "#a78bfa" : "#888", borderColor: groupOrderType ? "#6366f144" : "#333" }}>
+                          <option value="">Type...</option>
+                          {ORDER_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
                         <select value={statuses.length === 1 ? statuses[0] : ""} onClick={e => e.stopPropagation()} onChange={(e) => { e.stopPropagation(); setGroupStatus(group, e.target.value); }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 12, background: statuses.length === 1 ? sC(statuses[0]) + "11" : "#1a1a2a", color: statuses.length === 1 ? sC(statuses[0]) : "#888", borderColor: statuses.length === 1 ? sC(statuses[0]) + "44" : "#333" }}>
                           {statuses.length > 1 && <option value="">Mixed...</option>}
                           {ORD_STATUSES.map(s => <option key={s}>{s}</option>)}
@@ -2811,7 +2845,7 @@ export default function App() {
                       <div style={{ borderTop: "1px solid #2a2a3a" }}>
                         <table style={{ width: "100%", borderCollapse: "collapse" }}>
                           <thead><tr>
-                            {["Order ID", "Item", "Qty", "Status", "Notes", ""].map(h => <th key={h} style={TH}>{h}</th>)}
+                            {["Order ID", "Item", "Qty", "Unit Price", "Line Total", "Status", "Notes", ""].map(h => <th key={h} style={TH}>{h}</th>)}
                           </tr></thead>
                           <tbody>
                             {group.lines.map(o => {
@@ -2826,6 +2860,8 @@ export default function App() {
                                     <div style={{ fontSize: 11, color: "#666" }}>{o.item}{it ? ` • ${it.qty} in stock` : ""}</div>
                                   </td>
                                   <td style={{ ...TD, fontWeight: 600, fontSize: 15 }}>{o.qty}</td>
+                                  <td style={{ ...TD, fontSize: 13, color: "#888" }}>{(() => { const up = getUnitPrice(groupOrderType, o.item); return up > 0 ? `$${up.toFixed(2)}` : "—"; })()}</td>
+                                  <td style={{ ...TD, fontSize: 13, fontWeight: 600, color: "#22c55e" }}>{(() => { const up = getUnitPrice(groupOrderType, o.item); const lt = o.qty * up; return lt > 0 ? `$${lt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"; })()}</td>
                                   <td style={TD}>
                                     <select value={o.status} onClick={e => e.stopPropagation()} onChange={async (e) => {
                                       const ns = e.target.value;
@@ -3712,6 +3748,8 @@ export default function App() {
           { id: "users", label: "Users", icon: <Users size={14} /> },
           { id: "locations", label: "Locations", icon: <Package size={14} /> },
           { id: "levels", label: "SKU Levels", icon: <Layers size={14} /> },
+          { id: "orderTypes", label: "Order Types", icon: <ShoppingCart size={14} /> },
+          { id: "pricing", label: "Pricing Matrix", icon: <DollarSign size={14} /> },
           { id: "ordStatuses", label: "Order Statuses", icon: <ShoppingCart size={14} /> },
           { id: "poStatuses", label: "PO Statuses", icon: <FileText size={14} /> },
           { id: "receiptTypes", label: "Receipt Types", icon: <PackageCheck size={14} /> },
@@ -3857,6 +3895,82 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {/* Order Types */}
+              {cfgSection === "orderTypes" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Order Types</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Types of orders (e.g. Wholesale, Retail). Used to determine pricing.</p>
+                  <ListEditor items={cfgOrderTypes} setItems={setCfgOrderTypes} configKey="order_types" label="Order Type" />
+                </div>
+              )}
+
+              {/* Pricing Matrix */}
+              {cfgSection === "pricing" && (() => {
+                const pricingItems = [...parts, ...assemblies].filter(a => getLevel(a.id) >= 300).sort((a, b) => a.id.localeCompare(b.id));
+                const [selPriceType, setSelPriceType] = [
+                  cfgPriceMatrix._selType || ORDER_TYPES[0] || "",
+                  (v) => setCfgPriceMatrix(prev => ({ ...prev, _selType: v }))
+                ];
+                return (
+                  <div>
+                    <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Pricing Matrix</h3>
+                    <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Set unit prices per order type and SKU.</p>
+                    {ORDER_TYPES.length === 0 ? (
+                      <p style={{ color: "#f59e0b", fontSize: 13 }}>Add order types first in the Order Types config.</p>
+                    ) : (
+                      <>
+                        <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+                          {ORDER_TYPES.map(t => (
+                            <button key={t} onClick={() => setSelPriceType(t)} style={{ ...((selPriceType === t) ? B1 : B2), padding: "5px 14px", fontSize: 12 }}>{t}</button>
+                          ))}
+                        </div>
+                        {pricingItems.length === 0 ? (
+                          <p style={{ color: "#555", fontSize: 13 }}>No items at level 300+ found.</p>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 400, overflowY: "auto" }}>
+                            {pricingItems.map(item => {
+                              const key = `${selPriceType}|${item.id}`;
+                              const price = cfgPriceMatrix[key] || "";
+                              return (
+                                <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", background: "#16161e", borderRadius: 6, border: "1px solid #2a2a3a" }}>
+                                  <span style={{ fontSize: 11, color: "#888", fontFamily: "monospace", minWidth: 120 }}>{item.id}</span>
+                                  <span style={{ fontSize: 13, color: "#e0e0e0", flex: 1 }}>{item.name}</span>
+                                  <span style={{ fontSize: 13, color: "#888" }}>$</span>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    value={price}
+                                    placeholder="0.00"
+                                    onChange={(e) => {
+                                      const val = e.target.value === "" ? "" : Number(e.target.value);
+                                      setCfgPriceMatrix(prev => {
+                                        const next = { ...prev, [key]: val };
+                                        if (val === "" || val === 0) delete next[key];
+                                        return next;
+                                      });
+                                    }}
+                                    onBlur={async () => {
+                                      const toSave = { ...cfgPriceMatrix };
+                                      delete toSave._selType;
+                                      try { await saveConfig("price_matrix", toSave); } catch (err) { console.warn(err); }
+                                    }}
+                                    style={{ ...IS, width: 100, textAlign: "right" }}
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                        <div style={{ fontSize: 11, color: "#666", marginTop: 8 }}>
+                          {Object.keys(cfgPriceMatrix).filter(k => k.startsWith(selPriceType + "|")).length} prices set for {selPriceType}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Order Statuses */}
               {cfgSection === "ordStatuses" && (
@@ -4225,15 +4339,24 @@ export default function App() {
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Qty</label><input type="number" value={form.qty || 0} onChange={(e) => setForm((f) => ({ ...f, qty: Number(e.target.value) }))} style={IS} /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Date</label><input type="date" value={form.date || ""} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} style={IS} /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status</label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.map((s) => <option key={s}>{s}</option>)}</select></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Order Type</label><select value={form.orderType || ""} onChange={(e) => setForm((f) => ({ ...f, orderType: e.target.value }))} style={IS}><option value="">Select...</option>{ORDER_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Unit Price</label><input value={form.orderType && form.item ? `$${getUnitPrice(form.orderType, form.item).toFixed(2)}` : "—"} readOnly style={{ ...IS, opacity: 0.6 }} /></div>
               <div style={{ gridColumn: "1/3" }}><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
             </div>
+            {form.orderType && form.item && getUnitPrice(form.orderType, form.item) > 0 && (
+              <div style={{ marginTop: 12, padding: "10px 14px", background: "#22c55e11", borderRadius: 8, border: "1px solid #22c55e33", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 13, color: "#888" }}>Line Total</span>
+                <span style={{ fontSize: 18, fontWeight: 700, color: "#22c55e" }}>${(Number(form.qty || 0) * getUnitPrice(form.orderType, form.item)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              </div>
+            )}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>Update</button></div>
           </>
         ) : (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Customer</label><input value={form.customer || ""} onChange={(e) => setForm((f) => ({ ...f, customer: e.target.value }))} style={IS} placeholder="Customer name" /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Date</label><input type="date" value={form.date || ""} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} style={IS} /></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Order Type</label><select value={form.orderType || ""} onChange={(e) => setForm((f) => ({ ...f, orderType: e.target.value }))} style={IS}><option value="">Select...</option>{ORDER_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status</label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.map((s) => <option key={s}>{s}</option>)}</select></div>
             </div>
             <div style={{ borderTop: "1px solid #2a2a3a", paddingTop: 14 }}>
@@ -4243,22 +4366,39 @@ export default function App() {
               </div>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead><tr>
-                  <th style={{ ...TH, width: "45%" }}>Item</th>
-                  <th style={{ ...TH, width: "15%" }}>Qty</th>
-                  <th style={{ ...TH, width: "30%" }}>Notes</th>
+                  <th style={{ ...TH, width: "35%" }}>Item</th>
+                  <th style={{ ...TH, width: "10%" }}>Qty</th>
+                  <th style={{ ...TH, width: "10%" }}>Price</th>
+                  <th style={{ ...TH, width: "10%" }}>Total</th>
+                  <th style={{ ...TH, width: "25%" }}>Notes</th>
                   <th style={{ ...TH, width: "10%" }}></th>
                 </tr></thead>
                 <tbody>
-                  {orderLines.map((line, idx) => (
-                    <tr key={idx}>
-                      <td style={TD}><select value={line.item} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, item: e.target.value } : l))} style={{ ...IS, fontSize: 13 }}><option value="">Select item...</option>{assemblies.filter((a) => getLevel(a.id) >= 300).map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}</select></td>
-                      <td style={TD}><input type="number" value={line.qty || ""} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, qty: Number(e.target.value) } : l))} style={{ ...IS, fontSize: 13 }} min="0" /></td>
-                      <td style={TD}><input value={line.notes || ""} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, notes: e.target.value } : l))} style={{ ...IS, fontSize: 13 }} placeholder="Optional" /></td>
-                      <td style={TD}>{orderLines.length > 1 && <button onClick={() => setOrderLines(prev => prev.filter((_, i) => i !== idx))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>}</td>
-                    </tr>
-                  ))}
+                  {orderLines.map((line, idx) => {
+                    const linePrice = getUnitPrice(form.orderType, line.item);
+                    const lineTotal = (Number(line.qty) || 0) * linePrice;
+                    return (
+                      <tr key={idx}>
+                        <td style={TD}><select value={line.item} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, item: e.target.value } : l))} style={{ ...IS, fontSize: 13 }}><option value="">Select item...</option>{assemblies.filter((a) => getLevel(a.id) >= 300).map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}</select></td>
+                        <td style={TD}><input type="number" value={line.qty || ""} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, qty: Number(e.target.value) } : l))} style={{ ...IS, fontSize: 13 }} min="0" /></td>
+                        <td style={{ ...TD, fontSize: 12, color: "#888" }}>{linePrice > 0 ? `$${linePrice.toFixed(2)}` : "—"}</td>
+                        <td style={{ ...TD, fontSize: 12, fontWeight: 600, color: lineTotal > 0 ? "#22c55e" : "#555" }}>{lineTotal > 0 ? `$${lineTotal.toFixed(2)}` : "—"}</td>
+                        <td style={TD}><input value={line.notes || ""} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, notes: e.target.value } : l))} style={{ ...IS, fontSize: 13 }} placeholder="Optional" /></td>
+                        <td style={TD}>{orderLines.length > 1 && <button onClick={() => setOrderLines(prev => prev.filter((_, i) => i !== idx))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
+              {form.orderType && (() => {
+                const grandTotal = orderLines.reduce((s, l) => s + ((Number(l.qty) || 0) * getUnitPrice(form.orderType, l.item)), 0);
+                return grandTotal > 0 ? (
+                  <div style={{ marginTop: 10, padding: "10px 14px", background: "#22c55e11", borderRadius: 8, border: "1px solid #22c55e33", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 13, color: "#888" }}>Order Total</span>
+                    <span style={{ fontSize: 18, fontWeight: 700, color: "#22c55e" }}>${grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                ) : null;
+              })()}
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}><button onClick={() => setModal(null)} style={B2}>Cancel</button><button onClick={save} style={B1}>{orderLines.filter(l => l.item && l.qty > 0).length > 1 ? `Add ${orderLines.filter(l => l.item && l.qty > 0).length} Lines` : "Add Order"}</button></div>
           </>
