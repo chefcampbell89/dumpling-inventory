@@ -1,4 +1,4 @@
-// APP VERSION: v123
+// APP VERSION: v124
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -596,6 +596,13 @@ export default function App() {
   const [draftToComplete, setDraftToComplete] = useState(null);
   const [editDraftModal, setEditDraftModal] = useState(false);
   const [editDraftForm, setEditDraftForm] = useState({});
+  // When editing a draft we re-use the prod* states so the same consumption tree
+  // and lot picker UI from the Complete modal can be shown. editingDraftId tracks
+  // which draft is being edited; null = not editing.
+  const [editingDraftId, setEditingDraftId] = useState(null);
+  // Snapshot of the lot # the draft had when Edit was opened — used to detect
+  // when a source lot changed so we can cascade-clear dependent drafts.
+  const [editOriginalLot, setEditOriginalLot] = useState("");
 
   // ---- Dashboard State ----
   const [dashView, setDashView] = useState("daily");
@@ -1473,12 +1480,33 @@ export default function App() {
     return findLotSourceInBom(prodAssemblyItem.id, allItems);
   }, [prodAssemblyItem, allItems]);
 
-  // Get available lots from the lot source item only
+  // Get available lots from the lot source item only.
+  // Includes both real inventory lots AND planned (Draft) production runs that
+  // will produce that lot source item, so users can pre-select an inheritance
+  // chain at planning time.
   const suggestedLots = useMemo(() => {
     if (!lotSourceItem) return [];
-    const itemLots = (lotsByItem[lotSourceItem.id] || []).filter(l => l.qty > 0);
-    return itemLots.sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
-  }, [lotSourceItem, lotsByItem]);
+    const real = (lotsByItem[lotSourceItem.id] || [])
+      .filter(l => l.qty > 0)
+      .map(l => ({
+        lotNumber: l.lotNumber,
+        qty: l.qty,
+        productionDate: l.productionDate,
+        planned: false,
+      }));
+    // Avoid duplicating a planned lot if a real lot with the same number already exists
+    const existingNums = new Set(real.map(r => r.lotNumber));
+    const planned = (prodRuns || [])
+      .filter(r => r.status === "Draft" && r.assemblyId === lotSourceItem.id && r.lotNumber && !existingNums.has(r.lotNumber))
+      .map(r => ({
+        lotNumber: r.lotNumber,
+        qty: r.qtyProduced,
+        productionDate: r.plannedDate || r.date,
+        planned: true,
+        sourceRunId: r.id,
+      }));
+    return [...real, ...planned].sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+  }, [lotSourceItem, lotsByItem, prodRuns]);
 
   // prodConsume is { [partId]: true/false } — true means "consume this item from inventory"
   const initConsume = useCallback((assemblyId) => {
@@ -1788,25 +1816,102 @@ export default function App() {
     setCompleteDraftModal(false); setDraftToComplete(null);
   };
 
+  // ---- Open Edit Draft Modal ----
+  // Populates the same prod* state used by the Complete modal so the Edit modal
+  // can reuse the consumption tree + lot source picker. Decides up-front whether
+  // the saved lot # corresponds to an inheritable source (real or planned) or
+  // to a custom value the user typed.
+  const openEditDraft = (r) => {
+    setEditingDraftId(r.id);
+    setEditOriginalLot(r.lotNumber || "");
+    setEditDraftForm({ id: r.id, assemblyId: r.assemblyId, assemblyName: r.assemblyName, qty: r.qtyProduced, plannedDate: r.plannedDate || r.date, lotNumber: r.lotNumber || "", notes: r.notes || "" });
+    setProdAssembly(r.assemblyId);
+    setProdQty(r.qtyProduced);
+    setProdDate(r.plannedDate || r.date);
+    setProdNotes(r.notes || "");
+    setProdConsume(initConsume(r.assemblyId));
+
+    // Decide initial state of the lot picker
+    const lvl = getLevel(r.assemblyId);
+    if (lvl <= 200) {
+      // 200-level: direct text entry into prodLotNumber
+      setProdLotNumber(r.lotNumber || "");
+      setFreshLotNumber("");
+    } else if (!r.lotNumber) {
+      setProdLotNumber("");
+      setFreshLotNumber("");
+    } else {
+      const lotSource = findLotSourceInBom(r.assemblyId, allItems);
+      let inheritable = false;
+      if (lotSource) {
+        const realLot = lots.find(l => l.itemId === lotSource.id && l.lotNumber === r.lotNumber && l.qty > 0);
+        const plannedDraft = prodRuns.find(p => p.status === "Draft" && p.id !== r.id && p.assemblyId === lotSource.id && p.lotNumber === r.lotNumber);
+        inheritable = !!(realLot || plannedDraft);
+      }
+      if (inheritable) {
+        setProdLotNumber(r.lotNumber);
+        setFreshLotNumber("");
+      } else {
+        setProdLotNumber("__FRESH__");
+        setFreshLotNumber(r.lotNumber);
+      }
+    }
+    setEditDraftModal(true);
+  };
+
+  const closeEditDraft = () => {
+    setEditDraftModal(false);
+    setEditingDraftId(null);
+    setEditOriginalLot("");
+  };
+
+  // Cascade-clear: when a draft's lot # is removed/changed, clear the same
+  // lot # off any *other* Draft runs that were inheriting it — UNLESS a real
+  // inventory lot with that number still exists.
+  const cascadeClearDependentLots = async (oldLot, sourceRunId) => {
+    if (!oldLot) return 0;
+    const realLotExists = lots.some(l => l.lotNumber === oldLot && l.qty > 0);
+    if (realLotExists) return 0;
+    const dependents = prodRuns.filter(r => r.id !== sourceRunId && r.status === "Draft" && r.lotNumber === oldLot);
+    if (dependents.length === 0) return 0;
+    for (const dep of dependents) {
+      try { await updateProductionRun(dep.id, { lotNumber: "" }); }
+      catch (e) { console.warn("Cascade clear failed for", dep.id, e.message); }
+    }
+    setProdRuns(prev => prev.map(r => dependents.find(d => d.id === r.id) ? { ...r, lotNumber: "" } : r));
+    setWeekDrafts(prev => prev.map(r => dependents.find(d => d.id === r.id) ? { ...r, lotNumber: "" } : r));
+    return dependents.length;
+  };
+
   // ---- Draft Edit Save ----
   const saveEditDraft = async () => {
-    const d = editDraftForm;
-    if (!d.id) return;
+    if (!editingDraftId) return;
+    if (!prodAssemblyItem) { show("Select an assembly", "error"); return; }
+    if (prodQty <= 0) { show("Qty must be > 0", "error"); return; }
+    const lotNum = (prodLotNumber === "__FRESH__" ? freshLotNumber.trim() : (prodLotNumber || "").trim());
     try {
-      const item = allItems.find(i => i.id === d.assemblyId);
-      await updateProductionRun(d.id, {
-        assemblyId: d.assemblyId, assemblyName: item?.name || d.assemblyName,
-        qtyProduced: d.qty, plannedDate: d.plannedDate, lotNumber: d.lotNumber, notes: d.notes || "",
+      await updateProductionRun(editingDraftId, {
+        assemblyId: prodAssemblyItem.id, assemblyName: prodAssemblyItem.name,
+        qtyProduced: prodQty, plannedDate: prodDate, lotNumber: lotNum, notes: prodNotes || "",
       });
-      setProdRuns(prev => prev.map(r => r.id === d.id ? {
-        ...r, assemblyId: d.assemblyId, assemblyName: item?.name || d.assemblyName,
-        qtyProduced: d.qty, plannedDate: d.plannedDate, lotNumber: d.lotNumber, notes: d.notes || "",
+      setProdRuns(prev => prev.map(r => r.id === editingDraftId ? {
+        ...r, assemblyId: prodAssemblyItem.id, assemblyName: prodAssemblyItem.name,
+        qtyProduced: prodQty, plannedDate: prodDate, lotNumber: lotNum, notes: prodNotes || "",
       } : r));
-      // Also refresh week drafts if on planning tab
+      // If the lot # changed from a previous value, clear dependents inheriting the OLD value
+      if (editOriginalLot && editOriginalLot !== lotNum) {
+        const cleared = await cascadeClearDependentLots(editOriginalLot, editingDraftId);
+        if (cleared > 0) show(`Updated • cleared lot # on ${cleared} dependent draft${cleared === 1 ? "" : "s"}`);
+        else show("Draft updated");
+      } else {
+        show("Draft updated");
+      }
+      // Refresh planning week drafts list
       const freshDrafts = await fetchDraftRunsForWeek(planWeekStart);
       setWeekDrafts(freshDrafts);
-      show("Draft updated");
-      setEditDraftModal(false);
+      // Bump global lot counter if a fresh number was assigned
+      if (lotNum) await ensureCounterMatchesLot(lotNum);
+      closeEditDraft();
     } catch (e) { show(e.message, "error"); }
   };
 
@@ -1817,7 +1922,14 @@ export default function App() {
       await deleteProductionRuns([run.id]);
       setProdRuns(prev => prev.filter(r => r.id !== run.id));
       setWeekDrafts(prev => prev.filter(d => d.id !== run.id));
-      show("Draft deleted");
+      // Cascade-clear dependents that were inheriting this lot #
+      if (run.lotNumber) {
+        const cleared = await cascadeClearDependentLots(run.lotNumber, run.id);
+        if (cleared > 0) show(`Draft deleted • cleared lot # on ${cleared} dependent draft${cleared === 1 ? "" : "s"}`);
+        else show("Draft deleted");
+      } else {
+        show("Draft deleted");
+      }
     } catch (e) { show(e.message, "error"); }
   };
 
@@ -3461,10 +3573,7 @@ export default function App() {
                                     }} style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#22c55e", borderColor: "#22c55e44" }}>
                                       <Check size={12} /> Complete
                                     </button>
-                                    <button onClick={() => {
-                                      setEditDraftForm({ id: r.id, assemblyId: r.assemblyId, assemblyName: r.assemblyName, qty: r.qtyProduced, plannedDate: r.plannedDate || r.date, lotNumber: r.lotNumber || "", notes: r.notes || "" });
-                                      setEditDraftModal(true);
-                                    }} style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#6366f1", borderColor: "#6366f144" }}>
+                                    <button onClick={() => openEditDraft(r)} style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#6366f1", borderColor: "#6366f144" }}>
                                       <Edit2 size={12} />
                                     </button>
                                     <button onClick={() => deleteDraft(r)} style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#ef4444", borderColor: "#ef444444" }}>
@@ -3553,7 +3662,9 @@ export default function App() {
                   style={{ ...IS, borderColor: !prodLotNumber ? "#ef4444" : "#f59e0b", background: "#1a1a2e" }}>
                   <option value="">Select lot from {lotSourceItem.name}...</option>
                   {suggestedLots.map(l => (
-                    <option key={l.lotNumber} value={l.lotNumber}>{l.lotNumber} ({l.qty} avail, {l.productionDate || "?"})</option>
+                    <option key={l.lotNumber} value={l.lotNumber}>
+                      {l.lotNumber} {l.planned ? `(PLANNED — ${l.qty} on ${l.productionDate || "?"})` : `(${l.qty} avail, ${l.productionDate || "?"})`}
+                    </option>
                   ))}
                   <option value="__FRESH__">⊕ Make from fresh raw materials (new lot)</option>
                 </select>
@@ -3875,7 +3986,9 @@ export default function App() {
                   style={{ ...IS, borderColor: !prodLotNumber ? "#ef4444" : "#f59e0b", background: "#1a1a2e" }}>
                   <option value="">Select lot from {lotSourceItem.name}...</option>
                   {suggestedLots.map(l => (
-                    <option key={l.lotNumber} value={l.lotNumber}>{l.lotNumber} ({l.qty} avail, {l.productionDate || "?"})</option>
+                    <option key={l.lotNumber} value={l.lotNumber}>
+                      {l.lotNumber} {l.planned ? `(PLANNED — ${l.qty} on ${l.productionDate || "?"})` : `(${l.qty} avail, ${l.productionDate || "?"})`}
+                    </option>
                   ))}
                   <option value="__FRESH__">⊕ Make from fresh raw materials (new lot)</option>
                 </select>
@@ -3943,41 +4056,103 @@ export default function App() {
         </div>
       </Modal>
 
-      {/* Edit Draft Modal */}
-      <Modal open={editDraftModal} onClose={() => setEditDraftModal(false)} title="Edit Draft Run">
-        <div style={{ display: "grid", gap: 12, marginBottom: 16 }}>
+      {/* Edit Draft Modal — mirrors Complete modal so user can preview the
+          consumption tree, drill into sub-assemblies, and pick a lot source
+          (real inventory or planned draft). Only the lot # and metadata are
+          persisted; the tree state is for preview/planning only. */}
+      <Modal open={editDraftModal} onClose={closeEditDraft} title="Edit Draft Run" wide>
+        {editingDraftId && (
+          <div style={{ marginBottom: 12, padding: "8px 12px", background: "#1a1a2a", borderRadius: 6, fontSize: 12, color: "#6366f1", border: "1px solid #6366f133" }}>
+            Editing draft: <strong>{editingDraftId}</strong> — adjust qty, date, and lot source. Tree below previews consumption (not yet committed).
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
-            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly</label>
-            <select value={editDraftForm.assemblyId || ""} onChange={e => {
-              const item = allItems.find(i => i.id === e.target.value);
-              setEditDraftForm(prev => ({ ...prev, assemblyId: e.target.value, assemblyName: item?.name || "" }));
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly *</label>
+            <select value={prodAssembly} onChange={e => {
+              const id = e.target.value;
+              setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
+              if (id && getLevel(id) === 200) {
+                const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
+                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, prodDate));
+              }
             }} style={IS}>
-              <option value="">Select...</option>
+              <option value="">Select assembly...</option>
               {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
             </select>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity</label>
-              <input type="number" min={0} value={editDraftForm.qty || ""} onChange={e => setEditDraftForm(prev => ({ ...prev, qty: Number(e.target.value) || 0 }))} style={IS} />
-            </div>
-            <div>
-              <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Planned Date</label>
-              <input type="date" value={editDraftForm.plannedDate || ""} onChange={e => setEditDraftForm(prev => ({ ...prev, plannedDate: e.target.value }))} style={IS} />
-            </div>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity *</label>
+            <input type="number" step="any" min="0" value={prodQty} onChange={e => setProdQty(Number(e.target.value))} style={IS} />
           </div>
           <div>
-            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Lot Number</label>
-            <input value={editDraftForm.lotNumber || ""} onChange={e => setEditDraftForm(prev => ({ ...prev, lotNumber: e.target.value }))} style={IS} />
-          </div>
-          <div>
-            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label>
-            <input value={editDraftForm.notes || ""} onChange={e => setEditDraftForm(prev => ({ ...prev, notes: e.target.value }))} style={IS} />
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Planned Date</label>
+            <input type="date" value={prodDate} onChange={e => setProdDate(e.target.value)} style={IS} />
           </div>
         </div>
+
+        {prodAssemblyItem && (
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>
+              Lot / Batch Number
+              {lotSourceItem
+                ? ` (inherited from ${lotSourceItem.name})`
+                : (prodAssemblyItem.lotSource || getLevel(prodAssemblyItem.id) <= 200)
+                  ? " (new lot)"
+                  : " (manual — no lot source in BOM)"}
+            </label>
+            {lotSourceItem ? (
+              <div>
+                <select value={prodLotNumber} onChange={e => {
+                    const v = e.target.value;
+                    setProdLotNumber(v);
+                    if (v === "__FRESH__") setFreshLotNumber(suggestedNewLot);
+                    else setFreshLotNumber("");
+                  }}
+                  style={{ ...IS, background: "#1a1a2e" }}>
+                  <option value="">— leave blank, choose at completion —</option>
+                  {suggestedLots.map(l => (
+                    <option key={l.lotNumber} value={l.lotNumber}>
+                      {l.lotNumber} {l.planned ? `(PLANNED — ${l.qty} on ${l.productionDate || "?"})` : `(${l.qty} avail, ${l.productionDate || "?"})`}
+                    </option>
+                  ))}
+                  <option value="__FRESH__">⊕ Make from fresh raw materials (new lot)</option>
+                </select>
+                {prodLotNumber === "__FRESH__" && (
+                  <input value={freshLotNumber} onChange={e => setFreshLotNumber(e.target.value)}
+                    placeholder={`Enter new lot number (e.g. ${suggestedNewLot || "60001-041926"})`} style={{ ...IS, marginTop: 6, borderColor: "#f59e0b" }} />
+                )}
+                <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 4 }}>
+                  🔒 Lot number inherited from {lotSourceItem.name}
+                </div>
+              </div>
+            ) : (
+              <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)}
+                placeholder={`Enter lot number (e.g. ${suggestedNewLot || "60001-041926"})`} style={IS} />
+            )}
+          </div>
+        )}
+
+        {prodAssemblyItem && prodAssemblyItem.bom && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 4 }}>Materials Preview (consumption happens at completion)</div>
+            <div style={{ border: "1px solid #2a2a3a", borderRadius: 8, padding: 12, background: "#16161e", maxHeight: 400, overflow: "auto" }}>
+              {renderConsumptionTree(prodAssemblyItem.bom, prodQty)}
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes (optional)</label>
+          <input value={prodNotes} onChange={e => setProdNotes(e.target.value)} placeholder="Batch notes" style={IS} />
+        </div>
+
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button onClick={() => setEditDraftModal(false)} style={B2}>Cancel</button>
-          <button onClick={saveEditDraft} style={B1}><Check size={14} /> Save</button>
+          <button onClick={closeEditDraft} style={B2}>Cancel</button>
+          <button onClick={saveEditDraft} disabled={!prodAssemblyItem || prodQty <= 0}
+            style={{ ...B1, opacity: (!prodAssemblyItem || prodQty <= 0) ? 0.4 : 1 }}>
+            <Check size={14} /> Save
+          </button>
         </div>
       </Modal>
 
