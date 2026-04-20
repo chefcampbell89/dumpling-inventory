@@ -1,4 +1,4 @@
-// APP VERSION: v122
+// APP VERSION: v123
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1418,20 +1418,45 @@ export default function App() {
 
   // Suggested next lot number for the currently-selected production assembly.
   // Pure preview based on current state — does NOT reserve from the counter
-  // until production is actually submitted.
+  // until production is actually submitted. Includes the production date suffix.
   const suggestedNewLot = useMemo(() => {
     if (!prodAssembly) return "";
     const m = prodAssembly.match(/^\d+-(\w+)/);
     const pl = m ? m[1] : "";
     const digit = digitForProductLine(pl, baseIngredients);
-    return formatLotNumber(digit, lotCounter + 1);
-  }, [prodAssembly, lotCounter, baseIngredients]);
+    return formatLotNumber(digit, lotCounter + 1, prodDate);
+  }, [prodAssembly, lotCounter, baseIngredients, prodDate]);
+
+  // Keep the auto-suggested lot # in sync when prodDate changes.
+  // Only updates fields that still match our auto-suggestion pattern; user-typed
+  // values are left alone.
+  useEffect(() => {
+    if (!prodAssembly) return;
+    const m = prodAssembly.match(/^\d+-(\w+)/);
+    const pl = m ? m[1] : "";
+    const digit = digitForProductLine(pl, baseIngredients);
+    const expected = formatLotNumber(digit, lotCounter + 1, prodDate);
+    // Auto-pattern: starts with the right digit + 4 numeric chars, optionally followed by -MMDDYY
+    const autoRe = new RegExp(`^${digit}\\d{4}(-\\d{6})?$`);
+    if (prodLotNumber && autoRe.test(prodLotNumber) && prodLotNumber !== expected) {
+      setProdLotNumber(expected);
+    }
+    if (freshLotNumber && autoRe.test(freshLotNumber) && freshLotNumber !== expected) {
+      setFreshLotNumber(expected);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prodDate, prodAssembly, lotCounter, baseIngredients]);
 
   // After a fresh lot is created, ensure the global counter is at least as high
   // as the numeric suffix used (so the next suggestion doesn't collide).
+  // Accepts both the new "60003-041926" format and the legacy "60003" format.
   const ensureCounterMatchesLot = useCallback(async (lotNum) => {
-    if (!lotNum || !/^\d{5,}$/.test(lotNum)) return;
-    const suffix = parseInt(lotNum.slice(1), 10);
+    if (!lotNum) return;
+    let suffix = NaN;
+    const dated = lotNum.match(/^\d(\d{4})-\d{6}$/);
+    const legacy = lotNum.match(/^\d(\d{4,})$/);
+    if (dated) suffix = parseInt(dated[1], 10);
+    else if (legacy) suffix = parseInt(legacy[1], 10);
     if (!Number.isFinite(suffix) || suffix <= lotCounter) return;
     try {
       await saveConfig("lot_sequence_counter", suffix);
@@ -1648,9 +1673,11 @@ export default function App() {
       const needLotCount = lotPlan.filter(p => p.needsLot).length;
       let reservedLots = [];
       if (needLotCount > 0) {
+        const lotEntries = lotPlan.filter(p => p.needsLot);
         reservedLots = await reserveLotNumbers(
-          lotPlan.filter(p => p.needsLot).map(p => p.productLine),
-          baseIngredients
+          lotEntries.map(p => p.productLine),
+          baseIngredients,
+          lotEntries.map(p => p.day.date)
         );
         // Refresh local counter so admin UI reflects latest
         const newCounter = (await getConfig("lot_sequence_counter")) || 0;
@@ -3487,7 +3514,7 @@ export default function App() {
               // and they have no lotSource so prodLotNumber is the direct text input.
               if (id && getLevel(id) === 200) {
                 const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
-                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1));
+                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, prodDate));
               }
             }} style={IS}>
               <option value="">Select assembly...</option>
@@ -3532,7 +3559,7 @@ export default function App() {
                 </select>
                 {prodLotNumber === "__FRESH__" && (
                   <input value={freshLotNumber} onChange={e => setFreshLotNumber(e.target.value)}
-                    placeholder={`Enter new lot number (e.g. ${suggestedNewLot || "60001"})`} style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
+                    placeholder={`Enter new lot number (e.g. ${suggestedNewLot || "60001-041926"})`} style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
                 )}
                 <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 4 }}>
                   🔒 Lot number inherited from {lotSourceItem.name}
@@ -3540,7 +3567,7 @@ export default function App() {
               </div>
             ) : (
               <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)}
-                placeholder={`Enter lot number (e.g. ${suggestedNewLot || "60001"})`}
+                placeholder={`Enter lot number (e.g. ${suggestedNewLot || "60001-041926"})`}
                 style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
             )}
             {(lotSourceItem ? (prodLotNumber === "__FRESH__" ? !freshLotNumber.trim() : !prodLotNumber) : !prodLotNumber.trim()) && (
@@ -3811,7 +3838,7 @@ export default function App() {
               setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
               if (id && getLevel(id) === 200) {
                 const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
-                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1));
+                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, prodDate));
               }
             }} style={IS}>
               <option value="">Select assembly...</option>
@@ -3854,7 +3881,7 @@ export default function App() {
                 </select>
                 {prodLotNumber === "__FRESH__" && (
                   <input value={freshLotNumber} onChange={e => setFreshLotNumber(e.target.value)}
-                    placeholder={`Enter new lot number (e.g. ${suggestedNewLot || "60001"})`} style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
+                    placeholder={`Enter new lot number (e.g. ${suggestedNewLot || "60001-041926"})`} style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
                 )}
                 <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 4 }}>
                   🔒 Lot number inherited from {lotSourceItem.name}
@@ -3862,7 +3889,7 @@ export default function App() {
               </div>
             ) : (
               <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)}
-                placeholder={`Enter lot number (e.g. ${suggestedNewLot || "60001"})`}
+                placeholder={`Enter lot number (e.g. ${suggestedNewLot || "60001-041926"})`}
                 style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
             )}
           </div>
@@ -4300,8 +4327,8 @@ export default function App() {
                 <div>
                   <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Lot Numbering</h3>
                   <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>
-                    Lot numbers are auto-generated as <code style={{ color: "#fbbf24" }}>[base ingredient digit][4-digit global sequence]</code> — e.g.&nbsp;
-                    <code style={{ color: "#fbbf24" }}>60003</code>. The first digit identifies the base ingredient; the remaining four are a global counter that increments with each new lot across all flavors.
+                    Lot numbers are auto-generated as <code style={{ color: "#fbbf24" }}>[base ingredient digit][4-digit global sequence]-MMDDYY</code> — e.g.&nbsp;
+                    <code style={{ color: "#fbbf24" }}>60003-041926</code>. The first digit identifies the base ingredient, the next four are a global counter that increments with each new lot across all flavors, and the date suffix is the production date.
                   </p>
 
                   <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px", marginBottom: 14 }}>

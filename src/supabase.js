@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v105
+// SUPABASE VERSION: v106
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -541,29 +541,43 @@ export function digitForProductLine(productLine, baseIngredients) {
   return 8;
 }
 
-// Format a lot number from digit + counter -> e.g. (6, 3) -> "60003"
-export function formatLotNumber(digit, counter) {
-  return `${digit}${String(counter).padStart(4, "0")}`;
+// Convert a YYYY-MM-DD date string to MMDDYY (e.g. "2026-04-19" -> "041926").
+// Returns "" if input is empty or malformed.
+export function dateToMMDDYY(dateStr) {
+  if (!dateStr || typeof dateStr !== "string") return "";
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return "";
+  return `${m[2]}${m[3]}${m[1].slice(2)}`;
+}
+
+// Format a lot number from digit + counter + optional date.
+// Examples: (6, 3) -> "60003"; (6, 3, "2026-04-19") -> "60003-041926"
+export function formatLotNumber(digit, counter, dateStr) {
+  const base = `${digit}${String(counter).padStart(4, "0")}`;
+  const dateSuffix = dateToMMDDYY(dateStr);
+  return dateSuffix ? `${base}-${dateSuffix}` : base;
 }
 
 // Reads the current global counter, increments by `count`, persists, returns the next `count` lot numbers.
 // productLines is an array of product line codes (one per lot needed), in order.
-export async function reserveLotNumbers(productLines, baseIngredients) {
+// dateStrs is an optional parallel array of YYYY-MM-DD dates to embed in each lot.
+export async function reserveLotNumbers(productLines, baseIngredients, dateStrs) {
   const current = (await getConfig("lot_sequence_counter")) || 0;
   const lots = [];
   let counter = current;
-  for (const pl of productLines) {
+  for (let i = 0; i < productLines.length; i += 1) {
     counter += 1;
-    const digit = digitForProductLine(pl, baseIngredients);
-    lots.push(formatLotNumber(digit, counter));
+    const digit = digitForProductLine(productLines[i], baseIngredients);
+    const ds = Array.isArray(dateStrs) ? dateStrs[i] : undefined;
+    lots.push(formatLotNumber(digit, counter, ds));
   }
   await saveConfig("lot_sequence_counter", counter);
   return lots;
 }
 
 // Convenience: reserve a single lot number
-export async function reserveLotNumber(productLine, baseIngredients) {
-  const [lot] = await reserveLotNumbers([productLine], baseIngredients);
+export async function reserveLotNumber(productLine, baseIngredients, dateStr) {
+  const [lot] = await reserveLotNumbers([productLine], baseIngredients, dateStr ? [dateStr] : undefined);
   return lot;
 }
 
