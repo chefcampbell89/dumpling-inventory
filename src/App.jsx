@@ -1,4 +1,4 @@
-// APP VERSION: v121
+// APP VERSION: v122
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -13,6 +13,7 @@ import {
   fetchWishes, createWish, countUserWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles, deleteProfile as dbDeleteProfile,
   getInviteCode, setInviteCode, getLocations, getConfig, saveConfig, changePassword, supabase,
+  DEFAULT_BASE_INGREDIENTS, digitForProductLine, formatLotNumber, reserveLotNumbers,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
@@ -576,6 +577,9 @@ export default function App() {
 
   // ---- Planning / Forecast State ----
   const [forecastConfig, setForecastConfig] = useState({ horizonWeeks: 4, lookbackWeeks: 8, workDays: ["Mon","Tue","Wed","Thu","Fri"] });
+  // ---- Lot Numbering Config ----
+  const [baseIngredients, setBaseIngredients] = useState(DEFAULT_BASE_INGREDIENTS);
+  const [lotCounter, setLotCounter] = useState(0);
   const [planWeekStart, setPlanWeekStart] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -677,6 +681,8 @@ export default function App() {
       getConfig("app_name").then(r => { if (r) setAppName(r); }).catch(() => {});
       getConfig("forecast_config").then(r => { if (r) setForecastConfig(prev => ({ ...prev, ...r })); }).catch(() => {});
       getConfig("daily_note").then(r => { if (r) setDailyNote(r); }).catch(() => {});
+      getConfig("lot_base_ingredients").then(r => { if (Array.isArray(r) && r.length === 10) setBaseIngredients(r); }).catch(() => {});
+      getConfig("lot_sequence_counter").then(r => { if (typeof r === "number") setLotCounter(r); }).catch(() => {});
     } catch (err) {
       console.warn("Supabase load failed, using seed data:", err.message);
     }
@@ -1410,6 +1416,29 @@ export default function App() {
   // ---- PRODUCTION ----
   const prodAssemblyItem = useMemo(() => assemblies.find(a => a.id === prodAssembly), [assemblies, prodAssembly]);
 
+  // Suggested next lot number for the currently-selected production assembly.
+  // Pure preview based on current state — does NOT reserve from the counter
+  // until production is actually submitted.
+  const suggestedNewLot = useMemo(() => {
+    if (!prodAssembly) return "";
+    const m = prodAssembly.match(/^\d+-(\w+)/);
+    const pl = m ? m[1] : "";
+    const digit = digitForProductLine(pl, baseIngredients);
+    return formatLotNumber(digit, lotCounter + 1);
+  }, [prodAssembly, lotCounter, baseIngredients]);
+
+  // After a fresh lot is created, ensure the global counter is at least as high
+  // as the numeric suffix used (so the next suggestion doesn't collide).
+  const ensureCounterMatchesLot = useCallback(async (lotNum) => {
+    if (!lotNum || !/^\d{5,}$/.test(lotNum)) return;
+    const suffix = parseInt(lotNum.slice(1), 10);
+    if (!Number.isFinite(suffix) || suffix <= lotCounter) return;
+    try {
+      await saveConfig("lot_sequence_counter", suffix);
+      setLotCounter(suffix);
+    } catch (e) { console.warn("Counter bump failed:", e.message); }
+  }, [lotCounter]);
+
   // Find the designated lot source item in the BOM tree
   const lotSourceItem = useMemo(() => {
     if (!prodAssemblyItem) return null;
@@ -1581,6 +1610,7 @@ export default function App() {
     setLots(cleanLots);
     setProdRuns(prev => [{ ...run, createdAt: new Date().toISOString() }, ...prev]);
     try { await createProductionRun(run); } catch (e) { console.warn("Production save failed:", e.message); }
+    await ensureCounterMatchesLot(lotNum);
     show(`Produced ${prodQty} × ${prodAssemblyItem.name}${lotNum ? " (Lot: " + lotNum + ")" : ""}`);
     setProdModal(false);
   };
@@ -1600,25 +1630,49 @@ export default function App() {
         return { date: d, dayName, isWorkDay: workDays.includes(dayName) };
       }).filter(d => d.isWorkDay);
 
-      let counter = 1;
-      const newRuns = [];
+      // Pre-reserve lot numbers for any 200-level draft (those always create new lots).
+      // Walk in the same order we'll create runs so lot numbers are assigned predictably.
+      const lotPlan = []; // entries: { day, row, item, productLine, needsLot }
       for (const day of selectedWeekDays) {
         const rows = planDayRows[day.date] || [];
         for (const row of rows) {
           if (!row.skuId || row.qty <= 0) continue;
           const item = allItems.find(i => i.id === row.skuId);
           if (!item) continue;
-          const runId = `PROD-${day.date}-${String(counter).padStart(3, "0")}-${Math.random().toString(36).slice(2, 8)}`;
-          const run = {
-            id: runId, assemblyId: row.skuId, assemblyName: item.name,
-            qtyProduced: row.qty, date: day.date, lotNumber: "", plannedDate: day.date,
-            sourcePlanWeek: planWeekStart, status: "Draft",
-            notes: "", createdBy: profile?.email || "", consumed: [],
-          };
-          await createProductionRun(run);
-          newRuns.push({ ...run, createdAt: new Date().toISOString() });
-          counter++;
+          const lvl = getLevel(item.id);
+          const m = item.id.match(/^\d+-(\w+)/);
+          const productLine = m ? m[1] : "";
+          lotPlan.push({ day, row, item, productLine, needsLot: lvl === 200 });
         }
+      }
+      const needLotCount = lotPlan.filter(p => p.needsLot).length;
+      let reservedLots = [];
+      if (needLotCount > 0) {
+        reservedLots = await reserveLotNumbers(
+          lotPlan.filter(p => p.needsLot).map(p => p.productLine),
+          baseIngredients
+        );
+        // Refresh local counter so admin UI reflects latest
+        const newCounter = (await getConfig("lot_sequence_counter")) || 0;
+        setLotCounter(newCounter);
+      }
+
+      let counter = 1;
+      let lotIdx = 0;
+      const newRuns = [];
+      for (const plan of lotPlan) {
+        const { day, row, item } = plan;
+        const lotNumber = plan.needsLot ? (reservedLots[lotIdx++] || "") : "";
+        const runId = `PROD-${day.date}-${String(counter).padStart(3, "0")}-${Math.random().toString(36).slice(2, 8)}`;
+        const run = {
+          id: runId, assemblyId: row.skuId, assemblyName: item.name,
+          qtyProduced: row.qty, date: day.date, lotNumber, plannedDate: day.date,
+          sourcePlanWeek: planWeekStart, status: "Draft",
+          notes: "", createdBy: profile?.email || "", consumed: [],
+        };
+        await createProductionRun(run);
+        newRuns.push({ ...run, createdAt: new Date().toISOString() });
+        counter++;
       }
       // Reload
       const freshDrafts = await fetchDraftRunsForWeek(planWeekStart);
@@ -1702,6 +1756,7 @@ export default function App() {
       consumed: consumed.map(c => ({ partId: c.partId, name: c.name, qty: c.qty, unit: c.unit })),
     } : r));
 
+    await ensureCounterMatchesLot(lotNum);
     show(`Completed: ${prodQty} × ${prodAssemblyItem.name}`);
     setCompleteDraftModal(false); setDraftToComplete(null);
   };
@@ -3425,7 +3480,16 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
-            <select value={prodAssembly} onChange={e => { const id = e.target.value; setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber(""); }} style={IS}>
+            <select value={prodAssembly} onChange={e => {
+              const id = e.target.value;
+              setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
+              // Auto-fill suggested lot for 200-level items — they always create a new lot,
+              // and they have no lotSource so prodLotNumber is the direct text input.
+              if (id && getLevel(id) === 200) {
+                const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
+                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1));
+              }
+            }} style={IS}>
               <option value="">Select assembly...</option>
               {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
             </select>
@@ -3453,7 +3517,12 @@ export default function App() {
             </label>
             {lotSourceItem ? (
               <div>
-                <select value={prodLotNumber} onChange={e => { setProdLotNumber(e.target.value); if (e.target.value !== "__FRESH__") setFreshLotNumber(""); }}
+                <select value={prodLotNumber} onChange={e => {
+                    const v = e.target.value;
+                    setProdLotNumber(v);
+                    if (v === "__FRESH__") setFreshLotNumber(suggestedNewLot);
+                    else setFreshLotNumber("");
+                  }}
                   style={{ ...IS, borderColor: !prodLotNumber ? "#ef4444" : "#f59e0b", background: "#1a1a2e" }}>
                   <option value="">Select lot from {lotSourceItem.name}...</option>
                   {suggestedLots.map(l => (
@@ -3463,7 +3532,7 @@ export default function App() {
                 </select>
                 {prodLotNumber === "__FRESH__" && (
                   <input value={freshLotNumber} onChange={e => setFreshLotNumber(e.target.value)}
-                    placeholder="Enter new lot number (e.g. CB-20260331-01)" style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
+                    placeholder={`Enter new lot number (e.g. ${suggestedNewLot || "60001"})`} style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
                 )}
                 <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 4 }}>
                   🔒 Lot number inherited from {lotSourceItem.name}
@@ -3471,7 +3540,7 @@ export default function App() {
               </div>
             ) : (
               <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)}
-                placeholder="Enter lot number (e.g. CB-20260315-01)"
+                placeholder={`Enter lot number (e.g. ${suggestedNewLot || "60001"})`}
                 style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
             )}
             {(lotSourceItem ? (prodLotNumber === "__FRESH__" ? !freshLotNumber.trim() : !prodLotNumber) : !prodLotNumber.trim()) && (
@@ -3737,7 +3806,14 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
-            <select value={prodAssembly} onChange={e => { const id = e.target.value; setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber(""); }} style={IS}>
+            <select value={prodAssembly} onChange={e => {
+              const id = e.target.value;
+              setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
+              if (id && getLevel(id) === 200) {
+                const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
+                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1));
+              }
+            }} style={IS}>
               <option value="">Select assembly...</option>
               {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
             </select>
@@ -3763,7 +3839,12 @@ export default function App() {
             </label>
             {lotSourceItem ? (
               <div>
-                <select value={prodLotNumber} onChange={e => { setProdLotNumber(e.target.value); if (e.target.value !== "__FRESH__") setFreshLotNumber(""); }}
+                <select value={prodLotNumber} onChange={e => {
+                    const v = e.target.value;
+                    setProdLotNumber(v);
+                    if (v === "__FRESH__") setFreshLotNumber(suggestedNewLot);
+                    else setFreshLotNumber("");
+                  }}
                   style={{ ...IS, borderColor: !prodLotNumber ? "#ef4444" : "#f59e0b", background: "#1a1a2e" }}>
                   <option value="">Select lot from {lotSourceItem.name}...</option>
                   {suggestedLots.map(l => (
@@ -3773,7 +3854,7 @@ export default function App() {
                 </select>
                 {prodLotNumber === "__FRESH__" && (
                   <input value={freshLotNumber} onChange={e => setFreshLotNumber(e.target.value)}
-                    placeholder="Enter new lot number (e.g. CB-20260331-01)" style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
+                    placeholder={`Enter new lot number (e.g. ${suggestedNewLot || "60001"})`} style={{ ...IS, marginTop: 6, borderColor: !freshLotNumber.trim() ? "#ef4444" : "#f59e0b" }} />
                 )}
                 <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 4 }}>
                   🔒 Lot number inherited from {lotSourceItem.name}
@@ -3781,7 +3862,7 @@ export default function App() {
               </div>
             ) : (
               <input value={prodLotNumber} onChange={e => setProdLotNumber(e.target.value)}
-                placeholder="Enter lot number (e.g. CB-20260315-01)"
+                placeholder={`Enter lot number (e.g. ${suggestedNewLot || "60001"})`}
                 style={{ ...IS, borderColor: !prodLotNumber.trim() ? "#ef4444" : undefined }} />
             )}
           </div>
@@ -3939,6 +4020,7 @@ export default function App() {
           { id: "receiptTypes", label: "Receipt Types", icon: <PackageCheck size={14} /> },
           { id: "costing", label: "Costing Methods", icon: <DollarSign size={14} /> },
           { id: "planning", label: "Planning", icon: <TrendingUp size={14} /> },
+          { id: "lotNumbering", label: "Lot Numbering", icon: <KeyRound size={14} /> },
           { id: "wishes", label: "Wishes", icon: <Sparkles size={14} /> },
         ];
 
@@ -4209,6 +4291,86 @@ export default function App() {
                     <button onClick={async () => {
                       try { await saveConfig("forecast_config", forecastConfig); show("Planning settings saved"); } catch (e) { show(e.message, "error"); }
                     }} style={{ ...B1, alignSelf: "flex-start" }}><Check size={14} /> Save Settings</button>
+                  </div>
+                </div>
+              )}
+
+              {/* Lot Numbering Config */}
+              {cfgSection === "lotNumbering" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Lot Numbering</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>
+                    Lot numbers are auto-generated as <code style={{ color: "#fbbf24" }}>[base ingredient digit][4-digit global sequence]</code> — e.g.&nbsp;
+                    <code style={{ color: "#fbbf24" }}>60003</code>. The first digit identifies the base ingredient; the remaining four are a global counter that increments with each new lot across all flavors.
+                  </p>
+
+                  <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px", marginBottom: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc" }}>Current Sequence Counter</div>
+                        <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>The next lot will be assigned counter <strong style={{ color: "#fbbf24" }}>{lotCounter + 1}</strong>.</div>
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <input
+                          id="lotCounterInput" type="number" min={0} defaultValue={lotCounter}
+                          style={{ ...IS, width: 110, textAlign: "right" }}
+                        />
+                        <button onClick={async () => {
+                          const input = document.getElementById("lotCounterInput");
+                          const val = parseInt(input?.value, 10);
+                          if (!Number.isFinite(val) || val < 0) { show("Counter must be a non-negative integer", "error"); return; }
+                          if (!confirm(`Set lot sequence counter to ${val}? The next lot will use counter ${val + 1}.`)) return;
+                          try { await saveConfig("lot_sequence_counter", val); setLotCounter(val); show(`Counter set to ${val}`); }
+                          catch (e) { show(e.message, "error"); }
+                        }} style={B1}><Check size={14} /> Set</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 4 }}>Base Ingredient → Digit Mapping</div>
+                    <div style={{ fontSize: 11, color: "#888", marginBottom: 12 }}>Each digit (0–9) maps to a base ingredient. List the product line codes (e.g. CB, GC) that use that base ingredient — one per row. Comma-separated.</div>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ background: "#16161e", color: "#888", fontSize: 11, textTransform: "uppercase" }}>
+                          <th style={{ padding: "8px 10px", textAlign: "left", width: 60 }}>Digit</th>
+                          <th style={{ padding: "8px 10px", textAlign: "left" }}>Base Ingredient Label</th>
+                          <th style={{ padding: "8px 10px", textAlign: "left" }}>Product Line Codes</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {baseIngredients.map((bi, idx) => (
+                          <tr key={bi.digit} style={{ borderBottom: "1px solid #2a2a3a" }}>
+                            <td style={{ padding: "8px 10px", fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", fontSize: 14 }}>{bi.digit}</td>
+                            <td style={{ padding: "8px 10px" }}>
+                              <input value={bi.label} onChange={e => {
+                                const v = e.target.value;
+                                setBaseIngredients(prev => prev.map((x, i) => i === idx ? { ...x, label: v } : x));
+                              }} style={{ ...IS, width: "100%" }} />
+                            </td>
+                            <td style={{ padding: "8px 10px" }}>
+                              <input value={(bi.productLines || []).join(", ")} onChange={e => {
+                                const codes = e.target.value.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+                                setBaseIngredients(prev => prev.map((x, i) => i === idx ? { ...x, productLines: codes } : x));
+                              }} placeholder="e.g. CB, KB" style={{ ...IS, width: "100%" }} />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                      <button onClick={async () => {
+                        try { await saveConfig("lot_base_ingredients", baseIngredients); show("Lot numbering saved"); }
+                        catch (e) { show(e.message, "error"); }
+                      }} style={B1}><Check size={14} /> Save Mapping</button>
+                      <button onClick={() => {
+                        if (!confirm("Reset to default mapping? Unsaved edits will be lost.")) return;
+                        setBaseIngredients(DEFAULT_BASE_INGREDIENTS);
+                      }} style={B2}>Reset to Default</button>
+                    </div>
+                    <div style={{ fontSize: 11, color: "#888", marginTop: 10, paddingTop: 10, borderTop: "1px solid #2a2a3a" }}>
+                      Product lines not mapped to any digit will default to digit <strong>8 (MEI MEI SPECIAL/TEST)</strong>.
+                    </div>
                   </div>
                 </div>
               )}

@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v104
+// SUPABASE VERSION: v105
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -515,6 +515,57 @@ export async function saveConfig(key, value) {
 // Backward compat
 export async function getLocations() { return (await getConfig("locations")) || [] }
 export async function saveLocations(locs) { return saveConfig("locations", locs) }
+
+// -- LOT NUMBER GENERATION --
+
+export const DEFAULT_BASE_INGREDIENTS = [
+  { digit: 0, label: "PORK", productLines: ["LG"] },
+  { digit: 1, label: "POTATO", productLines: ["CH"] },
+  { digit: 2, label: "SWEET POTATO", productLines: ["CS"] },
+  { digit: 3, label: "TOFU", productLines: ["TM"] },
+  { digit: 4, label: "OTHER MEAT", productLines: ["CL"] },
+  { digit: 5, label: "VEG", productLines: ["EK"] },
+  { digit: 6, label: "BEEF", productLines: ["CB", "KB"] },
+  { digit: 7, label: "CHICKEN", productLines: ["GC"] },
+  { digit: 8, label: "MEI MEI SPECIAL/TEST", productLines: [] },
+  { digit: 9, label: "CO PACK PROJECT", productLines: [] },
+];
+
+// Look up the base ingredient digit for a product line (e.g. "CB" -> 6).
+// Defaults to 8 (TEST) if not mapped.
+export function digitForProductLine(productLine, baseIngredients) {
+  const list = baseIngredients || DEFAULT_BASE_INGREDIENTS;
+  for (const bi of list) {
+    if ((bi.productLines || []).includes(productLine)) return bi.digit;
+  }
+  return 8;
+}
+
+// Format a lot number from digit + counter -> e.g. (6, 3) -> "60003"
+export function formatLotNumber(digit, counter) {
+  return `${digit}${String(counter).padStart(4, "0")}`;
+}
+
+// Reads the current global counter, increments by `count`, persists, returns the next `count` lot numbers.
+// productLines is an array of product line codes (one per lot needed), in order.
+export async function reserveLotNumbers(productLines, baseIngredients) {
+  const current = (await getConfig("lot_sequence_counter")) || 0;
+  const lots = [];
+  let counter = current;
+  for (const pl of productLines) {
+    counter += 1;
+    const digit = digitForProductLine(pl, baseIngredients);
+    lots.push(formatLotNumber(digit, counter));
+  }
+  await saveConfig("lot_sequence_counter", counter);
+  return lots;
+}
+
+// Convenience: reserve a single lot number
+export async function reserveLotNumber(productLine, baseIngredients) {
+  const [lot] = await reserveLotNumbers([productLine], baseIngredients);
+  return lot;
+}
 
 export async function changePassword(newPassword) {
   const { error } = await supabase.auth.updateUser({ password: newPassword })
