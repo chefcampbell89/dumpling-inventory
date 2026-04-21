@@ -1,4 +1,4 @@
-// APP VERSION: v125
+// APP VERSION: v126
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -861,6 +861,33 @@ export default function App() {
     return map;
   }, [lots]);
 
+  // Map of itemId -> array of alternate vendor rows. Declared early so it can
+  // be referenced by viewItems / openEdit / save / genPOs without TDZ errors.
+  const itemVendorsByItem = useMemo(() => {
+    const m = new Map();
+    for (const v of itemVendors) {
+      if (!m.has(v.itemId)) m.set(v.itemId, []);
+      m.get(v.itemId).push(v);
+    }
+    return m;
+  }, [itemVendors]);
+
+  // True if the item has 1+ alternate vendor rows
+  const hasAlternates = useCallback((itemId) => (itemVendorsByItem.get(itemId)?.length || 0) > 0, [itemVendorsByItem]);
+
+  // All vendor options for an item: primary + alternates, deduped by name
+  const vendorOptionsForItem = useCallback((item) => {
+    const opts = [];
+    if (item?.supplier) opts.push({ vendorName: item.supplier, supplierCode: item.supplierCode || "", unitCost: item.avgCost || 0, primary: true });
+    const alts = itemVendorsByItem.get(item?.id) || [];
+    for (const a of alts) {
+      if (!opts.some(o => o.vendorName === a.vendorName)) {
+        opts.push({ vendorName: a.vendorName, supplierCode: a.supplierCode, unitCost: a.unitCost, primary: false });
+      }
+    }
+    return opts;
+  }, [itemVendorsByItem]);
+
   const viewItems = useMemo(() => {
     let d = (tab === "inventory" || tab === "items") ? [...parts, ...assemblies] : [];
     if (search) {
@@ -1553,33 +1580,6 @@ export default function App() {
       setLotCounter(suffix);
     } catch (e) { console.warn("Counter bump failed:", e.message); }
   }, [lotCounter]);
-
-  // Find the designated lot source item in the BOM tree
-  // Map of itemId -> array of alternate vendor rows
-  const itemVendorsByItem = useMemo(() => {
-    const m = new Map();
-    for (const v of itemVendors) {
-      if (!m.has(v.itemId)) m.set(v.itemId, []);
-      m.get(v.itemId).push(v);
-    }
-    return m;
-  }, [itemVendors]);
-
-  // True if the item has 1+ alternate vendor rows
-  const hasAlternates = useCallback((itemId) => (itemVendorsByItem.get(itemId)?.length || 0) > 0, [itemVendorsByItem]);
-
-  // All vendor options for an item: primary + alternates, deduped by name
-  const vendorOptionsForItem = useCallback((item) => {
-    const opts = [];
-    if (item?.supplier) opts.push({ vendorName: item.supplier, supplierCode: item.supplierCode || "", unitCost: item.avgCost || 0, primary: true });
-    const alts = itemVendorsByItem.get(item?.id) || [];
-    for (const a of alts) {
-      if (!opts.some(o => o.vendorName === a.vendorName)) {
-        opts.push({ vendorName: a.vendorName, supplierCode: a.supplierCode, unitCost: a.unitCost, primary: false });
-      }
-    }
-    return opts;
-  }, [itemVendorsByItem]);
 
   const lotSourceItem = useMemo(() => {
     if (!prodAssemblyItem) return null;
