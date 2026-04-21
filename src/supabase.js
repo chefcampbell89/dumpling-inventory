@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v106
+// SUPABASE VERSION: v107
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -83,6 +83,40 @@ export async function upsertVendor(v) {
 export async function deleteVendor(id) {
   const { error } = await supabase.from("vendors").delete().eq("id", id)
   if (error) throw error
+}
+
+// -- ITEM VENDORS (alternate sourcing) --
+// Each row is an *additional* vendor for an item. The primary vendor lives
+// on items.supplier (legacy). An item is "multi-vendor" if it has 1+ rows here.
+
+export async function fetchItemVendors() {
+  const { data, error } = await supabase.from("item_vendors").select("*").order("vendor_name");
+  if (error) throw error;
+  return data.map(r => ({
+    id: r.id,
+    itemId: r.item_id,
+    vendorId: r.vendor_id || "",
+    vendorName: r.vendor_name,
+    supplierCode: r.supplier_code || "",
+    unitCost: Number(r.unit_cost) || 0,
+  }));
+}
+
+// Replace the entire alternate-vendor list for one item in a single transaction-ish flow:
+// delete all existing rows for that item_id, then insert the new ones.
+export async function setItemVendors(itemId, rows) {
+  const del = await supabase.from("item_vendors").delete().eq("item_id", itemId);
+  if (del.error) throw del.error;
+  if (!rows || rows.length === 0) return;
+  const payload = rows.map(r => ({
+    item_id: itemId,
+    vendor_id: r.vendorId || null,
+    vendor_name: r.vendorName,
+    supplier_code: r.supplierCode || "",
+    unit_cost: Number(r.unitCost) || 0,
+  }));
+  const { error } = await supabase.from("item_vendors").insert(payload);
+  if (error) throw error;
 }
 
 // -- ORDERS --

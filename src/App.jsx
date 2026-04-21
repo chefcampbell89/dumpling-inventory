@@ -1,9 +1,10 @@
-// APP VERSION: v124
+// APP VERSION: v125
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
   fetchBomLines, setBomForAssembly,
   fetchVendors, upsertVendor, deleteVendor as dbDeleteVendor,
+  fetchItemVendors, setItemVendors,
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
@@ -544,6 +545,13 @@ export default function App() {
   const [editItem, setEditItem] = useState(null);
   const [form, setForm] = useState({});
   const [bomForm, setBomForm] = useState([]);
+  // Alternate vendors for the item being edited. Each row: { vendorId, vendorName, supplierCode, unitCost }
+  const [vendorAltsForm, setVendorAltsForm] = useState([]);
+  // All alternate vendors across all items (mirrors item_vendors table)
+  const [itemVendors, setItemVendorsState] = useState([]);
+  // Multi-vendor confirmation modal state for PO generation
+  const [poVendorPickerOpen, setPoVendorPickerOpen] = useState(false);
+  const [poVendorChoices, setPoVendorChoices] = useState({}); // { itemId: chosenVendorName }
   const [toast, setToast] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [delConfirm, setDelConfirm] = useState(null);
@@ -676,6 +684,7 @@ export default function App() {
       fetchReceipts().then(r => setReceipts(r)).catch(() => {});
       fetchProductionRuns().then(r => setProdRuns(r)).catch(() => {});
       fetchInventoryLots().then(r => setLots(r)).catch(() => {});
+      fetchItemVendors().then(r => setItemVendorsState(r)).catch(() => {});
       // Load admin configs
       getLocations().then(r => { if (r && r.length > 0) setLocations(r); }).catch(() => {});
       getConfig("ord_statuses").then(r => { if (r) setCfgOrdStatuses(r); }).catch(() => {});
@@ -854,7 +863,17 @@ export default function App() {
 
   const viewItems = useMemo(() => {
     let d = (tab === "inventory" || tab === "items") ? [...parts, ...assemblies] : [];
-    if (search) { const s = search.toLowerCase(); d = d.filter((p) => p.name.toLowerCase().includes(s) || p.id.toLowerCase().includes(s) || (p.supplier || "").toLowerCase().includes(s)); }
+    if (search) {
+      const s = search.toLowerCase();
+      d = d.filter((p) => {
+        if (p.name.toLowerCase().includes(s)) return true;
+        if (p.id.toLowerCase().includes(s)) return true;
+        if ((p.supplier || "").toLowerCase().includes(s)) return true;
+        // Match alternate vendor names too
+        const alts = itemVendorsByItem.get(p.id) || [];
+        return alts.some(a => (a.vendorName || "").toLowerCase().includes(s));
+      });
+    }
     if (levelFilter.length > 0) d = d.filter((p) => levelFilter.includes(getLevel(p.id)));
     if (stockFilter === "Low") d = d.filter((p) => p.minStock > 0 && p.qty <= p.minStock);
     if (stockFilter === "OK") d = d.filter((p) => p.minStock === 0 || p.qty > p.minStock);
@@ -881,7 +900,7 @@ export default function App() {
       });
     }
     return d;
-  }, [tab, parts, assemblies, search, levelFilter, stockFilter, sortCol, sortDir, bomCost]);
+  }, [tab, parts, assemblies, search, levelFilter, stockFilter, sortCol, sortDir, bomCost, itemVendorsByItem]);
 
   const viewOrders = useMemo(() => {
     // Group orders by customer+date (orders from Google Forms share a group ID prefix)
@@ -1199,6 +1218,7 @@ export default function App() {
       const lvl = initLevel || 100;
       setForm({ id: `${lvl}-`, name: "", category: LEVELS[lvl]?.cat || "Raw Material", type: "Stock", costing: lvl >= 250 ? "FEFO - Batch" : "FIFO", location: "Dumpling Factory", supplier: "", supplierCode: "", avgCost: 0, unit: "", minStock: 0, qty: 0, notes: "", status: "Active", lotTracking: lvl >= 200, piecesPerUnit: 0, lotSource: false });
       setBomForm([]);
+      setVendorAltsForm([]);
     }
     else if (type === "order") {
       setForm({ customer: "", date: fmtDate(new Date()), status: "Pending", notes: "" });
@@ -1213,6 +1233,13 @@ export default function App() {
     setForm({ ...item });
     if (type === "order") setOrderLines([]);
     setBomForm(item.bom ? item.bom.map(b => ({...b})) : []);
+    // Load alternate vendors for this item (if editing an item)
+    if (type === "item") {
+      const alts = itemVendorsByItem.get(item.id) || [];
+      setVendorAltsForm(alts.map(a => ({ ...a })));
+    } else {
+      setVendorAltsForm([]);
+    }
     setModal(type);
   };
 
@@ -1274,6 +1301,20 @@ export default function App() {
         await upsertItem(obj);
         if (isAssembly) await setBomForAssembly(obj.id, cleanBom);
         else await setBomForAssembly(obj.id, []); // clear BOM if converting to raw
+        // Persist alternate vendors (raw materials only — non-raw items can't have suppliers)
+        if (!isAssembly && lvl === 100) {
+          const cleanAlts = (vendorAltsForm || []).filter(a => a.vendorName && a.vendorName.trim());
+          await setItemVendors(obj.id, cleanAlts);
+          // Update local state so UI reflects immediately
+          setItemVendorsState(prev => [
+            ...prev.filter(p => p.itemId !== obj.id),
+            ...cleanAlts.map(a => ({ id: undefined, itemId: obj.id, vendorId: a.vendorId || "", vendorName: a.vendorName, supplierCode: a.supplierCode || "", unitCost: Number(a.unitCost) || 0 })),
+          ]);
+        } else {
+          // Non-raw items shouldn't have alternates — clear any stragglers
+          await setItemVendors(obj.id, []);
+          setItemVendorsState(prev => prev.filter(p => p.itemId !== obj.id));
+        }
       } catch (e) { console.warn("DB save failed:", e.message); }
 
       // Determine where item lives (parts vs assemblies) and handle moves
@@ -1399,17 +1440,59 @@ export default function App() {
     } catch (e) { show("Wish failed: " + e.message, "error"); }
   };
 
+  // Open the multi-vendor picker if any needed lines belong to a multi-vendor item.
+  // Otherwise generate POs immediately using each item's primary supplier.
   const genPOs = async () => {
+    const allLines = mrp.byVendor.flatMap(vg => vg.lines).filter(l => l.shortfall > 0);
+    if (allLines.length === 0) { show("No shortfalls", "error"); return; }
+    const multiItems = allLines.filter(l => hasAlternates(l.id));
+    if (multiItems.length > 0) {
+      // Default each multi-vendor item to its primary supplier
+      const choices = {};
+      for (const l of multiItems) choices[l.id] = l.supplier || "";
+      setPoVendorChoices(choices);
+      setPoVendorPickerOpen(true);
+      return;
+    }
+    await generatePOsWithChoices({});
+  };
+
+  // Build POs grouping each line by either the user's vendor choice (for multi-vendor items)
+  // or the item's primary supplier. `choices` is { itemId: vendorName }.
+  const generatePOsWithChoices = async (choices) => {
+    const allLines = mrp.byVendor.flatMap(vg => vg.lines).filter(l => l.shortfall > 0);
+    if (allLines.length === 0) { show("No shortfalls", "error"); return; }
+
+    // Re-bucket lines by chosen vendor; fall back to line.supplier
+    const buckets = {}; // { vendorName: { lines: [], total } }
+    for (const l of allLines) {
+      const chosenVendor = choices[l.id] || l.supplier || "Unassigned";
+      // If a chosen vendor differs from the primary, swap in that vendor's per-line cost
+      let unitCost = l.avgCost;
+      let supplierCode = l.supplierCode || "";
+      if (chosenVendor !== l.supplier) {
+        const alt = (itemVendorsByItem.get(l.id) || []).find(a => a.vendorName === chosenVendor);
+        if (alt) { unitCost = alt.unitCost || l.avgCost; supplierCode = alt.supplierCode || ""; }
+      }
+      const total = Math.max(0, Math.ceil(l.shortfall * 1000) / 1000) * unitCost;
+      if (!buckets[chosenVendor]) buckets[chosenVendor] = { lines: [], total: 0 };
+      buckets[chosenVendor].lines.push({ partId: l.id, name: l.name, qty: l.shortfall, unit: l.unit, unitCost, supplierCode, total });
+      buckets[chosenVendor].total += total;
+    }
+
     const npos = [];
-    for (const vg of mrp.byVendor) {
-      const pid = `PO-${String(pos.length + npos.length + 1).padStart(3, "0")}`;
-      const vObj = vendors.find((v) => v.name === vg.vendor);
-      const po = { id: pid, vendor: vg.vendor, vendorId: vObj?.id || "", date: new Date().toISOString().slice(0, 10), status: "Draft", lines: vg.lines.map((l) => ({ partId: l.id, name: l.name, qty: l.shortfall, unit: l.unit, unitCost: l.avgCost, total: l.purchaseCost })), total: vg.total, paymentTerms: vObj?.paymentTerms || "", leadDays: vObj?.leadDays || 0, notes: "" };
+    let i = 0;
+    for (const vName of Object.keys(buckets)) {
+      const vObj = vendors.find((v) => v.name === vName);
+      const pid = `PO-${String(pos.length + npos.length + 1 + i).padStart(3, "0")}`;
+      const po = { id: pid, vendor: vName, vendorId: vObj?.id || "", date: new Date().toISOString().slice(0, 10), status: "Draft", lines: buckets[vName].lines, total: buckets[vName].total, paymentTerms: vObj?.paymentTerms || "", leadDays: vObj?.leadDays || 0, notes: "" };
       npos.push(po);
       try { await createPurchaseOrder(po); } catch (e) { console.warn("PO save failed:", e.message); }
+      i += 1;
     }
     if (npos.length) { setPOs((p) => [...p, ...npos]); show(`Generated ${npos.length} POs`); setTab("pos"); }
     else show("No shortfalls", "error");
+    setPoVendorPickerOpen(false);
   };
 
   const printPO = (po) => {
@@ -1472,6 +1555,32 @@ export default function App() {
   }, [lotCounter]);
 
   // Find the designated lot source item in the BOM tree
+  // Map of itemId -> array of alternate vendor rows
+  const itemVendorsByItem = useMemo(() => {
+    const m = new Map();
+    for (const v of itemVendors) {
+      if (!m.has(v.itemId)) m.set(v.itemId, []);
+      m.get(v.itemId).push(v);
+    }
+    return m;
+  }, [itemVendors]);
+
+  // True if the item has 1+ alternate vendor rows
+  const hasAlternates = useCallback((itemId) => (itemVendorsByItem.get(itemId)?.length || 0) > 0, [itemVendorsByItem]);
+
+  // All vendor options for an item: primary + alternates, deduped by name
+  const vendorOptionsForItem = useCallback((item) => {
+    const opts = [];
+    if (item?.supplier) opts.push({ vendorName: item.supplier, supplierCode: item.supplierCode || "", unitCost: item.avgCost || 0, primary: true });
+    const alts = itemVendorsByItem.get(item?.id) || [];
+    for (const a of alts) {
+      if (!opts.some(o => o.vendorName === a.vendorName)) {
+        opts.push({ vendorName: a.vendorName, supplierCode: a.supplierCode, unitCost: a.unitCost, primary: false });
+      }
+    }
+    return opts;
+  }, [itemVendorsByItem]);
+
   const lotSourceItem = useMemo(() => {
     if (!prodAssemblyItem) return null;
     if (prodAssemblyItem.lotSource) return null; // Lot source items get manual entry
@@ -3025,7 +3134,11 @@ export default function App() {
                           <td style={{ ...TD, fontSize: 12 }}>{p.avgCost > 0 ? `$${p.avgCost.toFixed(2)}` : ""}</td>
                           <td style={{ ...TD, fontSize: 12, color: "#f59e0b" }}>{bc !== null ? `$${bc.toFixed(2)}` : ""}</td>
                           <td style={{ ...TD, fontSize: 11, color: "#888", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.location}</td>
-                          <td style={{ ...TD, fontSize: 12 }}>{p.supplier}</td>
+                          <td style={{ ...TD, fontSize: 12 }}>
+                            {hasAlternates(p.id)
+                              ? <span style={{ color: "#a78bfa", fontWeight: 500 }} title={`${(itemVendorsByItem.get(p.id)?.length || 0) + 1} vendors — click row to view`}>Multiple</span>
+                              : p.supplier}
+                          </td>
                           <td style={TD}>
                             {isAdmin && <button onClick={() => openAdjust(p)} style={{ background: "none", border: "none", cursor: "pointer", color: "#f59e0b", padding: 3 }} title="Adjust Qty"><Edit2 size={14} /></button>}
                           </td>
@@ -3100,7 +3213,11 @@ export default function App() {
                           <td style={{ ...TD, fontSize: 12, color: "#999" }}>{p.unit}</td>
                           <td style={{ ...TD, fontSize: 12 }}>{p.avgCost > 0 ? `$${p.avgCost.toFixed(2)}` : ""}</td>
                           <td style={{ ...TD, fontSize: 12, color: "#f59e0b" }}>{bc !== null ? `$${bc.toFixed(2)}` : ""}</td>
-                          <td style={{ ...TD, fontSize: 12 }}>{p.supplier}</td>
+                          <td style={{ ...TD, fontSize: 12 }}>
+                            {hasAlternates(p.id)
+                              ? <span style={{ color: "#a78bfa", fontWeight: 500 }} title={`${(itemVendorsByItem.get(p.id)?.length || 0) + 1} vendors — click row to view`}>Multiple</span>
+                              : p.supplier}
+                          </td>
                           <td style={{ ...TD, fontSize: 11, color: "#888", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.location}</td>
                           <td style={TD}>
                             <div style={{ display: "flex", gap: 4 }}>
@@ -4056,6 +4173,54 @@ export default function App() {
         </div>
       </Modal>
 
+      {/* PO Vendor Picker — opens before generating POs whenever any needed
+          item has alternate vendors. User picks one vendor per multi-vendor
+          item; single-source items use their primary supplier silently. */}
+      <Modal open={poVendorPickerOpen} onClose={() => setPoVendorPickerOpen(false)} title="Choose vendor for multi-source items" wide>
+        <p style={{ fontSize: 12, color: "#888", margin: "0 0 12px" }}>The following items can be purchased from multiple vendors. Pick which vendor to use for this PO run.</p>
+        <div style={{ background: "#16161e", borderRadius: 8, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#1a1a2e", color: "#888", fontSize: 11, textTransform: "uppercase" }}>
+                <th style={{ padding: "8px 12px", textAlign: "left" }}>Item</th>
+                <th style={{ padding: "8px 12px", textAlign: "right" }}>Need</th>
+                <th style={{ padding: "8px 12px", textAlign: "left" }}>Vendor</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.keys(poVendorChoices).map(itemId => {
+                const item = allItems.find(i => i.id === itemId);
+                if (!item) return null;
+                const need = mrp.rows.find(r => r.id === itemId)?.shortfall || 0;
+                const opts = vendorOptionsForItem(item);
+                return (
+                  <tr key={itemId} style={{ borderTop: "1px solid #2a2a3a" }}>
+                    <td style={{ padding: "8px 12px", fontSize: 12 }}>
+                      <div style={{ color: "#e0e0e0", fontWeight: 500 }}>{item.name}</div>
+                      <div style={{ color: "#666", fontSize: 11, fontFamily: "monospace" }}>{item.id}</div>
+                    </td>
+                    <td style={{ padding: "8px 12px", fontSize: 12, color: "#fbbf24", textAlign: "right", whiteSpace: "nowrap" }}>{need} {item.unit}</td>
+                    <td style={{ padding: "8px 12px" }}>
+                      <select value={poVendorChoices[itemId]} onChange={e => setPoVendorChoices(c => ({ ...c, [itemId]: e.target.value }))} style={{ ...IS, width: "100%" }}>
+                        {opts.map(o => (
+                          <option key={o.vendorName} value={o.vendorName}>
+                            {o.vendorName}{o.primary ? " ★" : ""} — ${(o.unitCost || 0).toFixed(2)}/{item.unit}{o.supplierCode ? ` (code: ${o.supplierCode})` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={() => setPoVendorPickerOpen(false)} style={B2}>Cancel</button>
+          <button onClick={() => generatePOsWithChoices(poVendorChoices)} style={{ ...B1, background: "#f59e0b", color: "#000" }}><FileText size={14} /> Continue & Generate POs</button>
+        </div>
+      </Modal>
+
       {/* Edit Draft Modal — mirrors Complete modal so user can preview the
           consumption tree, drill into sub-assemblies, and pick a lot source
           (real inventory or planned draft). Only the lot # and metadata are
@@ -4836,6 +5001,45 @@ export default function App() {
               )}
               <div style={{ gridColumn: "1/-1" }}><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
             </div>
+
+            {/* Alternate Vendors — raw materials only. Primary vendor lives on the
+                Supplier field above; alternates here let the same raw material be
+                ordered from multiple sources. */}
+            {isRaw && (
+              <div style={{ borderTop: "1px solid #2a2a3a", paddingTop: 16, marginTop: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 15 }}>Alternate Vendors</h3>
+                    <p style={{ margin: "2px 0 0", fontSize: 11, color: "#888" }}>Other vendors who supply this same item. The Supplier field above is the primary.</p>
+                  </div>
+                  <button onClick={() => setVendorAltsForm(p => [...p, { vendorName: "", supplierCode: "", unitCost: 0 }])} style={B2}><Plus size={14} /> Add Alternate Vendor</button>
+                </div>
+                {vendorAltsForm.length === 0 && (
+                  <p style={{ color: "#555", fontSize: 12, margin: "8px 0" }}>No alternate vendors. This item is single-source.</p>
+                )}
+                {vendorAltsForm.map((alt, i) => (
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr auto auto", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                    <select value={alt.vendorName || ""} onChange={(e) => {
+                      const v = e.target.value;
+                      const vObj = vendors.find(x => x.name === v);
+                      setVendorAltsForm(p => p.map((x, j) => j === i ? { ...x, vendorName: v, vendorId: vObj?.id || "" } : x));
+                    }} style={IS}>
+                      <option value="">Select vendor...</option>
+                      {vendors.filter(v => v.name !== form.supplier).map((v) => <option key={v.id} value={v.name}>{v.name}</option>)}
+                    </select>
+                    <input value={alt.supplierCode || ""} placeholder="Supplier code" onChange={(e) => setVendorAltsForm(p => p.map((x, j) => j === i ? { ...x, supplierCode: e.target.value } : x))} style={IS} />
+                    <input type="number" step="0.01" value={alt.unitCost || 0} placeholder="Unit cost" onChange={(e) => setVendorAltsForm(p => p.map((x, j) => j === i ? { ...x, unitCost: Number(e.target.value) } : x))} style={IS} />
+                    <button onClick={() => {
+                      // Make Primary: swap this row with the primary vendor fields on the form
+                      const oldPrimary = { vendorName: form.supplier || "", supplierCode: form.supplierCode || "", unitCost: form.avgCost || 0 };
+                      setForm(f => ({ ...f, supplier: alt.vendorName, supplierCode: alt.supplierCode || "", avgCost: Number(alt.unitCost) || 0 }));
+                      setVendorAltsForm(p => p.map((x, j) => j === i ? (oldPrimary.vendorName ? oldPrimary : null) : x).filter(Boolean));
+                    }} title="Make Primary" style={{ background: "#f59e0b22", color: "#f59e0b", border: "1px solid #f59e0b44", borderRadius: 4, padding: "4px 8px", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}>★ Make Primary</button>
+                    <button onClick={() => setVendorAltsForm(p => p.filter((_, j) => j !== i))} title="Remove" style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 4 }}><Minus size={16} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* BOM section - only for 200+ */}
             {!isRaw && (
