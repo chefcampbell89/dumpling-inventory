@@ -78,18 +78,28 @@ async function syncLabor(supabase, token, lookbackWeeks = 4) {
   if (je) throw new Error(`toast_jobs read failed: ${je.message}`);
   const cat = new Map((jobsData || []).map(j => [j.job_guid, j.category || "excluded"]));
 
+  // Toast's timeEntries endpoint caps each call at 30 days. Chunk the lookback
+  // window into <=29-day slices and merge.
+  const MAX_DAYS_PER_REQUEST = 29;
   const now = new Date();
-  const start = new Date(now);
-  start.setUTCDate(start.getUTCDate() - lookbackWeeks * 7);
-  const startISO = start.toISOString();
-  const endISO = now.toISOString();
+  const totalStart = new Date(now);
+  totalStart.setUTCDate(totalStart.getUTCDate() - lookbackWeeks * 7);
 
-  const r = await fetch(
-    `${HOST}/labor/v1/timeEntries?startDate=${encodeURIComponent(startISO)}&endDate=${encodeURIComponent(endISO)}`,
-    { headers: toastHeaders(token) }
-  );
-  if (!r.ok) throw new Error(`Toast timeEntries failed: ${r.status} ${await r.text()}`);
-  const entries = await r.json();
+  const entries = [];
+  let chunkStart = new Date(totalStart);
+  while (chunkStart < now) {
+    const chunkEnd = new Date(chunkStart);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + MAX_DAYS_PER_REQUEST);
+    const sliceEnd = chunkEnd > now ? now : chunkEnd;
+    const r = await fetch(
+      `${HOST}/labor/v1/timeEntries?startDate=${encodeURIComponent(chunkStart.toISOString())}&endDate=${encodeURIComponent(sliceEnd.toISOString())}`,
+      { headers: toastHeaders(token) }
+    );
+    if (!r.ok) throw new Error(`Toast timeEntries failed: ${r.status} ${await r.text()}`);
+    const slice = await r.json();
+    if (Array.isArray(slice)) entries.push(...slice);
+    chunkStart = sliceEnd;
+  }
 
   // Bucket by week_start → { manufacturing, other }
   const buckets = new Map(); // weekStart → { mfg, other }
