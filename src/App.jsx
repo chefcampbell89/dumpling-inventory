@@ -1,4 +1,4 @@
-// APP VERSION: v127
+// APP VERSION: v128
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -14,7 +14,7 @@ import {
   fetchWishes, createWish, countUserWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles, deleteProfile as dbDeleteProfile,
   getInviteCode, setInviteCode, getLocations, getConfig, saveConfig, changePassword, supabase,
-  DEFAULT_BASE_INGREDIENTS, digitForProductLine, formatLotNumber, reserveLotNumbers,
+  DEFAULT_BASE_INGREDIENTS, digitForProductLine, formatLotNumber, reserveLotNumbers, dateToMMDDYY,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
@@ -1547,25 +1547,30 @@ export default function App() {
     return formatLotNumber(digit, lotCounter + 1, prodDate);
   }, [prodAssembly, lotCounter, baseIngredients, prodDate]);
 
-  // Keep the auto-suggested lot # in sync when prodDate changes.
-  // Only updates fields that still match our auto-suggestion pattern; user-typed
-  // values are left alone.
-  useEffect(() => {
+  // When the user changes the production date, update the date suffix on any
+  // auto-pattern lot # (preserving the counter portion). This is wired into
+  // each date input's onChange — NOT a useEffect — so opening a modal with a
+  // saved lot # doesn't accidentally overwrite it.
+  const handleProdDateChange = useCallback((newDate) => {
+    setProdDate(newDate);
     if (!prodAssembly) return;
     const m = prodAssembly.match(/^\d+-(\w+)/);
     const pl = m ? m[1] : "";
     const digit = digitForProductLine(pl, baseIngredients);
-    const expected = formatLotNumber(digit, lotCounter + 1, prodDate);
-    // Auto-pattern: starts with the right digit + 4 numeric chars, optionally followed by -MMDDYY
     const autoRe = new RegExp(`^${digit}\\d{4}(-\\d{6})?$`);
-    if (prodLotNumber && autoRe.test(prodLotNumber) && prodLotNumber !== expected) {
-      setProdLotNumber(expected);
+    const suffix = dateToMMDDYY(newDate);
+    const replaceSuffix = (val) => {
+      const dashIdx = val.indexOf("-");
+      const prefix = dashIdx > 0 ? val.slice(0, dashIdx) : val;
+      return suffix ? `${prefix}-${suffix}` : prefix;
+    };
+    if (prodLotNumber && autoRe.test(prodLotNumber)) {
+      setProdLotNumber(replaceSuffix(prodLotNumber));
     }
-    if (freshLotNumber && autoRe.test(freshLotNumber) && freshLotNumber !== expected) {
-      setFreshLotNumber(expected);
+    if (freshLotNumber && autoRe.test(freshLotNumber)) {
+      setFreshLotNumber(replaceSuffix(freshLotNumber));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prodDate, prodAssembly, lotCounter, baseIngredients]);
+  }, [prodAssembly, baseIngredients, prodLotNumber, freshLotNumber]);
 
   // After a fresh lot is created, ensure the global counter is at least as high
   // as the numeric suffix used (so the next suggestion doesn't collide).
@@ -3756,7 +3761,7 @@ export default function App() {
           </div>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Production Date</label>
-            <input type="date" value={prodDate} onChange={e => setProdDate(e.target.value)} style={IS} />
+            <input type="date" value={prodDate} onChange={e => handleProdDateChange(e.target.value)} style={IS} />
           </div>
         </div>
 
@@ -4082,7 +4087,7 @@ export default function App() {
           </div>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Production Date</label>
-            <input type="date" value={prodDate} onChange={e => setProdDate(e.target.value)} style={IS} />
+            <input type="date" value={prodDate} onChange={e => handleProdDateChange(e.target.value)} style={IS} />
           </div>
         </div>
         {prodAssemblyItem && (
@@ -4255,7 +4260,7 @@ export default function App() {
           </div>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Planned Date</label>
-            <input type="date" value={prodDate} onChange={e => setProdDate(e.target.value)} style={IS} />
+            <input type="date" value={prodDate} onChange={e => handleProdDateChange(e.target.value)} style={IS} />
           </div>
         </div>
 
