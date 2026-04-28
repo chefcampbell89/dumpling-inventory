@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v107
+// SUPABASE VERSION: v108
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -116,6 +116,30 @@ export async function setItemVendors(itemId, rows) {
     unit_cost: Number(r.unitCost) || 0,
   }));
   const { error } = await supabase.from("item_vendors").insert(payload);
+  if (error) throw error;
+}
+
+// -- LABOR HOURS (per-week productivity input) --
+
+export async function fetchLaborHours() {
+  const { data, error } = await supabase.from("labor_hours").select("*").order("week_start", { ascending: false });
+  if (error) throw error;
+  return data.map(r => ({
+    weekStart: r.week_start,
+    manufacturingHours: Number(r.manufacturing_hours) || 0,
+    allInHours: Number(r.all_in_hours) || 0,
+    notes: r.notes || "",
+  }));
+}
+
+export async function upsertLaborHours({ weekStart, manufacturingHours, allInHours, notes }) {
+  const { error } = await supabase.from("labor_hours").upsert({
+    week_start: weekStart,
+    manufacturing_hours: Number(manufacturingHours) || 0,
+    all_in_hours: Number(allInHours) || 0,
+    notes: notes || "",
+    updated_at: new Date().toISOString(),
+  });
   if (error) throw error;
 }
 

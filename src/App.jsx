@@ -1,10 +1,11 @@
-// APP VERSION: v128
+// APP VERSION: v129
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
   fetchBomLines, setBomForAssembly,
   fetchVendors, upsertVendor, deleteVendor as dbDeleteVendor,
   fetchItemVendors, setItemVendors,
+  fetchLaborHours, upsertLaborHours,
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
@@ -22,8 +23,10 @@ import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
   ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
-  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles, TrendingUp, ChevronLeft, Calendar, LayoutDashboard,
+  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles, TrendingUp, TrendingDown, ChevronLeft, Calendar, LayoutDashboard, BarChart3, Activity, Minus as MinusIcon,
 } from "lucide-react";
+
+import { LineChart, Line, ResponsiveContainer, Tooltip as ChartTooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend } from "recharts";
 
 // ============================================================
 // CONSTANTS
@@ -555,6 +558,9 @@ export default function App() {
   // Multi-vendor confirmation modal state for PO generation
   const [poVendorPickerOpen, setPoVendorPickerOpen] = useState(false);
   const [poVendorChoices, setPoVendorChoices] = useState({}); // { itemId: chosenVendorName }
+
+  // Labor hours per week (admin-entered) for the Performance tab
+  const [laborHours, setLaborHours] = useState([]); // [{ weekStart, manufacturingHours, allInHours, notes }]
   const [toast, setToast] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [delConfirm, setDelConfirm] = useState(null);
@@ -688,6 +694,7 @@ export default function App() {
       fetchProductionRuns().then(r => setProdRuns(r)).catch(() => {});
       fetchInventoryLots().then(r => setLots(r)).catch(() => {});
       fetchItemVendors().then(r => setItemVendorsState(r)).catch(() => {});
+      fetchLaborHours().then(r => setLaborHours(r)).catch(() => {});
       // Load admin configs
       getLocations().then(r => { if (r && r.length > 0) setLocations(r); }).catch(() => {});
       getConfig("ord_statuses").then(r => { if (r) setCfgOrdStatuses(r); }).catch(() => {});
@@ -2694,12 +2701,13 @@ export default function App() {
         {tabBtn("receiving", "Receiving", <PackageCheck size={14} />)}
         {tabBtn("production", "Production", <Hammer size={14} />)}
         {tabBtn("planning", "Planning", <TrendingUp size={14} />)}
+        {tabBtn("performance", "Performance", <BarChart3 size={14} />)}
         {tabBtn("log", "Transaction Log", <ScrollText size={14} />)}
         {isAdmin && tabBtn("admin", "Admin Config", <Settings size={14} />)}
       </div>
 
-      {/* Filters (hidden on dashboard) */}
-      {tab !== "dashboard" && <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+      {/* Filters (hidden on dashboard / performance) */}
+      {tab !== "dashboard" && tab !== "performance" && <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
         <div style={{ position: "relative", flex: "1 1 200px", minWidth: 180 }}>
           <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#555" }} />
           <input placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...IS, paddingLeft: 32 }} />
@@ -4328,6 +4336,259 @@ export default function App() {
           </button>
         </div>
       </Modal>
+
+      {/* ================== PERFORMANCE ================== */}
+      {tab === "performance" && (() => {
+        // Helpers (use existing fmtDate / parseDate / addDays / getMonday)
+        const today = fmtDate(new Date());
+        const currentMonday = getMonday(today);
+        // Build a rolling 13-week window (oldest → newest)
+        const weeks = [];
+        for (let i = 12; i >= 0; i -= 1) {
+          const ws = addDays(currentMonday, -7 * i);
+          const we = addDays(ws, 6);
+          const m = parseDate(ws);
+          weeks.push({
+            weekStart: ws,
+            weekEnd: we,
+            label: `${m.toLocaleString("en-US", { month: "short" })} ${m.getDate()}`,
+          });
+        }
+        const weekIndexFor = (dateStr) => {
+          if (!dateStr) return -1;
+          const d = parseDate(dateStr);
+          for (let i = 0; i < weeks.length; i += 1) {
+            const s = parseDate(weeks[i].weekStart);
+            const e = parseDate(weeks[i].weekEnd);
+            if (d >= s && d <= e) return i;
+          }
+          return -1;
+        };
+
+        // ---------- Sales trends (Fulfilled orders by flavor) ----------
+        const flavorOf = (itemId) => { const m = (itemId || "").match(/^\d+-(\w+)/); return m ? m[1] : "—"; };
+        const flavorsSeen = new Set();
+        const flavorWeekTotals = {}; // flavor -> [13 weekly dumpling totals]
+        for (const o of orders) {
+          if ((o.status || "").toLowerCase() !== "fulfilled") continue;
+          const wi = weekIndexFor(o.shipDate || o.date);
+          if (wi < 0) continue;
+          const item = allItems.find(i => i.id === o.item);
+          if (!item) continue;
+          const ppu = item.piecesPerUnit || 0;
+          if (ppu <= 0) continue; // skip non-dumpling line items
+          const fl = flavorOf(item.id);
+          flavorsSeen.add(fl);
+          if (!flavorWeekTotals[fl]) flavorWeekTotals[fl] = Array(weeks.length).fill(0);
+          flavorWeekTotals[fl][wi] += (Number(o.qty) || 0) * ppu;
+        }
+        const flavors = [...flavorsSeen].sort();
+        const flavorTotals = flavors.map(fl => {
+          const series = flavorWeekTotals[fl] || Array(weeks.length).fill(0);
+          const recent4 = series.slice(-4).reduce((s, v) => s + v, 0);
+          const prior4 = series.slice(-8, -4).reduce((s, v) => s + v, 0);
+          const total13 = series.reduce((s, v) => s + v, 0);
+          const pct = prior4 > 0 ? Math.round(((recent4 - prior4) / prior4) * 100) : (recent4 > 0 ? 100 : 0);
+          return { flavor: fl, series, total13, recent4, prior4, pct };
+        });
+
+        // ---------- Productivity (300-Bin dumplings produced per labor hour) ----------
+        const binProductionByWeek = Array(weeks.length).fill(0);
+        for (const r of prodRuns) {
+          if (r.status !== "Complete") continue;
+          if (getLevel(r.assemblyId) !== 300) continue;
+          const wi = weekIndexFor(r.date || r.plannedDate);
+          if (wi < 0) continue;
+          const item = allItems.find(i => i.id === r.assemblyId);
+          if (!item) continue;
+          const ppu = item.piecesPerUnit || 0;
+          if (ppu <= 0) continue;
+          binProductionByWeek[wi] += (Number(r.qtyProduced) || 0) * ppu;
+        }
+        const laborByWeek = {}; // weekStart -> { mfg, allIn }
+        for (const lh of laborHours) {
+          laborByWeek[lh.weekStart] = { mfg: lh.manufacturingHours, allIn: lh.allInHours };
+        }
+        const productivityRows = weeks.map((w, i) => {
+          const lh = laborByWeek[w.weekStart] || { mfg: 0, allIn: 0 };
+          const dumplings = binProductionByWeek[i];
+          return {
+            ...w,
+            dumplings,
+            mfgHours: lh.mfg || 0,
+            allInHours: lh.allIn || 0,
+            mfgRate: lh.mfg > 0 ? Math.round(dumplings / lh.mfg) : null,
+            allInRate: lh.allIn > 0 ? Math.round(dumplings / lh.allIn) : null,
+          };
+        });
+        const currentWeekRow = productivityRows[productivityRows.length - 1];
+        const totalDumplings13 = binProductionByWeek.reduce((s, v) => s + v, 0);
+        const flavorChartData = weeks.map((w, i) => {
+          const row = { week: w.label };
+          for (const fl of flavors) row[fl] = (flavorWeekTotals[fl] || [])[i] || 0;
+          return row;
+        });
+        const flavorPalette = ["#fbbf24", "#a78bfa", "#22c55e", "#ef4444", "#06b6d4", "#f97316", "#ec4899", "#84cc16"];
+
+        return (
+          <div>
+            {/* Header / KPI tiles */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 18 }}>
+              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "16px 18px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#888", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
+                  <Activity size={14} /> Dumplings/hr — Manufacturing
+                </div>
+                <div style={{ fontSize: 28, fontWeight: 700, color: currentWeekRow.mfgRate ? "#22c55e" : "#555" }}>
+                  {currentWeekRow.mfgRate ? currentWeekRow.mfgRate.toLocaleString() : "—"}
+                </div>
+                <div style={{ fontSize: 11, color: "#666", marginTop: 4 }} title="Manufacturing = people making fill, batches, and folding dumplings">
+                  current week • {currentWeekRow.dumplings.toLocaleString()} dumplings ÷ {currentWeekRow.mfgHours || 0} hrs
+                </div>
+              </div>
+              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "16px 18px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#888", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
+                  <Activity size={14} /> Dumplings/hr — All-In
+                </div>
+                <div style={{ fontSize: 28, fontWeight: 700, color: currentWeekRow.allInRate ? "#a78bfa" : "#555" }}>
+                  {currentWeekRow.allInRate ? currentWeekRow.allInRate.toLocaleString() : "—"}
+                </div>
+                <div style={{ fontSize: 11, color: "#666", marginTop: 4 }} title="All-in = manufacturing PLUS packing retail packs, deliveries, etc.">
+                  current week • {currentWeekRow.dumplings.toLocaleString()} dumplings ÷ {currentWeekRow.allInHours || 0} hrs
+                </div>
+              </div>
+              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "16px 18px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#888", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
+                  <Sparkles size={14} /> 13-Week Production
+                </div>
+                <div style={{ fontSize: 28, fontWeight: 700, color: "#fbbf24" }}>
+                  {totalDumplings13.toLocaleString()}
+                </div>
+                <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>total dumplings produced (300-bin)</div>
+              </div>
+            </div>
+
+            {/* Sales trends */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "16px 18px", marginBottom: 18 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <h3 style={{ margin: 0, fontSize: 15 }}>Sales Trends by Flavor</h3>
+                <span style={{ fontSize: 11, color: "#666" }}>Fulfilled orders, last 13 weeks</span>
+              </div>
+              {flavors.length === 0 ? (
+                <p style={{ color: "#555", fontSize: 13, margin: "20px 0", textAlign: "center" }}>No fulfilled orders in the last 13 weeks.</p>
+              ) : (
+                <>
+                  <div style={{ height: 220, marginBottom: 14 }}>
+                    <ResponsiveContainer>
+                      <LineChart data={flavorChartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                        <CartesianGrid stroke="#2a2a3a" strokeDasharray="3 3" />
+                        <XAxis dataKey="week" stroke="#666" fontSize={11} />
+                        <YAxis stroke="#666" fontSize={11} />
+                        <ChartTooltip contentStyle={{ background: "#16161e", border: "1px solid #2a2a3a", borderRadius: 6, fontSize: 12 }} />
+                        <Legend wrapperStyle={{ fontSize: 11 }} />
+                        {flavors.map((fl, idx) => (
+                          <Line key={fl} type="monotone" dataKey={fl} stroke={flavorPalette[idx % flavorPalette.length]} strokeWidth={2} dot={false} />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: "#16161e", color: "#888", fontSize: 10, textTransform: "uppercase" }}>
+                          <th style={{ padding: "8px 10px", textAlign: "left" }}>Flavor</th>
+                          <th style={{ padding: "8px 10px", textAlign: "right" }}>Last 4 wks</th>
+                          <th style={{ padding: "8px 10px", textAlign: "right" }}>Prior 4 wks</th>
+                          <th style={{ padding: "8px 10px", textAlign: "right" }}>Trend</th>
+                          <th style={{ padding: "8px 10px", textAlign: "right" }}>13-Wk Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {flavorTotals.map((fr, idx) => {
+                          const TrendIcon = fr.pct > 0 ? TrendingUp : (fr.pct < 0 ? TrendingDown : MinusIcon);
+                          const trendColor = fr.pct > 5 ? "#22c55e" : (fr.pct < -5 ? "#ef4444" : "#888");
+                          return (
+                            <tr key={fr.flavor} style={{ borderTop: "1px solid #2a2a3a" }}>
+                              <td style={{ padding: "10px", fontWeight: 600, color: flavorPalette[idx % flavorPalette.length] }}>{fr.flavor}</td>
+                              <td style={{ padding: "10px", textAlign: "right", color: "#e0e0e0" }}>{fr.recent4.toLocaleString()}</td>
+                              <td style={{ padding: "10px", textAlign: "right", color: "#888" }}>{fr.prior4.toLocaleString()}</td>
+                              <td style={{ padding: "10px", textAlign: "right", color: trendColor, whiteSpace: "nowrap" }}>
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                  <TrendIcon size={12} /> {fr.pct > 0 ? "+" : ""}{fr.pct}%
+                                </span>
+                              </td>
+                              <td style={{ padding: "10px", textAlign: "right", color: "#e0e0e0", fontWeight: 500 }}>{fr.total13.toLocaleString()}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Productivity history */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "16px 18px" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+                <h3 style={{ margin: 0, fontSize: 15 }}>Productivity by Week</h3>
+                <span style={{ fontSize: 11, color: "#666" }}>Dumplings produced (300-bin) ÷ labor hours</span>
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: "#16161e", color: "#888", fontSize: 10, textTransform: "uppercase" }}>
+                      <th style={{ padding: "8px 10px", textAlign: "left" }}>Week</th>
+                      <th style={{ padding: "8px 10px", textAlign: "right" }}>Dumplings Made</th>
+                      <th style={{ padding: "8px 10px", textAlign: "right" }} title="Manufacturing hours: people making fill, batches, folding">Mfg Hrs</th>
+                      <th style={{ padding: "8px 10px", textAlign: "right" }} title="All-in hours: manufacturing + packing, deliveries, etc.">All-In Hrs</th>
+                      <th style={{ padding: "8px 10px", textAlign: "right", color: "#22c55e" }}>D/Hr Mfg</th>
+                      <th style={{ padding: "8px 10px", textAlign: "right", color: "#a78bfa" }}>D/Hr All-In</th>
+                      {isAdmin && <th style={{ padding: "8px 10px", textAlign: "center" }}>Edit</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {productivityRows.slice().reverse().map((row) => (
+                      <tr key={row.weekStart} style={{ borderTop: "1px solid #2a2a3a" }}>
+                        <td style={{ padding: "10px", color: "#e0e0e0" }}>{row.label} <span style={{ color: "#555", fontSize: 10 }}>({row.weekStart})</span></td>
+                        <td style={{ padding: "10px", textAlign: "right", color: row.dumplings > 0 ? "#fbbf24" : "#555", fontWeight: 500 }}>{row.dumplings.toLocaleString()}</td>
+                        <td style={{ padding: "10px", textAlign: "right", color: row.mfgHours > 0 ? "#e0e0e0" : "#555" }}>{row.mfgHours || "—"}</td>
+                        <td style={{ padding: "10px", textAlign: "right", color: row.allInHours > 0 ? "#e0e0e0" : "#555" }}>{row.allInHours || "—"}</td>
+                        <td style={{ padding: "10px", textAlign: "right", color: row.mfgRate ? "#22c55e" : "#555", fontWeight: 600 }}>{row.mfgRate ? row.mfgRate.toLocaleString() : "—"}</td>
+                        <td style={{ padding: "10px", textAlign: "right", color: row.allInRate ? "#a78bfa" : "#555", fontWeight: 600 }}>{row.allInRate ? row.allInRate.toLocaleString() : "—"}</td>
+                        {isAdmin && (
+                          <td style={{ padding: "10px", textAlign: "center" }}>
+                            <button onClick={async () => {
+                              const mfg = window.prompt(`Manufacturing hours for week of ${row.label} (${row.weekStart}):`, String(row.mfgHours || 0));
+                              if (mfg === null) return;
+                              const allIn = window.prompt(`All-in hours for week of ${row.label} (${row.weekStart}):`, String(row.allInHours || 0));
+                              if (allIn === null) return;
+                              const mfgN = Number(mfg) || 0;
+                              const allInN = Number(allIn) || 0;
+                              try {
+                                await upsertLaborHours({ weekStart: row.weekStart, manufacturingHours: mfgN, allInHours: allInN, notes: "" });
+                                setLaborHours(prev => {
+                                  const filtered = prev.filter(p => p.weekStart !== row.weekStart);
+                                  return [...filtered, { weekStart: row.weekStart, manufacturingHours: mfgN, allInHours: allInN, notes: "" }];
+                                });
+                                show("Hours saved");
+                              } catch (e) { show(e.message, "error"); }
+                            }} style={{ background: "none", border: "none", cursor: "pointer", color: "#6366f1", padding: 3 }} title="Edit hours"><Edit2 size={14} /></button>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {!isAdmin && (
+                <div style={{ fontSize: 11, color: "#666", marginTop: 10, paddingTop: 10, borderTop: "1px solid #2a2a3a" }}>
+                  Labor hours are entered by admins.
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ================== TRANSACTION LOG ================== */}
       {tab === "log" && (
