@@ -1,4 +1,4 @@
-// APP VERSION: v126
+// APP VERSION: v127
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -52,12 +52,15 @@ function getLevel(id) {
 
 function findLotSourceInBom(assemblyId, allItems) {
   const visited = new Set();
+  // Stop at the FIRST lot-tracked (or lot-source) item we find while walking
+  // the BOM. Lot numbers inherit up the chain, so a 300 should look up its
+  // immediate 250 child — NOT recurse all the way past it to a deeper 200.
   const walk = (itemId) => {
     if (visited.has(itemId)) return null;
     visited.add(itemId);
     const item = allItems.find(i => i.id === itemId);
     if (!item) return null;
-    if (item.lotSource) return item;
+    if (item.lotTracking || item.lotSource) return item;
     if (!item.bom) return null;
     for (const line of item.bom) {
       const found = walk(line.partId);
