@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v108
+// SUPABASE VERSION: v109
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -130,6 +130,25 @@ export async function fetchLaborHours() {
     allInHours: Number(r.all_in_hours) || 0,
     notes: r.notes || "",
   }));
+}
+
+// Toast job → category mapping (managed via Admin Config UI)
+export async function fetchToastJobs() {
+  const { data, error } = await supabase.from("toast_jobs").select("*").order("job_title");
+  if (error) throw error;
+  return data.map(r => ({
+    jobGuid: r.job_guid,
+    jobTitle: r.job_title,
+    category: r.category || "excluded",
+    lastSeen: r.last_seen,
+  }));
+}
+
+export async function setToastJobCategory(jobGuid, category) {
+  const { error } = await supabase.from("toast_jobs")
+    .update({ category, updated_at: new Date().toISOString() })
+    .eq("job_guid", jobGuid);
+  if (error) throw error;
 }
 
 export async function upsertLaborHours({ weekStart, manufacturingHours, allInHours, notes }) {

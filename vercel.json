@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/toast-sync?mode=full&weeks=4",
+      "schedule": "0 8 * * 1"
+    }
+  ]
+}

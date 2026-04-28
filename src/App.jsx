@@ -1,4 +1,4 @@
-// APP VERSION: v129
+// APP VERSION: v130
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -6,6 +6,7 @@ import {
   fetchVendors, upsertVendor, deleteVendor as dbDeleteVendor,
   fetchItemVendors, setItemVendors,
   fetchLaborHours, upsertLaborHours,
+  fetchToastJobs, setToastJobCategory,
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
@@ -561,6 +562,9 @@ export default function App() {
 
   // Labor hours per week (admin-entered) for the Performance tab
   const [laborHours, setLaborHours] = useState([]); // [{ weekStart, manufacturingHours, allInHours, notes }]
+  // Toast job → category mapping for auto-pulled labor
+  const [toastJobs, setToastJobs] = useState([]); // [{ jobGuid, jobTitle, category }]
+  const [toastSyncing, setToastSyncing] = useState(false);
   const [toast, setToast] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [delConfirm, setDelConfirm] = useState(null);
@@ -695,6 +699,7 @@ export default function App() {
       fetchInventoryLots().then(r => setLots(r)).catch(() => {});
       fetchItemVendors().then(r => setItemVendorsState(r)).catch(() => {});
       fetchLaborHours().then(r => setLaborHours(r)).catch(() => {});
+      fetchToastJobs().then(r => setToastJobs(r)).catch(() => {});
       // Load admin configs
       getLocations().then(r => { if (r && r.length > 0) setLocations(r); }).catch(() => {});
       getConfig("ord_statuses").then(r => { if (r) setCfgOrdStatuses(r); }).catch(() => {});
@@ -4531,7 +4536,28 @@ export default function App() {
             <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "16px 18px" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
                 <h3 style={{ margin: 0, fontSize: 15 }}>Productivity by Week</h3>
-                <span style={{ fontSize: 11, color: "#666" }}>Dumplings produced (300-bin) ÷ labor hours</span>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <span style={{ fontSize: 11, color: "#666" }}>Dumplings produced (300-bin) ÷ labor hours</span>
+                  {isAdmin && (
+                    <button onClick={async () => {
+                      setToastSyncing(true);
+                      try {
+                        const resp = await fetch("/api/toast-sync?mode=full&weeks=13");
+                        const j = await resp.json();
+                        if (!resp.ok || !j.ok) throw new Error(j.error || "sync failed");
+                        const fresh = await fetchLaborHours();
+                        setLaborHours(fresh);
+                        const freshJobs = await fetchToastJobs();
+                        setToastJobs(freshJobs);
+                        show(`Synced from Toast — ${j.weeksUpdated || 0} weeks updated`);
+                      } catch (e) { show(e.message, "error"); }
+                      setToastSyncing(false);
+                    }} disabled={toastSyncing} style={{ ...B2, fontSize: 11, padding: "5px 10px" }}>
+                      {toastSyncing ? <Loader2 size={12} className="spin" /> : <Activity size={12} />}
+                      {toastSyncing ? " Syncing..." : " Sync from Toast"}
+                    </button>
+                  )}
+                </div>
               </div>
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -4657,6 +4683,7 @@ export default function App() {
           { id: "costing", label: "Costing Methods", icon: <DollarSign size={14} /> },
           { id: "planning", label: "Planning", icon: <TrendingUp size={14} /> },
           { id: "lotNumbering", label: "Lot Numbering", icon: <KeyRound size={14} /> },
+          { id: "toastLabor", label: "Toast Labor Mapping", icon: <Activity size={14} /> },
           { id: "wishes", label: "Wishes", icon: <Sparkles size={14} /> },
         ];
 
@@ -5008,6 +5035,71 @@ export default function App() {
                       Product lines not mapped to any digit will default to digit <strong>8 (MEI MEI SPECIAL/TEST)</strong>.
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* Toast Labor Mapping */}
+              {cfgSection === "toastLabor" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Toast Labor Mapping</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>
+                    Map each Toast job title to a labor bucket. Hours are auto-pulled every Monday at 8am UTC.
+                    <br /><strong style={{ color: "#22c55e" }}>Manufacturing</strong> = makers (fill, batches, folding) — counts toward both KPIs.
+                    <strong style={{ color: "#a78bfa", marginLeft: 8 }}>Other</strong> = packing, deliveries, FOH — counts only toward All-In.
+                    <strong style={{ color: "#888", marginLeft: 8 }}>Excluded</strong> = doesn't count toward either.
+                  </p>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                    <button onClick={async () => {
+                      setToastSyncing(true);
+                      try {
+                        const resp = await fetch("/api/toast-sync?mode=refresh-jobs");
+                        const j = await resp.json();
+                        if (!resp.ok || !j.ok) throw new Error(j.error || "sync failed");
+                        const fresh = await fetchToastJobs();
+                        setToastJobs(fresh);
+                        show(`Refreshed ${j.jobsUpserted} jobs from Toast`);
+                      } catch (e) { show(e.message, "error"); }
+                      setToastSyncing(false);
+                    }} disabled={toastSyncing} style={B1}>
+                      {toastSyncing ? <Loader2 size={14} className="spin" /> : <Activity size={14} />}
+                      {toastSyncing ? " Syncing..." : " Refresh Jobs from Toast"}
+                    </button>
+                  </div>
+                  {toastJobs.length === 0 ? (
+                    <p style={{ color: "#555", fontSize: 13, padding: 20, textAlign: "center", background: "#16161e", borderRadius: 8 }}>
+                      No Toast jobs loaded yet. Click "Refresh Jobs from Toast" to pull them.
+                    </p>
+                  ) : (
+                    <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ background: "#16161e", color: "#888", fontSize: 11, textTransform: "uppercase" }}>
+                            <th style={{ padding: "10px 12px", textAlign: "left" }}>Toast Job Title</th>
+                            <th style={{ padding: "10px 12px", textAlign: "left", width: 200 }}>Labor Bucket</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {toastJobs.map(j => (
+                            <tr key={j.jobGuid} style={{ borderTop: "1px solid #2a2a3a" }}>
+                              <td style={{ padding: "10px 12px", color: "#e0e0e0" }}>{j.jobTitle}</td>
+                              <td style={{ padding: "10px 12px" }}>
+                                <select value={j.category} onChange={async (e) => {
+                                  const newCat = e.target.value;
+                                  setToastJobs(prev => prev.map(x => x.jobGuid === j.jobGuid ? { ...x, category: newCat } : x));
+                                  try { await setToastJobCategory(j.jobGuid, newCat); }
+                                  catch (err) { show(err.message, "error"); }
+                                }} style={{ ...IS, width: "100%", color: j.category === "manufacturing" ? "#22c55e" : (j.category === "other" ? "#a78bfa" : "#888") }}>
+                                  <option value="manufacturing" style={{ color: "#22c55e" }}>Manufacturing</option>
+                                  <option value="other" style={{ color: "#a78bfa" }}>Other</option>
+                                  <option value="excluded" style={{ color: "#888" }}>Excluded</option>
+                                </select>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               )}
 
