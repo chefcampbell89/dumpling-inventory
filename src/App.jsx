@@ -1,4 +1,4 @@
-// APP VERSION: v132
+// APP VERSION: v133
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -4765,7 +4765,7 @@ export default function App() {
             {/* Sidebar */}
             <div style={{ minWidth: 180, background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", flexShrink: 0 }}>
               {cfgSections.map(s => (
-                <button key={s.id} onClick={() => { setCfgSection(s.id); setCfgNewItem(""); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "12px 16px", background: cfgSection === s.id ? "#6366f122" : "transparent", border: "none", borderLeft: cfgSection === s.id ? "3px solid #6366f1" : "3px solid transparent", cursor: "pointer", color: cfgSection === s.id ? "#e0e0e0" : "#888", fontSize: 13, textAlign: "left" }}>
+                <button key={s.id} onClick={() => setCfgSection(s.id)} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "12px 16px", background: cfgSection === s.id ? "#6366f122" : "transparent", border: "none", borderLeft: cfgSection === s.id ? "3px solid #6366f1" : "3px solid transparent", cursor: "pointer", color: cfgSection === s.id ? "#e0e0e0" : "#888", fontSize: 13, textAlign: "left" }}>
                   {s.icon} {s.label}
                 </button>
               ))}

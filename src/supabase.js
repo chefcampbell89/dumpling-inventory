@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v110
+// SUPABASE VERSION: v111
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -728,30 +728,37 @@ export async function countUserWishes(userId) {
 }
 
 // Admin marks a wish as granted, with an optional note describing what was built.
-// Pass note="" to leave it blank. Pass grantedAt=null to ungrant.
+// Uses .select() so we can verify the row actually updated (Supabase doesn't
+// throw if 0 rows match the .eq filter).
 export async function grantWish(wishId, note = "") {
-  const { error } = await supabase.from("wishes").update({
+  const { data, error } = await supabase.from("wishes").update({
     granted_at: new Date().toISOString(),
     granted_note: note || "",
     acknowledged_at: null, // re-trigger the celebration if previously acknowledged
-  }).eq("id", wishId);
+  }).eq("id", wishId).select();
   if (error) throw error;
+  if (!data || data.length === 0) throw new Error(`Could not update wish ${wishId} — row not found`);
+  return data[0];
 }
 
 export async function ungrantWish(wishId) {
-  const { error } = await supabase.from("wishes").update({
+  const { data, error } = await supabase.from("wishes").update({
     granted_at: null, granted_note: "", acknowledged_at: null,
-  }).eq("id", wishId);
+  }).eq("id", wishId).select();
   if (error) throw error;
+  if (!data || data.length === 0) throw new Error(`Could not update wish ${wishId} — row not found`);
+  return data[0];
 }
 
 // User has seen the celebration modal — mark the wish acknowledged so it
 // won't show again.
 export async function acknowledgeWish(wishId) {
-  const { error } = await supabase.from("wishes").update({
+  const { data, error } = await supabase.from("wishes").update({
     acknowledged_at: new Date().toISOString(),
-  }).eq("id", wishId);
+  }).eq("id", wishId).select();
   if (error) throw error;
+  if (!data || data.length === 0) throw new Error(`Could not acknowledge wish ${wishId} — row not found`);
+  return data[0];
 }
 
 // Get the current user's wishes that have been granted but not yet acknowledged
