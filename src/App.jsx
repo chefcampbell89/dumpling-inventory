@@ -1,4 +1,4 @@
-// APP VERSION: v130
+// APP VERSION: v131
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -416,7 +416,15 @@ function MultiSelectDropdown({ options, selected, onChange, placeholder }) {
 
 const IS_AC = { width: "100%", padding: "5px 8px", fontSize: 12, background: "#16161e", color: "#e0e0e0", border: "1px solid #333", borderRadius: 6, outline: "none", boxSizing: "border-box" };
 
-function SkuAutocomplete({ value, onChange, skuOpts }) {
+// Searchable SKU picker. Replaces native <select> for any item dropdown so users
+// can type a few letters and pick from a filtered list instead of scrolling.
+//
+// Props:
+//   value     — currently selected item id (string)
+//   onChange  — called with the picked item id
+//   skuOpts   — array of items to choose from. Each item must have { id, name }.
+//   placeholder, style, inputStyle, disabled — optional cosmetics
+function SkuAutocomplete({ value, onChange, skuOpts, placeholder = "Type to search SKU…", style, inputStyle, disabled }) {
   const [inputVal, setInputVal] = useState("");
   const [open, setOpen] = useState(false);
   const [userTyping, setUserTyping] = useState(false);
@@ -437,16 +445,16 @@ function SkuAutocomplete({ value, onChange, skuOpts }) {
   });
 
   return (
-    <div style={{ position: "relative" }}>
-      <input value={inputVal} placeholder="Type SKU..."
+    <div style={{ position: "relative", ...(style || {}) }}>
+      <input value={inputVal} placeholder={placeholder} disabled={disabled}
         onChange={e => { setInputVal(e.target.value); setUserTyping(true); setOpen(true); }}
-        onFocus={() => setOpen(true)}
+        onFocus={(e) => { setOpen(true); e.target.select(); }}
         onBlur={() => { setTimeout(() => { setOpen(false); setUserTyping(false); }, 200); }}
-        style={IS_AC}
+        style={{ ...IS_AC, ...(inputStyle || {}) }}
       />
-      {open && filtered.length > 0 && (
-        <div style={{ position: "absolute", top: "100%", left: 0, minWidth: 300, zIndex: 100, background: "#1e1e2e", border: "1px solid #444", borderRadius: 6, maxHeight: 300, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.5)" }}>
-          {filtered.map(item => (
+      {open && filtered.length > 0 && !disabled && (
+        <div style={{ position: "absolute", top: "100%", left: 0, minWidth: 320, maxWidth: "min(500px, 90vw)", zIndex: 100, background: "#1e1e2e", border: "1px solid #444", borderRadius: 6, maxHeight: 300, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.5)" }}>
+          {filtered.slice(0, 100).map(item => (
             <div key={item.id}
               onMouseDown={() => { onChange(item.id); setInputVal(item.id); setUserTyping(false); setOpen(false); }}
               style={{ padding: "6px 10px", cursor: "pointer", fontSize: 12, borderBottom: "1px solid #2a2a3a", color: "#e0e0e0" }}
@@ -456,6 +464,9 @@ function SkuAutocomplete({ value, onChange, skuOpts }) {
               <span style={{ color: "#ccc", marginLeft: 8 }}>{item.name}</span>
             </div>
           ))}
+          {filtered.length > 100 && (
+            <div style={{ padding: "6px 10px", fontSize: 11, color: "#666", fontStyle: "italic" }}>{filtered.length - 100} more — keep typing to narrow</div>
+          )}
         </div>
       )}
     </div>
@@ -3754,19 +3765,18 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
-            <select value={prodAssembly} onChange={e => {
-              const id = e.target.value;
-              setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
-              // Auto-fill suggested lot for 200-level items — they always create a new lot,
-              // and they have no lotSource so prodLotNumber is the direct text input.
-              if (id && getLevel(id) === 200) {
-                const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
-                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, prodDate));
-              }
-            }} style={IS}>
-              <option value="">Select assembly...</option>
-              {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
-            </select>
+            <SkuAutocomplete value={prodAssembly}
+              onChange={(id) => {
+                setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
+                // Auto-fill suggested lot for 200-level items — they always create a new lot,
+                // and they have no lotSource so prodLotNumber is the direct text input.
+                if (id && getLevel(id) === 200) {
+                  const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
+                  setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, prodDate));
+                }
+              }}
+              skuOpts={assemblies}
+              placeholder="Type to search assembly…" />
           </div>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity *</label>
@@ -4082,17 +4092,16 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly to Produce *</label>
-            <select value={prodAssembly} onChange={e => {
-              const id = e.target.value;
-              setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
-              if (id && getLevel(id) === 200) {
-                const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
-                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, prodDate));
-              }
-            }} style={IS}>
-              <option value="">Select assembly...</option>
-              {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
-            </select>
+            <SkuAutocomplete value={prodAssembly}
+              onChange={(id) => {
+                setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
+                if (id && getLevel(id) === 200) {
+                  const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
+                  setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, prodDate));
+                }
+              }}
+              skuOpts={assemblies}
+              placeholder="Type to search assembly…" />
           </div>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity *</label>
@@ -4255,17 +4264,16 @@ export default function App() {
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Assembly *</label>
-            <select value={prodAssembly} onChange={e => {
-              const id = e.target.value;
-              setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
-              if (id && getLevel(id) === 200) {
-                const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
-                setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, prodDate));
-              }
-            }} style={IS}>
-              <option value="">Select assembly...</option>
-              {assemblies.map(a => <option key={a.id} value={a.id}>[{a.id}] {a.name}</option>)}
-            </select>
+            <SkuAutocomplete value={prodAssembly}
+              onChange={(id) => {
+                setProdAssembly(id); setProdConsume(initConsume(id)); setProdLotNumber(""); setFreshLotNumber("");
+                if (id && getLevel(id) === 200) {
+                  const m = id.match(/^\d+-(\w+)/); const pl = m ? m[1] : "";
+                  setProdLotNumber(formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, prodDate));
+                }
+              }}
+              skuOpts={assemblies}
+              placeholder="Type to search assembly…" />
           </div>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity *</label>
@@ -5182,13 +5190,15 @@ export default function App() {
               {manualPOLines.map((line, i) => (
                 <tr key={i}>
                   <td style={TD}>
-                    <select value={line.partId} onChange={e => {
-                      const p = parts.find(x => x.id === e.target.value);
-                      setManualPOLines(prev => prev.map((l, j) => j === i ? { ...l, partId: e.target.value, name: p?.name || "", unit: p?.unit || "", unitCost: p?.avgCost || 0 } : l));
-                    }} style={{ ...IS, fontSize: 12, minWidth: 200 }}>
-                      <option value="">Select item...</option>
-                      {parts.map(p => <option key={p.id} value={p.id}>[{p.id}] {p.name}</option>)}
-                    </select>
+                    <SkuAutocomplete value={line.partId}
+                      onChange={(id) => {
+                        const p = parts.find(x => x.id === id);
+                        setManualPOLines(prev => prev.map((l, j) => j === i ? { ...l, partId: id, name: p?.name || "", unit: p?.unit || "", unitCost: p?.avgCost || 0 } : l));
+                      }}
+                      skuOpts={parts}
+                      placeholder="Type to search item…"
+                      style={{ minWidth: 240 }}
+                      inputStyle={{ fontSize: 12 }} />
                   </td>
                   <td style={TD}><input type="number" step="any" min="0" value={line.qty} onChange={e => setManualPOLines(prev => prev.map((l, j) => j === i ? { ...l, qty: Number(e.target.value) } : l))} style={{ ...IS, width: 80, fontSize: 12 }} /></td>
                   <td style={{ ...TD, fontSize: 12, color: "#888" }}>{line.unit}</td>
@@ -5268,10 +5278,11 @@ export default function App() {
                     {rcvMode === "manual" ? (
                       <>
                         <td style={TD}>
-                          <select value={line.partId} onChange={e => { const p = parts.find(x => x.id === e.target.value); setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, partId: e.target.value, name: p?.name || "", unit: p?.unit || "", location: p?.location || "" } : l)); }} style={{ ...IS, fontSize: 12 }}>
-                            <option value="">Select item...</option>
-                            {parts.map(p => <option key={p.id} value={p.id}>[{p.id}] {p.name}</option>)}
-                          </select>
+                          <SkuAutocomplete value={line.partId}
+                            onChange={(id) => { const p = parts.find(x => x.id === id); setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, partId: id, name: p?.name || "", unit: p?.unit || "", location: p?.location || "" } : l)); }}
+                            skuOpts={parts}
+                            placeholder="Type to search item…"
+                            inputStyle={{ fontSize: 12 }} />
                         </td>
                         <td style={TD}><input type="number" step="any" min="0" value={line.qtyReceived} onChange={e => setRcvLines(prev => prev.map((l, j) => j === i ? { ...l, qtyReceived: Number(e.target.value) } : l))} style={{ ...IS, width: 80, fontSize: 12 }} /></td>
                         <td style={{ ...TD, fontSize: 12, color: "#888" }}>{line.unit}</td>
@@ -5409,10 +5420,11 @@ export default function App() {
                 {bomForm.length === 0 && <p style={{ color: "#555", fontSize: 13 }}>No components yet. Add lines to define what goes into this item.</p>}
                 {bomForm.map((line, i) => (
                   <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-                    <select value={line.partId} onChange={(e) => setBomForm((p) => p.map((b, j) => j === i ? { ...b, partId: e.target.value } : b))} style={{ ...IS, flex: 2 }}>
-                      <option value="">Select component...</option>
-                      {bomItemsForLevel(formLevel).map((p) => <option key={p.id} value={p.id}>[{p.id}] {p.name}</option>)}
-                    </select>
+                    <SkuAutocomplete value={line.partId}
+                      onChange={(id) => setBomForm((p) => p.map((b, j) => j === i ? { ...b, partId: id } : b))}
+                      skuOpts={bomItemsForLevel(formLevel)}
+                      placeholder="Type to search component…"
+                      style={{ flex: 2 }} />
                     <input type="number" step="any" min="0" placeholder="Qty" value={line.qty} onChange={(e) => setBomForm((p) => p.map((b, j) => j === i ? { ...b, qty: Number(e.target.value) } : b))} style={{ ...IS, flex: 0.5, minWidth: 70 }} />
                     <button onClick={() => setBomForm((p) => p.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 4 }}><Minus size={16} /></button>
                   </div>
@@ -5433,7 +5445,12 @@ export default function App() {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Order ID</label><input value={form.id || ""} readOnly style={{ ...IS, opacity: 0.5 }} /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Customer</label><input value={form.customer || ""} onChange={(e) => setForm((f) => ({ ...f, customer: e.target.value }))} style={IS} /></div>
-              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Item</label><select value={form.item || ""} onChange={(e) => setForm((f) => ({ ...f, item: e.target.value }))} style={IS}><option value="">Select...</option>{assemblies.filter((a) => getLevel(a.id) >= 300).map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}</select></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Item</label>
+                <SkuAutocomplete value={form.item || ""}
+                  onChange={(id) => setForm((f) => ({ ...f, item: id }))}
+                  skuOpts={assemblies.filter((a) => getLevel(a.id) >= 300)}
+                  placeholder="Type to search item…" />
+              </div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Qty</label><input type="number" value={form.qty || 0} onChange={(e) => setForm((f) => ({ ...f, qty: Number(e.target.value) }))} style={IS} /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Date</label><input type="date" value={form.date || ""} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} style={IS} /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status</label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.map((s) => <option key={s}>{s}</option>)}</select></div>
@@ -5477,7 +5494,13 @@ export default function App() {
                     const lineTotal = (Number(line.qty) || 0) * linePrice;
                     return (
                       <tr key={idx}>
-                        <td style={TD}><select value={line.item} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, item: e.target.value } : l))} style={{ ...IS, fontSize: 13 }}><option value="">Select item...</option>{assemblies.filter((a) => getLevel(a.id) >= 300).map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}</select></td>
+                        <td style={TD}>
+                          <SkuAutocomplete value={line.item}
+                            onChange={(id) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, item: id } : l))}
+                            skuOpts={assemblies.filter((a) => getLevel(a.id) >= 300)}
+                            placeholder="Type to search item…"
+                            inputStyle={{ fontSize: 13 }} />
+                        </td>
                         <td style={TD}><input type="number" value={line.qty || ""} onChange={(e) => setOrderLines(prev => prev.map((l, i) => i === idx ? { ...l, qty: Number(e.target.value) } : l))} style={{ ...IS, fontSize: 13 }} min="0" /></td>
                         <td style={{ ...TD, fontSize: 12, color: "#888" }}>{linePrice > 0 ? `$${linePrice.toFixed(2)}` : "—"}</td>
                         <td style={{ ...TD, fontSize: 12, fontWeight: 600, color: lineTotal > 0 ? "#22c55e" : "#555" }}>{lineTotal > 0 ? `$${lineTotal.toFixed(2)}` : "—"}</td>
