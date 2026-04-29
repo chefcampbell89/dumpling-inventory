@@ -1,4 +1,4 @@
-// APP VERSION: v131
+// APP VERSION: v132
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -13,7 +13,7 @@ import {
   fetchProductionRuns, createProductionRun, updateProductionRun, deleteProductionRuns, fetchDraftRunsForWeek, fetchCompletedRunsForWeek, completeProductionRun,
   fetchInventoryLots, adjustLotQty,
   zeroAllInventory, bulkUpdateItemQtys,
-  fetchWishes, createWish, countUserWishes,
+  fetchWishes, createWish, countUserWishes, grantWish, ungrantWish, acknowledgeWish, fetchPendingGrantedWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles, deleteProfile as dbDeleteProfile,
   getInviteCode, setInviteCode, getLocations, getConfig, saveConfig, changePassword, supabase,
   DEFAULT_BASE_INGREDIENTS, digitForProductLine, formatLotNumber, reserveLotNumbers, dateToMMDDYY,
@@ -343,15 +343,17 @@ function GoldenLamp({ active, onClick, size = 28 }) {
   );
 }
 
-function Modal({ open, onClose, title, children, wide }) {
+function Modal({ open, onClose, title, children, wide, hideCloseX }) {
   if (!open) return null;
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }} onClick={hideCloseX ? undefined : onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#1e1e2e", borderRadius: 12, padding: 24, width: "95%", maxWidth: wide ? 780 : 520, maxHeight: "88vh", overflow: "auto", border: "1px solid #333" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-          <h2 style={{ margin: 0, fontSize: 18, color: "#e0e0e0" }}>{title}</h2>
-          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 4 }}><X size={20} /></button>
-        </div>
+        {(title || !hideCloseX) && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: title ? 20 : 0 }}>
+            <h2 style={{ margin: 0, fontSize: 18, color: "#e0e0e0" }}>{title}</h2>
+            {!hideCloseX && <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 4 }}><X size={20} /></button>}
+          </div>
+        )}
         {children}
       </div>
     </div>
@@ -604,6 +606,10 @@ export default function App() {
   const [wishModal, setWishModal] = useState(false);
   const [wishText, setWishText] = useState("");
   const [wishesUsed, setWishesUsed] = useState(0);
+  // Celebration: list of unacknowledged granted wishes for this user. When non-empty,
+  // the WishGrantedModal pops up automatically with a carousel.
+  const [grantedWishes, setGrantedWishes] = useState([]);
+  const [grantedIdx, setGrantedIdx] = useState(0);
   const [allWishes, setAllWishes] = useState([]);
   const MAX_WISHES = 3;
 
@@ -774,6 +780,65 @@ export default function App() {
       countUserWishes(authUser.id).then(c => setWishesUsed(c)).catch(() => {});
     }
   }, [authUser]);
+
+  // Wish-granted celebration: pop up the modal when this user has any granted
+  // wishes that haven't been acknowledged. Triggered by:
+  //   1) On-load query when authUser changes
+  //   2) Supabase Realtime push from the wishes table (fires within ~1s of the
+  //      admin clicking "Grant")
+  //   3) Tab visibility change (safety net for stale tabs / dropped sockets)
+  useEffect(() => {
+    if (!authUser) return;
+    let cancelled = false;
+
+    const refresh = async () => {
+      try {
+        const pending = await fetchPendingGrantedWishes(authUser.id);
+        if (cancelled) return;
+        if (pending.length > 0) {
+          setGrantedWishes(pending);
+          setGrantedIdx(0);
+        }
+      } catch (e) { console.warn("pending wishes fetch failed:", e.message); }
+    };
+
+    // 1) Initial check on auth
+    refresh();
+
+    // 2) Realtime: subscribe to wish updates for this user
+    const channel = supabase
+      .channel(`wishes-granted-${authUser.id}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "wishes", filter: `user_id=eq.${authUser.id}` },
+        () => { refresh(); }
+      )
+      .subscribe();
+
+    // 3) When tab becomes visible again, re-check (in case the websocket dropped)
+    const onVis = () => { if (document.visibilityState === "visible") refresh(); };
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [authUser]);
+
+  // Acknowledge the current wish in the celebration carousel and advance.
+  // Closes the modal when all are acknowledged.
+  const acknowledgeCurrentWish = async () => {
+    const cur = grantedWishes[grantedIdx];
+    if (!cur) return;
+    try { await acknowledgeWish(cur.id); } catch (e) { console.warn("acknowledge failed:", e.message); }
+    if (grantedIdx + 1 >= grantedWishes.length) {
+      setGrantedWishes([]);
+      setGrantedIdx(0);
+    } else {
+      setGrantedIdx(prev => prev + 1);
+    }
+  };
 
   // ---- Auth handlers ----
   const handleLogin = async () => {
@@ -5127,22 +5192,59 @@ export default function App() {
                       </div>
                     ) : (
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {allWishes.map(w => (
-                          <div key={w.id} style={{ background: "#16161e", borderRadius: 8, border: "1px solid #2a2a3a", padding: "14px 16px" }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-                              <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: 14, color: "#e0e0e0", marginBottom: 6, lineHeight: 1.5 }}>{w.wish}</div>
-                                <div style={{ fontSize: 11, color: "#666" }}>
-                                  From <span style={{ color: "#888" }}>{w.userEmail}</span> on {new Date(w.createdAt).toLocaleDateString()}
+                        {allWishes.map(w => {
+                          const isGranted = !!w.grantedAt;
+                          const isAcked = !!w.acknowledgedAt;
+                          return (
+                            <div key={w.id} style={{ background: "#16161e", borderRadius: 8, border: `1px solid ${isGranted ? "#fbbf24aa" : "#2a2a3a"}`, padding: "14px 16px" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                                <div style={{ flex: 1 }}>
+                                  <div style={{ fontSize: 14, color: "#e0e0e0", marginBottom: 6, lineHeight: 1.5 }}>{w.wish}</div>
+                                  <div style={{ fontSize: 11, color: "#666" }}>
+                                    From <span style={{ color: "#888" }}>{w.userEmail}</span> on {new Date(w.createdAt).toLocaleDateString()}
+                                    {isGranted && <span style={{ color: "#fbbf24", marginLeft: 8 }}>• Granted {new Date(w.grantedAt).toLocaleDateString()}{isAcked ? ` • Seen ${new Date(w.acknowledgedAt).toLocaleDateString()}` : " • Awaiting view"}</span>}
+                                  </div>
+                                  {w.grantedNote && (
+                                    <div style={{ marginTop: 8, padding: "8px 10px", background: "#1a2a1a", border: "1px solid #22c55e33", borderRadius: 6, fontSize: 12, color: "#86efac" }}>
+                                      <span style={{ color: "#22c55e", fontWeight: 600, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.5, marginRight: 6 }}>Note:</span>
+                                      {w.grantedNote}
+                                    </div>
+                                  )}
+                                </div>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+                                  <span style={{ fontSize: 24 }}>{isGranted ? "✨" : "🪔"}</span>
+                                  {!isGranted ? (
+                                    <button onClick={async () => {
+                                      const note = window.prompt("Optional: describe what was built (shown to the user). Leave blank for none.", "");
+                                      if (note === null) return; // user cancelled
+                                      try {
+                                        await grantWish(w.id, note);
+                                        setAllWishes(prev => prev.map(x => x.id === w.id ? { ...x, grantedAt: new Date().toISOString(), grantedNote: note, acknowledgedAt: null } : x));
+                                        show("Wish granted ✨");
+                                      } catch (e) { show(e.message, "error"); }
+                                    }} style={{ background: "linear-gradient(135deg, #fbbf24, #d97706)", color: "#000", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+                                      Grant ✨
+                                    </button>
+                                  ) : (
+                                    <button onClick={async () => {
+                                      if (!window.confirm("Ungrant this wish? The user will lose the celebration if they haven't seen it yet.")) return;
+                                      try {
+                                        await ungrantWish(w.id);
+                                        setAllWishes(prev => prev.map(x => x.id === w.id ? { ...x, grantedAt: null, grantedNote: "", acknowledgedAt: null } : x));
+                                        show("Wish ungranted");
+                                      } catch (e) { show(e.message, "error"); }
+                                    }} style={{ ...B2, fontSize: 10, padding: "3px 8px", color: "#888" }}>
+                                      Ungrant
+                                    </button>
+                                  )}
                                 </div>
                               </div>
-                              <span style={{ fontSize: 24 }}>🪔</span>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
-                    <div style={{ marginTop: 12, fontSize: 11, color: "#666" }}>{allWishes.length} wish{allWishes.length !== 1 ? "es" : ""} total</div>
+                    <div style={{ marginTop: 12, fontSize: 11, color: "#666" }}>{allWishes.length} wish{allWishes.length !== 1 ? "es" : ""} total • {allWishes.filter(w => w.grantedAt).length} granted</div>
                   </div>
                 );
               })()}
@@ -5793,6 +5895,79 @@ export default function App() {
           <button onClick={() => delUser(delUserConfirm.id)} style={{ ...B1, background: "#dc2626" }}>Remove</button>
         </div>
       </Modal>
+
+      {/* Wish Granted Celebration Modal — appears when this user has any
+          unacknowledged granted wishes. Carousel walks through them one-by-one.
+          Triggered by load-check, Supabase Realtime, or visibility change. */}
+      {grantedWishes.length > 0 && (() => {
+        const cur = grantedWishes[grantedIdx];
+        const isLast = grantedIdx + 1 >= grantedWishes.length;
+        const fmt = (s) => s ? new Date(s).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "";
+        return (
+          <Modal open={true} onClose={() => { /* no-op: must acknowledge */ }} title="" hideCloseX>
+            {/* Sparkle CSS — scoped via inline keyframes injected once */}
+            <style>{`
+              @keyframes wgFloat { 0%,100%{transform:translateY(0) rotate(0)} 50%{transform:translateY(-8px) rotate(6deg)} }
+              @keyframes wgSparkle { 0%,100%{opacity:0;transform:scale(0.6)} 50%{opacity:1;transform:scale(1)} }
+              @keyframes wgGlow { 0%,100%{box-shadow:0 0 20px 2px rgba(251,191,36,0.25)} 50%{box-shadow:0 0 40px 6px rgba(251,191,36,0.55)} }
+              @keyframes wgFadeUp { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+              .wg-genie { display:inline-block; animation: wgFloat 2.5s ease-in-out infinite; }
+              .wg-spark { position:absolute; font-size:18px; pointer-events:none; animation: wgSparkle 1.6s ease-in-out infinite; }
+              .wg-card { animation: wgFadeUp 0.45s ease-out, wgGlow 3s ease-in-out infinite; }
+            `}</style>
+            <div className="wg-card" style={{ textAlign: "center", padding: "16px 4px 4px", position: "relative", borderRadius: 12 }}>
+              {/* Carousel pip count */}
+              {grantedWishes.length > 1 && (
+                <div style={{ position: "absolute", top: -4, left: 8, fontSize: 11, color: "#fbbf24", fontWeight: 600, letterSpacing: 0.5 }}>
+                  Wish {grantedIdx + 1} of {grantedWishes.length}
+                </div>
+              )}
+              {/* Sparkle decorations */}
+              <span className="wg-spark" style={{ top: 8, left: "20%", animationDelay: "0s", color: "#fbbf24" }}>✨</span>
+              <span className="wg-spark" style={{ top: 18, right: "18%", animationDelay: "0.5s", color: "#a78bfa" }}>✨</span>
+              <span className="wg-spark" style={{ top: 60, left: "10%", animationDelay: "0.9s", color: "#22c55e" }}>⭐</span>
+              <span className="wg-spark" style={{ top: 70, right: "10%", animationDelay: "0.3s", color: "#f59e0b" }}>✨</span>
+
+              <div className="wg-genie" style={{ fontSize: 64, marginBottom: 8, lineHeight: 1 }}>🧞✨</div>
+              <h2 style={{ margin: "0 0 4px", fontSize: 26, fontWeight: 800, background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+                Your wish has been granted!
+              </h2>
+              <p style={{ color: "#888", fontSize: 12, margin: "0 0 20px" }}>The Genie listened and made it real.</p>
+
+              {/* Original wish quoted */}
+              <div style={{ background: "linear-gradient(135deg, #1a1a2e 0%, #16161e 100%)", border: "1px solid #fbbf2466", borderRadius: 10, padding: "16px 18px", marginBottom: 14, position: "relative" }}>
+                <div style={{ position: "absolute", top: -10, left: 14, background: "#1e1e2e", padding: "0 8px", fontSize: 10, color: "#fbbf24", fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase" }}>You wished for</div>
+                <div style={{ fontSize: 14, fontStyle: "italic", color: "#e0e0e0", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>"{cur.wish}"</div>
+                <div style={{ fontSize: 10, color: "#666", marginTop: 8 }}>
+                  Submitted {fmt(cur.createdAt)} • Granted {fmt(cur.grantedAt)}
+                </div>
+              </div>
+
+              {/* Optional admin note about what was built */}
+              {cur.grantedNote && (
+                <div style={{ background: "#1a2a1a", border: "1px solid #22c55e44", borderRadius: 10, padding: "12px 14px", marginBottom: 16, textAlign: "left" }}>
+                  <div style={{ fontSize: 10, color: "#22c55e", fontWeight: 600, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 4 }}>Here's what we built</div>
+                  <div style={{ fontSize: 13, color: "#e0e0e0", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{cur.grantedNote}</div>
+                </div>
+              )}
+
+              {/* Navigation: prev arrow if not first; main button advances/closes */}
+              <div style={{ display: "flex", justifyContent: "center", gap: 10, alignItems: "center", marginTop: 8 }}>
+                {grantedWishes.length > 1 && grantedIdx > 0 && (
+                  <button onClick={() => setGrantedIdx(prev => Math.max(0, prev - 1))}
+                    style={{ background: "none", border: "1px solid #444", color: "#888", borderRadius: 6, padding: "8px 12px", cursor: "pointer", fontSize: 12 }}>
+                    ← Back
+                  </button>
+                )}
+                <button onClick={acknowledgeCurrentWish}
+                  style={{ background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", color: "#000", border: "none", borderRadius: 8, padding: "12px 28px", cursor: "pointer", fontSize: 15, fontWeight: 700, boxShadow: "0 4px 16px rgba(251,191,36,0.4)", letterSpacing: 0.3 }}>
+                  {isLast ? "All done ✨" : "Got it ✨"}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {/* Wish Modal */}
       <Modal open={wishModal} onClose={() => setWishModal(false)} title="">

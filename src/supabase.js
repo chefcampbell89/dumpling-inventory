@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v109
+// SUPABASE VERSION: v110
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -708,6 +708,9 @@ export async function fetchWishes() {
   return data.map(r => ({
     id: r.id, userId: r.user_id, userEmail: r.user_email,
     wish: r.wish_text, createdAt: r.created_at,
+    grantedAt: r.granted_at || null,
+    grantedNote: r.granted_note || "",
+    acknowledgedAt: r.acknowledged_at || null,
   }))
 }
 
@@ -722,4 +725,49 @@ export async function countUserWishes(userId) {
   const { count, error } = await supabase.from("wishes").select("*", { count: "exact", head: true }).eq("user_id", userId)
   if (error) throw error
   return count || 0
+}
+
+// Admin marks a wish as granted, with an optional note describing what was built.
+// Pass note="" to leave it blank. Pass grantedAt=null to ungrant.
+export async function grantWish(wishId, note = "") {
+  const { error } = await supabase.from("wishes").update({
+    granted_at: new Date().toISOString(),
+    granted_note: note || "",
+    acknowledged_at: null, // re-trigger the celebration if previously acknowledged
+  }).eq("id", wishId);
+  if (error) throw error;
+}
+
+export async function ungrantWish(wishId) {
+  const { error } = await supabase.from("wishes").update({
+    granted_at: null, granted_note: "", acknowledged_at: null,
+  }).eq("id", wishId);
+  if (error) throw error;
+}
+
+// User has seen the celebration modal — mark the wish acknowledged so it
+// won't show again.
+export async function acknowledgeWish(wishId) {
+  const { error } = await supabase.from("wishes").update({
+    acknowledged_at: new Date().toISOString(),
+  }).eq("id", wishId);
+  if (error) throw error;
+}
+
+// Get the current user's wishes that have been granted but not yet acknowledged
+// (used for the celebration modal and the load-time check).
+export async function fetchPendingGrantedWishes(userId) {
+  const { data, error } = await supabase.from("wishes")
+    .select("*")
+    .eq("user_id", userId)
+    .not("granted_at", "is", null)
+    .is("acknowledged_at", null)
+    .order("granted_at", { ascending: true });
+  if (error) throw error;
+  return (data || []).map(r => ({
+    id: r.id, userId: r.user_id, userEmail: r.user_email,
+    wish: r.wish_text, createdAt: r.created_at,
+    grantedAt: r.granted_at, grantedNote: r.granted_note || "",
+    acknowledgedAt: r.acknowledged_at || null,
+  }));
 }
