@@ -1,4 +1,4 @@
-// APP VERSION: v135
+// APP VERSION: v136
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -2816,36 +2816,53 @@ export default function App() {
         const todayDisplay = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
         const isStale = dailyNote.updatedAt && dailyNote.updatedAt.slice(0, 10) !== todayStr;
 
-        // ===== Production Plan week (Sunday flip) =====
+        // ===== Production Plan: this week + next week (Sunday flips week 1 forward) =====
         const dow = new Date().getDay(); // 0=Sun ... 6=Sat
         const weekRefDate = dow === 0 ? addDays(todayStr, 1) : todayStr;
         const planWeekMonday = getMonday(weekRefDate);
         const dayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        const baseDays = [0, 1, 2, 3, 4].map(off => addDays(planWeekMonday, off));
-        const satDate = addDays(planWeekMonday, 5);
+
+        // Only Fills (200-level with "Fill" in id) and Batches (250-level) are relevant.
+        const isPlanRun = (r) => {
+          const id = r.assemblyId || "";
+          const lvl = getLevel(id);
+          return lvl === 250 || (lvl === 200 && /fill/i.test(id));
+        };
+        const typeOf = (r) => (getLevel(r.assemblyId) === 250 ? "B" : "F");
 
         const runDateOf = (r) => r.plannedDate || r.date;
-        const weekRunsByDate = {};
-        for (const r of prodRuns) {
-          const rd = runDateOf(r);
-          if (!rd || rd < planWeekMonday || rd > satDate) continue;
-          if (!weekRunsByDate[rd]) weekRunsByDate[rd] = [];
-          const m = (r.assemblyId || "").match(/^\d+-(\w+)/);
-          weekRunsByDate[rd].push({ pl: m ? m[1] : "?", qty: r.qtyProduced || 0 });
-        }
-        const showSat = (weekRunsByDate[satDate] || []).length > 0;
-        const planDays = showSat ? [...baseDays, satDate] : baseDays;
-        const dayCells = planDays.map((d, i) => {
-          const runs = weekRunsByDate[d] || [];
-          const byPl = {};
-          for (const r of runs) byPl[r.pl] = (byPl[r.pl] || 0) + r.qty;
-          return {
-            date: d,
-            label: dayLabels[i],
-            lines: Object.entries(byPl).map(([pl, qty]) => ({ pl, qty })).sort((a, b) => b.qty - a.qty),
-          };
-        });
-        const planFromTomorrow = dow === 0;
+        const buildWeek = (mondayStr) => {
+          const satDate = addDays(mondayStr, 5);
+          const baseDays = [0, 1, 2, 3, 4].map(off => addDays(mondayStr, off));
+          const runsByDate = {};
+          for (const r of prodRuns) {
+            if (!isPlanRun(r)) continue;
+            const rd = runDateOf(r);
+            if (!rd || rd < mondayStr || rd > satDate) continue;
+            if (!runsByDate[rd]) runsByDate[rd] = [];
+            const m = (r.assemblyId || "").match(/^\d+-(\w+)/);
+            runsByDate[rd].push({ pl: m ? m[1] : "?", qty: r.qtyProduced || 0, type: typeOf(r) });
+          }
+          const showSat = (runsByDate[satDate] || []).length > 0;
+          const days = showSat ? [...baseDays, satDate] : baseDays;
+          const cells = days.map((d, i) => {
+            const runs = runsByDate[d] || [];
+            const byKey = {};
+            for (const r of runs) {
+              const k = `${r.pl}|${r.type}`;
+              if (!byKey[k]) byKey[k] = { pl: r.pl, type: r.type, qty: 0 };
+              byKey[k].qty += r.qty;
+            }
+            const lines = Object.values(byKey).sort((a, b) => {
+              if (a.type !== b.type) return a.type === "B" ? -1 : 1; // batches first
+              return b.qty - a.qty;
+            });
+            return { date: d, label: dayLabels[i], lines };
+          });
+          return { mondayStr, cells };
+        };
+        const week1 = buildWeek(planWeekMonday);
+        const week2 = buildWeek(addDays(planWeekMonday, 7));
 
         // ===== Inventory by flavor =====
         const _dpCache = {};
@@ -2859,7 +2876,6 @@ export default function App() {
           for (const b of item.bom) total += b.qty * dumplingsPer(b.partId);
           return (_dpCache[itemId] = total);
         };
-        const isCateringId = (id) => /catering/i.test(id);
         const flavorOfId = (id) => { const m = (id || "").match(/^\d+-(\w+)/); return m ? m[1] : null; };
         const flavorRows = productLines.map(pl => {
           const has = (id) => allItems.find(i => i.id === id);
@@ -2869,7 +2885,6 @@ export default function App() {
           const packs = packItem ? (packItem.qty || 0) : 0;
           const fsItem = has(`400-${pl} Food Service Case`);
           const fsCases = fsItem ? (fsItem.qty || 0) : 0;
-          const cateringQty = sumQty(i => getLevel(i.id) === 400 && flavorOfId(i.id) === pl && isCateringId(i.id));
           const retailCaseItem = has(`500-${pl} Retail Case`);
           const retailCases = retailCaseItem ? (retailCaseItem.qty || 0) : 0;
           const totalDumplings = allItems.filter(i => flavorOfId(i.id) === pl && (i.qty || 0) > 0 && dumplingsPer(i.id) > 0)
@@ -2878,7 +2893,7 @@ export default function App() {
             .filter(o => (o.status === "Pending" || o.status === "Confirmed") && flavorOfId(o.item) === pl)
             .reduce((s, o) => s + (o.qty || 0) * dumplingsPer(o.item), 0);
           return {
-            pl, bins, packs, fsCases, cateringQty, retailCases,
+            pl, bins, packs, fsCases, retailCases,
             totalDumplings: Math.round(totalDumplings),
             onOrder: Math.round(onOrder),
             diff: Math.round(totalDumplings - onOrder),
@@ -3013,29 +3028,42 @@ export default function App() {
               {/* #1 Production Plan */}
               <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "1 / 2", gridRow: isNarrow ? "auto" : "1 / 2" }}>
                 <div style={panelHead}>
-                  <span>Production Plan {planFromTomorrow ? "• Next Week" : "• This Week"}</span>
-                  <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>Week of {planWeekMonday}</span>
+                  <span>Production Plan</span>
+                  <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>Fills &amp; Batches only</span>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: `repeat(${planDays.length}, 1fr)`, gap: 1, background: "#2a2a3a" }}>
-                  {dayCells.map((c, i) => (
-                    <div key={i} style={{ background: "#1e1e2e", padding: "10px 8px", minHeight: 130 }}>
-                      <div style={{ fontSize: 11, color: "#888", fontWeight: 600, textTransform: "uppercase" }}>{c.label}</div>
-                      <div style={{ fontSize: 9, color: "#555", marginBottom: 8 }}>{c.date.slice(5)}</div>
-                      {c.lines.length === 0 ? (
-                        <div style={{ fontSize: 11, color: "#444", fontStyle: "italic" }}>—</div>
-                      ) : (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                          {c.lines.slice(0, 4).map((ln, j) => (
-                            <div key={j} style={{ fontSize: 13, color: "#e0e0e0", fontWeight: 600 }}>
-                              <span style={{ color: "#fbbf24" }}>{ln.qty}</span> <span style={{ color: "#a78bfa" }}>{ln.pl}</span>
-                            </div>
-                          ))}
-                          {c.lines.length > 4 && <div style={{ fontSize: 10, color: "#666" }}>+{c.lines.length - 4} more</div>}
-                        </div>
-                      )}
+                {[
+                  { label: "This Week", w: week1 },
+                  { label: "Next Week", w: week2 },
+                ].map((row, ri) => (
+                  <div key={ri}>
+                    <div style={{ padding: "6px 12px", background: "#16161e", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#a78bfa", letterSpacing: "0.05em", display: "flex", justifyContent: "space-between", borderTop: ri === 0 ? "none" : "1px solid #2a2a3a", borderBottom: "1px solid #2a2a3a" }}>
+                      <span>{row.label}</span>
+                      <span style={{ color: "#555", fontWeight: 500 }}>Wk of {row.w.mondayStr}</span>
                     </div>
-                  ))}
-                </div>
+                    <div style={{ display: "grid", gridTemplateColumns: `repeat(${row.w.cells.length}, 1fr)`, gap: 1, background: "#2a2a3a" }}>
+                      {row.w.cells.map((c, i) => (
+                        <div key={i} style={{ background: "#1e1e2e", padding: "10px 8px", minHeight: 110 }}>
+                          <div style={{ fontSize: 11, color: "#888", fontWeight: 600, textTransform: "uppercase" }}>{c.label}</div>
+                          <div style={{ fontSize: 9, color: "#555", marginBottom: 6 }}>{c.date.slice(5)}</div>
+                          {c.lines.length === 0 ? (
+                            <div style={{ fontSize: 11, color: "#444", fontStyle: "italic" }}>—</div>
+                          ) : (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                              {c.lines.slice(0, 5).map((ln, j) => (
+                                <div key={j} style={{ fontSize: 13, color: "#e0e0e0", fontWeight: 600, display: "flex", alignItems: "baseline", gap: 4 }}>
+                                  <span style={{ color: "#fbbf24" }}>{ln.qty}</span>
+                                  <span style={{ color: "#a78bfa" }}>{ln.pl}</span>
+                                  <span style={{ fontSize: 9, color: ln.type === "B" ? "#22c55e" : "#06b6d4", fontWeight: 700 }}>{ln.type}</span>
+                                </div>
+                              ))}
+                              {c.lines.length > 5 && <div style={{ fontSize: 10, color: "#666" }}>+{c.lines.length - 5}</div>}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
 
               {/* #4 Genie image */}
@@ -3107,7 +3135,6 @@ export default function App() {
                           <th style={{ ...TH, textAlign: "center" }}>Bins</th>
                           <th style={{ ...TH, textAlign: "center" }}>Packs</th>
                           <th style={{ ...TH, textAlign: "center" }}>FS Cases</th>
-                          <th style={{ ...TH, textAlign: "center" }}>Catering</th>
                           <th style={{ ...TH, textAlign: "center" }}>Retail Cs</th>
                           <th style={{ ...TH, textAlign: "right" }}>Total Dumplings</th>
                           <th style={{ ...TH, textAlign: "right" }}>On Order</th>
@@ -3121,7 +3148,6 @@ export default function App() {
                             <td style={{ ...TD, textAlign: "center" }}>{r.bins || "—"}</td>
                             <td style={{ ...TD, textAlign: "center" }}>{r.packs || "—"}</td>
                             <td style={{ ...TD, textAlign: "center" }}>{r.fsCases || "—"}</td>
-                            <td style={{ ...TD, textAlign: "center" }}>{r.cateringQty || "—"}</td>
                             <td style={{ ...TD, textAlign: "center" }}>{r.retailCases || "—"}</td>
                             <td style={{ ...TD, textAlign: "right", fontWeight: 600, color: "#22c55e" }}>{r.totalDumplings.toLocaleString()}</td>
                             <td style={{ ...TD, textAlign: "right", color: "#f59e0b" }}>{r.onOrder.toLocaleString()}</td>
