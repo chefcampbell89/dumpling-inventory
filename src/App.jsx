@@ -1,4 +1,4 @@
-// APP VERSION: v138
+// APP VERSION: v139
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -7,6 +7,7 @@ import {
   fetchItemVendors, setItemVendors,
   fetchLaborHours, upsertLaborHours,
   fetchToastJobs, setToastJobCategory,
+  fetchOrderLotAllocations, createOrderLotAllocations, deleteOrderLotAllocations, deleteOrderLotAllocation,
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
@@ -44,7 +45,7 @@ const DEFAULT_LEVELS = {
 const LEVEL_KEYS = [100, 200, 250, 300, 400, 500];
 const DEFAULT_COSTING = ["FIFO", "FEFO - Batch"];
 const DEFAULT_PO_STATUSES = ["Draft", "Sent", "Confirmed", "Received", "Cancelled"];
-const DEFAULT_ORD_STATUSES = ["Pending", "Confirmed", "In Production", "Fulfilled", "Cancelled"];
+const DEFAULT_ORD_STATUSES = ["Pending", "Confirmed", "In Production", "Partially Fulfilled", "Fulfilled", "Cancelled"];
 const DEFAULT_ORDER_TYPES = ["Wholesale", "Retail", "Food Service"];
 const DEFAULT_RECEIPT_TYPES = ["PO Receipt", "Vendor delivery (no PO)", "Inventory adjustment", "Return from production", "Found/count correction"];
 const DEFAULT_LOCATIONS = ["Dumpling Factory", "Dumpling Factory: Walk-in Freezer", "Dumpling Factory: Dry Storage"];
@@ -578,6 +579,16 @@ export default function App() {
   // Toast job → category mapping for auto-pulled labor
   const [toastJobs, setToastJobs] = useState([]); // [{ jobGuid, jobTitle, category }]
   const [toastSyncing, setToastSyncing] = useState(false);
+
+  // Lot allocations linking customer order lines to specific inventory lots
+  const [orderLotAllocations, setOrderLotAllocations] = useState([]);
+  // Fulfillment modal state
+  const [fulfillModal, setFulfillModal] = useState(null); // { lines: [order lines], orderId? }
+  const [fulfillRows, setFulfillRows] = useState([]); // [{ orderId, itemId, lineQty, allocations: [{lotNumber, qty}] }]
+  const [fulfillSubmitting, setFulfillSubmitting] = useState(false);
+  // Lot Tracking tab state
+  const [lotSearchQuery, setLotSearchQuery] = useState("");
+  const [lotAllocateForm, setLotAllocateForm] = useState({ lotNumber: "", itemId: "", orderId: "", qty: 0 });
   const [toast, setToast] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [delConfirm, setDelConfirm] = useState(null);
@@ -722,6 +733,7 @@ export default function App() {
       fetchItemVendors().then(r => setItemVendorsState(r)).catch(() => {});
       fetchLaborHours().then(r => setLaborHours(r)).catch(() => {});
       fetchToastJobs().then(r => setToastJobs(r)).catch(() => {});
+      fetchOrderLotAllocations().then(r => setOrderLotAllocations(r)).catch(() => {});
       // Load admin configs
       getLocations().then(r => { if (r && r.length > 0) setLocations(r); }).catch(() => {});
       getConfig("ord_statuses").then(r => { if (r) setCfgOrdStatuses(r); }).catch(() => {});
@@ -885,46 +897,189 @@ export default function App() {
   };
 
   // ---- ORDER FULFILLMENT ----
-  const shipOrderLine = async (order) => {
-    const item = allItems.find(i => i.id === order.item);
-    if (item && item.qty < order.qty) {
-      if (!window.confirm(`Warning: ${item.name} has ${item.qty} in stock but order needs ${order.qty}. Inventory will go negative. Continue?`)) return;
-    }
-
-    // Deduct inventory
-    if (item) {
-      const newQty = item.qty - order.qty;
-      const isPart = parts.some(p => p.id === item.id);
-      if (isPart) setParts(prev => prev.map(p => p.id === item.id ? { ...p, qty: newQty } : p));
-      else setAssemblies(prev => prev.map(a => a.id === item.id ? { ...a, qty: newQty } : a));
-      try { await updateItemQty(item.id, newQty); } catch (e) { console.warn("Qty update failed:", e.message); }
-    }
-
-    // Mark order as fulfilled
-    const updated = { ...order, status: "Fulfilled" };
-    setOrders(prev => prev.map(o => o.id === order.id ? updated : o));
-    try { await upsertOrder(updated); } catch (e) { console.warn("Order update failed:", e.message); }
-    show(`Shipped ${order.qty} × ${item?.name || order.item}`);
-  };
-
-  const shipAllLines = async (lines) => {
+  // Open the fulfillment modal pre-populated with FIFO-suggested allocations.
+  // `lines` may be one (single-line ship) or many (whole-group ship).
+  const openFulfillModal = (lines) => {
     const unshipped = lines.filter(o => o.status !== "Fulfilled" && o.status !== "Cancelled");
-    if (unshipped.length === 0) { show("All lines already shipped", "error"); return; }
-
-    // Check stock for all lines
-    const warnings = [];
-    for (const o of unshipped) {
-      const item = allItems.find(i => i.id === o.item);
-      if (item && item.qty < o.qty) warnings.push(`${item.name}: need ${o.qty}, have ${item.qty}`);
-    }
-    if (warnings.length > 0) {
-      if (!window.confirm(`Warning — insufficient stock:\n${warnings.join("\n")}\n\nInventory will go negative. Continue?`)) return;
-    }
-
-    for (const o of unshipped) {
-      await shipOrderLine(o);
-    }
+    if (unshipped.length === 0) { show("All lines already fulfilled", "error"); return; }
+    // Build FIFO-suggested allocations for each line. Subtract previously-allocated
+    // qty from already-saved allocations (in case partial fulfillment exists).
+    const rows = unshipped.map(line => {
+      const item = allItems.find(i => i.id === line.item);
+      const isLotTracked = !!item?.lotTracking;
+      const remaining = line.qty - allocatedQtyForLine(line.id);
+      const allocations = [];
+      if (isLotTracked && remaining > 0) {
+        // FIFO: sort lots by oldest production date first
+        const candidateLots = (lotsByItem[line.item] || [])
+          .filter(l => l.qty > 0)
+          .sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+        let need = remaining;
+        for (const lot of candidateLots) {
+          if (need <= 0) break;
+          const take = Math.min(lot.qty, need);
+          allocations.push({
+            lotNumber: lot.lotNumber,
+            qty: take,
+            productionDate: lot.productionDate || "",
+            availableInLot: lot.qty,
+          });
+          need -= take;
+        }
+      }
+      return {
+        line,
+        item,
+        isLotTracked,
+        remaining,
+        allocations,
+      };
+    });
+    setFulfillRows(rows);
+    setFulfillModal({ orderId: lines[0]?.id, lines: unshipped });
   };
+
+  const updateFulfillAllocation = (rowIdx, allocIdx, patch) => {
+    setFulfillRows(prev => prev.map((r, i) => {
+      if (i !== rowIdx) return r;
+      return { ...r, allocations: r.allocations.map((a, j) => j === allocIdx ? { ...a, ...patch } : a) };
+    }));
+  };
+
+  const addFulfillAllocation = (rowIdx) => {
+    setFulfillRows(prev => prev.map((r, i) => {
+      if (i !== rowIdx) return r;
+      return { ...r, allocations: [...r.allocations, { lotNumber: "", qty: 0, productionDate: "", availableInLot: 0 }] };
+    }));
+  };
+
+  const removeFulfillAllocation = (rowIdx, allocIdx) => {
+    setFulfillRows(prev => prev.map((r, i) => {
+      if (i !== rowIdx) return r;
+      return { ...r, allocations: r.allocations.filter((_, j) => j !== allocIdx) };
+    }));
+  };
+
+  // Save allocations + decrement lot inventory + decrement item.qty + mark
+  // lines fulfilled. Lines that weren't fully allocated stay open (the order
+  // group will read as "Partially Fulfilled" via computeGroupStatus).
+  const confirmFulfillment = async () => {
+    setFulfillSubmitting(true);
+    try {
+      const allocRowsToInsert = [];
+      const lineUpdates = []; // { line, fullyAllocated }
+      for (const row of fulfillRows) {
+        const totalAllocated = row.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
+        const isFullyAllocated = totalAllocated >= row.line.qty;
+        for (const alloc of row.allocations) {
+          if (alloc.lotNumber && alloc.qty > 0) {
+            allocRowsToInsert.push({
+              orderId: row.line.id,
+              itemId: row.line.item,
+              lotNumber: alloc.lotNumber,
+              qtyAllocated: Number(alloc.qty),
+              locationFrom: row.item?.location || "Dumpling Factory",
+              allocatedBy: profile?.email || "",
+            });
+          }
+        }
+        lineUpdates.push({ line: row.line, fullyAllocated: isFullyAllocated, totalAllocated });
+      }
+
+      // 1) Insert allocation rows
+      let inserted = [];
+      if (allocRowsToInsert.length > 0) {
+        try { inserted = await createOrderLotAllocations(allocRowsToInsert); }
+        catch (e) { throw new Error(`Allocation save failed: ${e.message}`); }
+        setOrderLotAllocations(prev => [...prev, ...inserted]);
+      }
+
+      // 2) Decrement inventory_lots qty
+      const updLots = [...lots];
+      for (const a of allocRowsToInsert) {
+        const lot = updLots.find(l => l.itemId === a.itemId && l.lotNumber === a.lotNumber);
+        if (lot) {
+          lot.qty = Math.max(0, lot.qty - a.qtyAllocated);
+          try { await adjustLotQty(a.itemId, a.lotNumber, -a.qtyAllocated, null, null); }
+          catch (e) { console.warn("Lot deduct failed:", e.message); }
+        }
+      }
+      setLots(updLots.filter(l => l.qty > 0));
+
+      // 3) Decrement item.qty for fully-allocated lines (matches old ship behavior)
+      for (const u of lineUpdates) {
+        if (!u.fullyAllocated) continue;
+        const it = allItems.find(i => i.id === u.line.item);
+        if (!it) continue;
+        const newQty = it.qty - u.line.qty;
+        const isPart = parts.some(p => p.id === it.id);
+        if (isPart) setParts(prev => prev.map(p => p.id === it.id ? { ...p, qty: newQty } : p));
+        else setAssemblies(prev => prev.map(a => a.id === it.id ? { ...a, qty: newQty } : a));
+        try { await updateItemQty(it.id, newQty); } catch (e) { console.warn("Qty update failed:", e.message); }
+      }
+
+      // 4) Mark fully-allocated lines as Fulfilled
+      for (const u of lineUpdates) {
+        if (!u.fullyAllocated) continue;
+        const updated = { ...u.line, status: "Fulfilled" };
+        setOrders(prev => prev.map(x => x.id === u.line.id ? updated : x));
+        try { await upsertOrder(updated); } catch (e) { console.warn("Order update failed:", e.message); }
+      }
+
+      const fulfilledCount = lineUpdates.filter(u => u.fullyAllocated).length;
+      const partialCount = lineUpdates.filter(u => !u.fullyAllocated && u.totalAllocated > 0).length;
+      let msg = `Fulfilled ${fulfilledCount} line${fulfilledCount === 1 ? "" : "s"}`;
+      if (partialCount > 0) msg += ` (${partialCount} partial)`;
+      show(msg);
+      setFulfillModal(null);
+      setFulfillRows([]);
+    } catch (e) {
+      show(e.message, "error");
+    }
+    setFulfillSubmitting(false);
+  };
+
+  // Reverse fulfillment for a single line: delete its allocations, restore
+  // lot inventory + item.qty, set line status back to "In Production".
+  const unfulfillOrderLine = async (line) => {
+    const allocs = (allocationsByOrder.get(line.id) || []);
+    if (!window.confirm(`Un-fulfill this line? This will restore ${allocs.length} lot allocation${allocs.length === 1 ? "" : "s"} back to inventory.`)) return;
+    try {
+      // Restore lot qty
+      const updLots = [...lots];
+      for (const a of allocs) {
+        const lot = updLots.find(l => l.itemId === a.itemId && l.lotNumber === a.lotNumber);
+        if (lot) lot.qty += a.qtyAllocated;
+        else updLots.push({ id: Date.now() + Math.random(), itemId: a.itemId, lotNumber: a.lotNumber, qty: a.qtyAllocated, productionDate: null });
+        try { await adjustLotQty(a.itemId, a.lotNumber, a.qtyAllocated, null, null); }
+        catch (e) { console.warn("Lot restore failed:", e.message); }
+      }
+      setLots(updLots);
+      // Restore item.qty (only if the line was fully fulfilled)
+      if (line.status === "Fulfilled") {
+        const it = allItems.find(i => i.id === line.item);
+        if (it) {
+          const newQty = it.qty + line.qty;
+          const isPart = parts.some(p => p.id === it.id);
+          if (isPart) setParts(prev => prev.map(p => p.id === it.id ? { ...p, qty: newQty } : p));
+          else setAssemblies(prev => prev.map(a => a.id === it.id ? { ...a, qty: newQty } : a));
+          try { await updateItemQty(it.id, newQty); } catch (e) { console.warn(e.message); }
+        }
+      }
+      // Delete allocations
+      try { await deleteOrderLotAllocations(line.id); } catch (e) { console.warn(e.message); }
+      setOrderLotAllocations(prev => prev.filter(a => a.orderId !== line.id));
+      // Revert line status
+      const updated = { ...line, status: "In Production" };
+      setOrders(prev => prev.map(x => x.id === line.id ? updated : x));
+      try { await upsertOrder(updated); } catch (e) { console.warn(e.message); }
+      show("Line un-fulfilled and inventory restored");
+    } catch (e) { show(e.message, "error"); }
+  };
+
+  // Legacy aliases — call sites still use these names.
+  const shipOrderLine = (order) => openFulfillModal([order]);
+  const shipAllLines = (lines) => openFulfillModal(lines);
 
   // ---- Derived ----
   const allItems = useMemo(() => [...parts, ...assemblies], [parts, assemblies]);
@@ -956,6 +1111,44 @@ export default function App() {
     }
     return map;
   }, [lots]);
+
+  // Allocations indexed by orderId for fast per-line/per-group lookups.
+  const allocationsByOrder = useMemo(() => {
+    const m = new Map();
+    for (const a of orderLotAllocations) {
+      if (!m.has(a.orderId)) m.set(a.orderId, []);
+      m.get(a.orderId).push(a);
+    }
+    return m;
+  }, [orderLotAllocations]);
+
+  // Allocations indexed by lot # for the recall-trace view.
+  const allocationsByLot = useMemo(() => {
+    const m = new Map();
+    for (const a of orderLotAllocations) {
+      if (!m.has(a.lotNumber)) m.set(a.lotNumber, []);
+      m.get(a.lotNumber).push(a);
+    }
+    return m;
+  }, [orderLotAllocations]);
+
+  // Sum of qty allocated for one order line — drives "fully allocated" checks.
+  const allocatedQtyForLine = useCallback((orderId) => {
+    return (allocationsByOrder.get(orderId) || []).reduce((s, a) => s + (a.qtyAllocated || 0), 0);
+  }, [allocationsByOrder]);
+
+  // Group-level rollup status for an order group. Returns "Fulfilled",
+  // "Partially Fulfilled", or null (let existing line statuses speak).
+  const computeGroupStatus = useCallback((lines) => {
+    if (!lines || lines.length === 0) return null;
+    const allFulfilled = lines.every(l => l.status === "Fulfilled" || l.status === "Cancelled");
+    if (allFulfilled) return "Fulfilled";
+    const someAllocated = lines.some(l => allocatedQtyForLine(l.id) > 0);
+    const someUnallocated = lines.some(l => l.status !== "Fulfilled" && l.status !== "Cancelled" && allocatedQtyForLine(l.id) === 0);
+    if (someAllocated && someUnallocated) return "Partially Fulfilled";
+    if (someAllocated && !someUnallocated) return "Partially Fulfilled"; // some lines partially allocated within
+    return null;
+  }, [allocatedQtyForLine]);
 
   // Map of itemId -> array of alternate vendor rows. Declared early so it can
   // be referenced by viewItems / openEdit / save / genPOs without TDZ errors.
@@ -2718,6 +2911,7 @@ export default function App() {
               {sideBtn("production", "Production", <Hammer size={14} />)}
               {sideBtn("planning", "Planning", <TrendingUp size={14} />)}
               {sideBtn("performance", "Performance", <BarChart3 size={14} />)}
+              {sideBtn("lottracking", "Lot Tracking", <Layers size={14} />)}
               {sideBtn("log", "Transaction Log", <ScrollText size={14} />)}
               {isAdmin && sideBtn("admin", "Admin Config", <Settings size={14} />)}
             </nav>
@@ -2776,8 +2970,8 @@ export default function App() {
         <Stat icon={<ShoppingCart size={18} />} label="Open Orders" value={orderStats.pending} accent="#ec4899" />
       </div>}
 
-      {/* Filters (hidden on dashboard / performance) */}
-      {tab !== "dashboard" && tab !== "performance" && <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+      {/* Filters (hidden on dashboard / performance / lottracking) */}
+      {tab !== "dashboard" && tab !== "performance" && tab !== "lottracking" && <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
         <div style={{ position: "relative", flex: "1 1 200px", minWidth: 180 }}>
           <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#555" }} />
           <input placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...IS, paddingLeft: 32 }} />
@@ -3453,10 +3647,22 @@ export default function App() {
                           <option value="">Type...</option>
                           {ORDER_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                         </select>
-                        <select value={statuses.length === 1 ? statuses[0] : ""} onClick={e => e.stopPropagation()} onChange={(e) => { e.stopPropagation(); setGroupStatus(group, e.target.value); }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 12, background: statuses.length === 1 ? sC(statuses[0]) + "11" : "#1a1a2a", color: statuses.length === 1 ? sC(statuses[0]) : "#888", borderColor: statuses.length === 1 ? sC(statuses[0]) + "44" : "#333" }}>
-                          {statuses.length > 1 && <option value="">Mixed...</option>}
-                          {ORD_STATUSES.map(s => <option key={s}>{s}</option>)}
-                        </select>
+                        {(() => {
+                          const groupRollup = computeGroupStatus(group.lines);
+                          if (groupRollup === "Partially Fulfilled") {
+                            return (
+                              <span style={{ background: "#f59e0b11", color: "#f59e0b", borderRadius: 4, padding: "4px 10px", fontSize: 12, border: "1px solid #f59e0b44", fontWeight: 600 }}>
+                                Partially Fulfilled
+                              </span>
+                            );
+                          }
+                          return (
+                            <select value={statuses.length === 1 ? statuses[0] : ""} onClick={e => e.stopPropagation()} onChange={(e) => { e.stopPropagation(); setGroupStatus(group, e.target.value); }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 12, background: statuses.length === 1 ? sC(statuses[0]) + "11" : "#1a1a2a", color: statuses.length === 1 ? sC(statuses[0]) : "#888", borderColor: statuses.length === 1 ? sC(statuses[0]) + "44" : "#333" }}>
+                              {statuses.length > 1 && <option value="">Mixed...</option>}
+                              {ORD_STATUSES.map(s => <option key={s}>{s}</option>)}
+                            </select>
+                          );
+                        })()}
                         <button onClick={(e) => { e.stopPropagation(); addLinesToOrder(group); }} style={{ ...B2, padding: "5px 12px", fontSize: 12, borderColor: "#6366f144", color: "#6366f1" }}>
                           <Plus size={12} /> Add Line
                         </button>
@@ -3481,33 +3687,56 @@ export default function App() {
                             {group.lines.map(o => {
                               const it = gi(o.item);
                               const isFulfilled = o.status === "Fulfilled" || o.status === "Cancelled";
-                              const stockOk = it ? it.qty >= o.qty : false;
+                              const lineAllocs = allocationsByOrder.get(o.id) || [];
+                              const lineAllocTotal = lineAllocs.reduce((s, a) => s + a.qtyAllocated, 0);
+                              const isPartial = lineAllocTotal > 0 && lineAllocTotal < o.qty && !isFulfilled;
                               return (
-                                <tr key={o.id} style={{ opacity: isFulfilled ? 0.5 : 1 }}>
+                                <tr key={o.id} style={{ opacity: isFulfilled ? 0.6 : 1 }}>
                                   <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#8b8bf5" }}>{o.id}</td>
                                   <td style={TD}>
                                     <div style={{ fontWeight: 500 }}>{it?.name || o.item}</div>
                                     <div style={{ fontSize: 11, color: "#666" }}>{o.item}{it ? ` • ${it.qty} in stock` : ""}</div>
+                                    {lineAllocs.length > 0 && (
+                                      <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                                        {lineAllocs.map(a => (
+                                          <span key={a.id} title={`Lot ${a.lotNumber} • ${a.qtyAllocated} units • allocated ${a.allocatedAt ? new Date(a.allocatedAt).toLocaleDateString() : ""}`}
+                                            style={{ fontSize: 10, fontFamily: "monospace", background: "#fbbf2422", color: "#fbbf24", padding: "2px 6px", borderRadius: 4, border: "1px solid #fbbf2444" }}>
+                                            {a.lotNumber} ×{a.qtyAllocated}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
                                   </td>
                                   <td style={{ ...TD, fontWeight: 600, fontSize: 15 }}>{o.qty}</td>
                                   <td style={{ ...TD, fontSize: 13, color: "#888" }}>{(() => { const up = getUnitPrice(groupOrderType, o.item); return up > 0 ? `$${up.toFixed(2)}` : "—"; })()}</td>
                                   <td style={{ ...TD, fontSize: 13, fontWeight: 600, color: "#22c55e" }}>{(() => { const up = getUnitPrice(groupOrderType, o.item); const lt = o.qty * up; return lt > 0 ? `$${lt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"; })()}</td>
                                   <td style={TD}>
-                                    <select value={o.status} onClick={e => e.stopPropagation()} onChange={async (e) => {
-                                      const ns = e.target.value;
-                                      const updated = { ...o, status: ns };
-                                      setOrders(prev => prev.map(x => x.id === o.id ? updated : x));
-                                      try { await upsertOrder(updated); } catch (err) { console.warn(err); }
-                                    }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 12, background: sC(o.status) + "11", color: sC(o.status), borderColor: sC(o.status) + "44" }}>
-                                      {ORD_STATUSES.map(s => <option key={s}>{s}</option>)}
-                                    </select>
+                                    {isPartial ? (
+                                      <span style={{ background: "#f59e0b11", color: "#f59e0b", borderRadius: 4, padding: "4px 8px", fontSize: 11, border: "1px solid #f59e0b44" }}>
+                                        Partial ({lineAllocTotal}/{o.qty})
+                                      </span>
+                                    ) : (
+                                      <select value={o.status} onClick={e => e.stopPropagation()} onChange={async (e) => {
+                                        const ns = e.target.value;
+                                        const updated = { ...o, status: ns };
+                                        setOrders(prev => prev.map(x => x.id === o.id ? updated : x));
+                                        try { await upsertOrder(updated); } catch (err) { console.warn(err); }
+                                      }} style={{ ...IS, width: "auto", padding: "4px 8px", fontSize: 12, background: sC(o.status) + "11", color: sC(o.status), borderColor: sC(o.status) + "44" }}>
+                                        {ORD_STATUSES.map(s => <option key={s}>{s}</option>)}
+                                      </select>
+                                    )}
                                   </td>
                                   <td style={{ ...TD, fontSize: 12, color: "#888", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.notes || "—"}</td>
                                   <td style={TD}>
                                     <div style={{ display: "flex", gap: 4 }}>
                                       {!isFulfilled && (
-                                        <button onClick={(e) => { e.stopPropagation(); shipOrderLine(o); }} style={{ ...B2, padding: "4px 10px", borderColor: "#22c55e44", color: "#22c55e", fontSize: 11 }}>
-                                          <PackageCheck size={12} /> Ship
+                                        <button onClick={(e) => { e.stopPropagation(); openFulfillModal([o]); }} style={{ ...B2, padding: "4px 10px", borderColor: "#22c55e44", color: "#22c55e", fontSize: 11 }}>
+                                          <PackageCheck size={12} /> {isPartial ? "Continue" : "Ship"}
+                                        </button>
+                                      )}
+                                      {isFulfilled && lineAllocs.length > 0 && (
+                                        <button onClick={(e) => { e.stopPropagation(); unfulfillOrderLine(o); }} title="Un-fulfill (restores inventory)" style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 3, fontSize: 10 }}>
+                                          ⤺
                                         </button>
                                       )}
                                       {isFulfilled && <span style={{ fontSize: 11, color: "#22c55e" }}>✓ Shipped</span>}
@@ -4727,6 +4956,312 @@ export default function App() {
         );
       })()}
 
+      {/* ================== LOT TRACKING ================== */}
+      {tab === "lottracking" && (() => {
+        const q = lotSearchQuery.trim().toLowerCase();
+        // Find lot rows that match the search. Search hits both lot number and SKU id/name.
+        const matchedLots = lots.filter(l => {
+          if (!q) return false;
+          if ((l.lotNumber || "").toLowerCase().includes(q)) return true;
+          const item = allItems.find(i => i.id === l.itemId);
+          if (!item) return false;
+          return item.id.toLowerCase().includes(q) || (item.name || "").toLowerCase().includes(q);
+        });
+        // Also include any historical lots that may have qty=0 but had production runs / allocations
+        const historicalLotNums = new Set();
+        if (q) {
+          for (const r of prodRuns) {
+            if (r.lotNumber && (r.lotNumber.toLowerCase().includes(q) || (r.assemblyId || "").toLowerCase().includes(q) || (r.assemblyName || "").toLowerCase().includes(q))) {
+              historicalLotNums.add(`${r.assemblyId}|${r.lotNumber}`);
+            }
+          }
+          for (const a of orderLotAllocations) {
+            if ((a.lotNumber || "").toLowerCase().includes(q)) historicalLotNums.add(`${a.itemId}|${a.lotNumber}`);
+          }
+        }
+        const knownPairs = new Set(matchedLots.map(l => `${l.itemId}|${l.lotNumber}`));
+        const extraHistorical = [...historicalLotNums].filter(k => !knownPairs.has(k)).map(k => {
+          const [itemId, lotNumber] = k.split("|");
+          return { itemId, lotNumber, qty: 0, productionDate: null };
+        });
+        const lotResults = q ? [...matchedLots, ...extraHistorical] : [];
+
+        // Build the audit history for one lot: production, consumed-by-production, customer allocations.
+        const buildLotHistory = (itemId, lotNumber) => {
+          const events = [];
+          // Created via production
+          for (const r of prodRuns) {
+            if (r.assemblyId === itemId && r.lotNumber === lotNumber && r.status === "Complete") {
+              events.push({ kind: "create", date: r.date || r.createdAt, qty: r.qtyProduced, label: `Produced via ${r.id}`, ref: r.id });
+            }
+          }
+          // Consumed in higher-level production runs (this lot was used as a raw material)
+          for (const r of prodRuns) {
+            if (!r.consumed) continue;
+            for (const c of r.consumed) {
+              if (c.partId === itemId && c.lotNumber === lotNumber) {
+                events.push({ kind: "consume", date: r.date || r.createdAt, qty: -c.qty, label: `Consumed in ${r.id} (${r.assemblyName || r.assemblyId})`, ref: r.id });
+              }
+            }
+          }
+          // Allocated to customer orders
+          for (const a of orderLotAllocations) {
+            if (a.itemId === itemId && a.lotNumber === lotNumber) {
+              const orderRow = orders.find(o => o.id === a.orderId);
+              events.push({ kind: "ship", date: a.allocatedAt ? a.allocatedAt.slice(0, 10) : "", qty: -a.qtyAllocated, label: `→ ${orderRow?.customer || "Customer"} (Order ${a.orderId})`, ref: a.orderId, allocId: a.id });
+            }
+          }
+          // Sort events by date
+          events.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+          return events;
+        };
+
+        // For the allocate form: when lot # entered, look up its item and available qty
+        const allocateLotInfo = (() => {
+          if (!lotAllocateForm.lotNumber) return null;
+          const lot = lots.find(l => l.lotNumber === lotAllocateForm.lotNumber);
+          if (!lot) return null;
+          const item = allItems.find(i => i.id === lot.itemId);
+          return { lot, item };
+        })();
+        // Available customer orders that have an unfulfilled line for this lot's item
+        const candidateOrders = (() => {
+          if (!allocateLotInfo) return [];
+          return orders
+            .filter(o => o.item === allocateLotInfo.lot.itemId && o.status !== "Fulfilled" && o.status !== "Cancelled")
+            .map(o => ({
+              ...o,
+              alreadyAllocated: allocatedQtyForLine(o.id),
+              remaining: o.qty - allocatedQtyForLine(o.id),
+            }))
+            .filter(o => o.remaining > 0);
+        })();
+
+        const allActiveLots = lots
+          .filter(l => l.qty > 0)
+          .sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+
+        return (
+          <div>
+            {/* Search bar */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "16px 18px", marginBottom: 14 }}>
+              <h3 style={{ margin: "0 0 10px", fontSize: 15, color: "#e0e0e0", display: "flex", alignItems: "center", gap: 8 }}>
+                <Search size={16} /> Lot Audit / Recall Lookup
+              </h3>
+              <input
+                value={lotSearchQuery}
+                onChange={(e) => setLotSearchQuery(e.target.value)}
+                placeholder="Search by lot # or SKU (e.g. 60003, 300-CB Bin)..."
+                style={{ ...IS, fontSize: 14 }}
+              />
+              {q && lotResults.length === 0 && (
+                <p style={{ color: "#666", fontSize: 12, marginTop: 8 }}>No lots match "{lotSearchQuery}".</p>
+              )}
+            </div>
+
+            {/* Search results */}
+            {lotResults.map(l => {
+              const item = allItems.find(i => i.id === l.itemId);
+              const events = buildLotHistory(l.itemId, l.lotNumber);
+              const totalProduced = events.filter(e => e.kind === "create").reduce((s, e) => s + e.qty, 0);
+              const totalConsumed = -events.filter(e => e.kind === "consume").reduce((s, e) => s + e.qty, 0);
+              const totalShipped = -events.filter(e => e.kind === "ship").reduce((s, e) => s + e.qty, 0);
+              return (
+                <div key={`${l.itemId}|${l.lotNumber}`} style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #fbbf2444", padding: "16px 18px", marginBottom: 14 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 12 }}>
+                    <div>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace" }}>{l.lotNumber}</div>
+                      <div style={{ fontSize: 13, color: "#e0e0e0", marginTop: 2 }}>{item?.name || l.itemId} <span style={{ color: "#666", fontSize: 11 }}>({l.itemId})</span></div>
+                    </div>
+                    <div style={{ display: "flex", gap: 14, fontSize: 12 }}>
+                      <div><span style={{ color: "#666" }}>Produced:</span> <strong style={{ color: "#22c55e" }}>{totalProduced}</strong></div>
+                      <div><span style={{ color: "#666" }}>Consumed:</span> <strong style={{ color: "#a78bfa" }}>{totalConsumed}</strong></div>
+                      <div><span style={{ color: "#666" }}>Shipped:</span> <strong style={{ color: "#fbbf24" }}>{totalShipped}</strong></div>
+                      <div><span style={{ color: "#666" }}>Remaining:</span> <strong style={{ color: l.qty > 0 ? "#e0e0e0" : "#888" }}>{l.qty}</strong></div>
+                    </div>
+                  </div>
+                  {/* Movement timeline */}
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Movement History</div>
+                    {events.length === 0 ? (
+                      <p style={{ fontSize: 12, color: "#555", margin: 0 }}>No movement records for this lot.</p>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {events.map((ev, idx) => {
+                          const isCreate = ev.kind === "create";
+                          const isShip = ev.kind === "ship";
+                          const isConsume = ev.kind === "consume";
+                          const color = isCreate ? "#22c55e" : isShip ? "#fbbf24" : "#a78bfa";
+                          const icon = isCreate ? "📦" : isShip ? "🚚" : "🔨";
+                          return (
+                            <div key={idx} style={{ display: "grid", gridTemplateColumns: "30px 100px 1fr 80px", gap: 10, alignItems: "center", padding: "6px 10px", background: "#16161e", borderRadius: 6, borderLeft: `3px solid ${color}`, fontSize: 12 }}>
+                              <span style={{ fontSize: 14 }}>{icon}</span>
+                              <span style={{ color: "#888", fontFamily: "monospace" }}>{ev.date || "—"}</span>
+                              <span style={{ color: "#e0e0e0" }}>{ev.label}</span>
+                              <span style={{ color, fontWeight: 600, textAlign: "right" }}>{ev.qty > 0 ? `+${ev.qty}` : ev.qty}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Allocate Lot form */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "16px 18px", marginBottom: 14 }}>
+              <h3 style={{ margin: "0 0 10px", fontSize: 15, color: "#e0e0e0", display: "flex", alignItems: "center", gap: 8 }}>
+                <PackageCheck size={16} /> Allocate a Lot
+              </h3>
+              <p style={{ fontSize: 12, color: "#888", margin: "0 0 12px" }}>
+                Push a specific lot to a customer order. Useful for backfilling historical orders or hand-picking when FIFO isn't right.
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Lot Number</label>
+                  <input
+                    value={lotAllocateForm.lotNumber}
+                    onChange={(e) => setLotAllocateForm(f => ({ ...f, lotNumber: e.target.value, orderId: "", qty: 0 }))}
+                    placeholder="e.g. 60003-040626"
+                    style={IS}
+                    list="all-lots"
+                  />
+                  <datalist id="all-lots">
+                    {allActiveLots.map(l => <option key={`${l.itemId}|${l.lotNumber}`} value={l.lotNumber} />)}
+                  </datalist>
+                  {allocateLotInfo && (
+                    <div style={{ fontSize: 11, color: "#22c55e", marginTop: 4 }}>
+                      ✓ {allocateLotInfo.item?.name} • {allocateLotInfo.lot.qty} available
+                    </div>
+                  )}
+                  {lotAllocateForm.lotNumber && !allocateLotInfo && (
+                    <div style={{ fontSize: 11, color: "#ef4444", marginTop: 4 }}>Lot not found in active inventory</div>
+                  )}
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Send to Customer Order</label>
+                  <select
+                    value={lotAllocateForm.orderId}
+                    onChange={(e) => setLotAllocateForm(f => ({ ...f, orderId: e.target.value }))}
+                    disabled={!allocateLotInfo}
+                    style={IS}
+                  >
+                    <option value="">Select order...</option>
+                    {candidateOrders.map(o => (
+                      <option key={o.id} value={o.id}>
+                        {o.customer} • {o.date} • need {o.remaining} more (Order {o.id})
+                      </option>
+                    ))}
+                  </select>
+                  {allocateLotInfo && candidateOrders.length === 0 && (
+                    <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>No open orders need this SKU.</div>
+                  )}
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity</label>
+                  <input
+                    type="number" min={0} step="any"
+                    value={lotAllocateForm.qty || 0}
+                    onChange={(e) => setLotAllocateForm(f => ({ ...f, qty: Number(e.target.value) || 0 }))}
+                    style={IS}
+                  />
+                  {allocateLotInfo && lotAllocateForm.orderId && (() => {
+                    const o = candidateOrders.find(c => c.id === lotAllocateForm.orderId);
+                    const max = Math.min(allocateLotInfo.lot.qty, o?.remaining || 0);
+                    return <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>Max: {max}</div>;
+                  })()}
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end" }}>
+                  <button
+                    onClick={async () => {
+                      if (!allocateLotInfo) { show("Lot not found", "error"); return; }
+                      if (!lotAllocateForm.orderId) { show("Pick an order", "error"); return; }
+                      if (lotAllocateForm.qty <= 0) { show("Quantity must be > 0", "error"); return; }
+                      const o = candidateOrders.find(c => c.id === lotAllocateForm.orderId);
+                      if (!o) return;
+                      const max = Math.min(allocateLotInfo.lot.qty, o.remaining);
+                      if (lotAllocateForm.qty > max) { show(`Quantity exceeds available (max ${max})`, "error"); return; }
+                      try {
+                        const inserted = await createOrderLotAllocations([{
+                          orderId: o.id, itemId: o.item, lotNumber: lotAllocateForm.lotNumber,
+                          qtyAllocated: lotAllocateForm.qty,
+                          locationFrom: allocateLotInfo.item?.location || "Dumpling Factory",
+                          allocatedBy: profile?.email || "",
+                        }]);
+                        setOrderLotAllocations(prev => [...prev, ...inserted]);
+                        // Decrement lot inventory
+                        try { await adjustLotQty(o.item, lotAllocateForm.lotNumber, -lotAllocateForm.qty, null, null); } catch (e) { console.warn(e.message); }
+                        setLots(prev => prev.map(l => l.itemId === o.item && l.lotNumber === lotAllocateForm.lotNumber ? { ...l, qty: l.qty - lotAllocateForm.qty } : l).filter(l => l.qty > 0));
+                        // If line is now fully allocated, mark Fulfilled
+                        const newTotal = allocatedQtyForLine(o.id) + lotAllocateForm.qty;
+                        if (newTotal >= o.qty) {
+                          const updated = { ...o, status: "Fulfilled" };
+                          setOrders(prev => prev.map(x => x.id === o.id ? updated : x));
+                          try { await upsertOrder(updated); } catch (e) { console.warn(e.message); }
+                          // Also deduct item.qty (matches existing fulfillment behavior)
+                          const it = allItems.find(i => i.id === o.item);
+                          if (it) {
+                            const newQty = it.qty - o.qty;
+                            const isPart = parts.some(p => p.id === it.id);
+                            if (isPart) setParts(prev => prev.map(p => p.id === it.id ? { ...p, qty: newQty } : p));
+                            else setAssemblies(prev => prev.map(a => a.id === it.id ? { ...a, qty: newQty } : a));
+                            try { await updateItemQty(it.id, newQty); } catch (e) { console.warn(e.message); }
+                          }
+                        }
+                        show(`Allocated ${lotAllocateForm.qty} of ${lotAllocateForm.lotNumber} to ${o.customer}`);
+                        setLotAllocateForm({ lotNumber: "", itemId: "", orderId: "", qty: 0 });
+                      } catch (e) { show(e.message, "error"); }
+                    }}
+                    style={{ ...B1, width: "100%" }}
+                    disabled={!allocateLotInfo || !lotAllocateForm.orderId || lotAllocateForm.qty <= 0}
+                  >
+                    <PackageCheck size={14} /> Allocate
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* All active lots */}
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+              <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <h3 style={{ margin: 0, fontSize: 14, color: "#ccc" }}>All Active Lots</h3>
+                <span style={{ fontSize: 11, color: "#666" }}>{allActiveLots.length} active</span>
+              </div>
+              {allActiveLots.length === 0 ? (
+                <div style={{ padding: 30, textAlign: "center", color: "#555" }}>No active lots in inventory.</div>
+              ) : (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ background: "#16161e", color: "#888", fontSize: 10, textTransform: "uppercase" }}>
+                        <th style={{ padding: "8px 12px", textAlign: "left" }}>Lot #</th>
+                        <th style={{ padding: "8px 12px", textAlign: "left" }}>SKU</th>
+                        <th style={{ padding: "8px 12px", textAlign: "right" }}>Qty</th>
+                        <th style={{ padding: "8px 12px", textAlign: "left" }}>Made</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {allActiveLots.map(l => {
+                        const item = allItems.find(i => i.id === l.itemId);
+                        return (
+                          <tr key={`${l.itemId}|${l.lotNumber}`} onClick={() => setLotSearchQuery(l.lotNumber)} style={{ borderTop: "1px solid #2a2a3a", cursor: "pointer" }}>
+                            <td style={{ padding: "8px 12px", fontFamily: "monospace", color: "#fbbf24" }}>{l.lotNumber}</td>
+                            <td style={{ padding: "8px 12px", color: "#e0e0e0" }}>{item?.name || l.itemId}<span style={{ color: "#666", fontSize: 10, marginLeft: 6 }}>{l.itemId}</span></td>
+                            <td style={{ padding: "8px 12px", textAlign: "right", fontWeight: 600, color: "#22c55e" }}>{l.qty}</td>
+                            <td style={{ padding: "8px 12px", color: "#888" }}>{l.productionDate || "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ================== TRANSACTION LOG ================== */}
       {tab === "log" && (
         <div>
@@ -5932,6 +6467,133 @@ export default function App() {
           <button onClick={() => setDelUserConfirm(null)} style={B2}>Cancel</button>
           <button onClick={() => delUser(delUserConfirm.id)} style={{ ...B1, background: "#dc2626" }}>Remove</button>
         </div>
+      </Modal>
+
+      {/* Fulfillment / Allocation Modal — opens on Ship/Fulfill button click.
+          For each unfulfilled line, FIFO-suggests lot allocations the user can
+          edit. Lines fully allocated get marked Fulfilled; partial lines stay
+          open and the order group reads as "Partially Fulfilled". */}
+      <Modal open={!!fulfillModal} onClose={() => { setFulfillModal(null); setFulfillRows([]); }} title="Fulfill Order — Allocate Lots" wide>
+        {fulfillModal && (() => {
+          // Compute summary
+          const fullyCount = fulfillRows.filter(r => {
+            const total = r.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
+            return total >= r.line.qty;
+          }).length;
+          const partialCount = fulfillRows.filter(r => {
+            const total = r.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
+            return total > 0 && total < r.line.qty;
+          }).length;
+          const noneCount = fulfillRows.filter(r => r.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0) === 0).length;
+          const anyOverallocated = fulfillRows.some(r => r.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0) > r.line.qty);
+          const anyAllocated = fulfillRows.some(r => r.allocations.some(a => a.lotNumber && a.qty > 0));
+          // Detect double-allocation: same lot used multiple times in same modal (legal but requires totals to fit lot avail)
+          const lotUsage = new Map();
+          for (const r of fulfillRows) {
+            for (const a of r.allocations) {
+              if (!a.lotNumber || !a.qty) continue;
+              const key = `${r.line.item}|${a.lotNumber}`;
+              lotUsage.set(key, (lotUsage.get(key) || 0) + Number(a.qty));
+            }
+          }
+          const overdrawnLots = [];
+          for (const [key, used] of lotUsage.entries()) {
+            const [itemId, lotNumber] = key.split("|");
+            const lot = (lotsByItem[itemId] || []).find(l => l.lotNumber === lotNumber);
+            if (lot && used > lot.qty) overdrawnLots.push(`${lotNumber} (need ${used}, have ${lot.qty})`);
+          }
+          const customer = fulfillModal.lines[0]?.customer || "";
+          return (
+            <>
+              <div style={{ marginBottom: 14, padding: "10px 14px", background: "#1a1a2a", borderRadius: 8, border: "1px solid #6366f133", fontSize: 12, color: "#a78bfa" }}>
+                <strong>{customer}</strong> • {fulfillRows.length} line{fulfillRows.length === 1 ? "" : "s"} •
+                <span style={{ color: "#22c55e", marginLeft: 6 }}>{fullyCount} fully allocated</span>
+                {partialCount > 0 && <span style={{ color: "#f59e0b", marginLeft: 6 }}>• {partialCount} partial</span>}
+                {noneCount > 0 && <span style={{ color: "#888", marginLeft: 6 }}>• {noneCount} no lots assigned</span>}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
+                {fulfillRows.map((row, rowIdx) => {
+                  const totalAlloc = row.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
+                  const isFull = totalAlloc >= row.line.qty;
+                  const isOver = totalAlloc > row.line.qty;
+                  const remaining = row.line.qty - totalAlloc;
+                  const availableLots = (lotsByItem[row.line.item] || [])
+                    .filter(l => l.qty > 0)
+                    .sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+                  return (
+                    <div key={row.line.id} style={{ background: "#16161e", borderRadius: 10, border: `1px solid ${isOver ? "#ef4444" : isFull ? "#22c55e44" : (totalAlloc > 0 ? "#f59e0b44" : "#2a2a3a")}`, padding: "12px 14px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10, gap: 10, flexWrap: "wrap" }}>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: "#e0e0e0" }}>
+                            {row.line.qty}× {row.item?.name || row.line.item}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#666", fontFamily: "monospace" }}>{row.line.item}</div>
+                        </div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: isOver ? "#ef4444" : isFull ? "#22c55e" : (totalAlloc > 0 ? "#f59e0b" : "#888") }}>
+                          {isOver ? "⚠ over-allocated" : isFull ? "✓ fully allocated" : (totalAlloc > 0 ? `⚠ ${remaining} short` : "no allocation")}
+                          <span style={{ color: "#888", marginLeft: 8, fontWeight: 400 }}>{totalAlloc} / {row.line.qty}</span>
+                        </div>
+                      </div>
+                      {!row.isLotTracked ? (
+                        <div style={{ fontSize: 12, color: "#888", fontStyle: "italic", padding: "8px 0" }}>
+                          This item is not lot-tracked. Confirm fulfillment to mark complete without allocation.
+                        </div>
+                      ) : availableLots.length === 0 && row.allocations.length === 0 ? (
+                        <div style={{ fontSize: 12, color: "#ef4444", padding: "8px 0" }}>
+                          No lots in inventory. Cannot allocate this line.
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {row.allocations.map((alloc, allocIdx) => (
+                            <div key={allocIdx} style={{ display: "grid", gridTemplateColumns: "2fr 100px 80px 30px", gap: 8, alignItems: "center" }}>
+                              <select value={alloc.lotNumber} onChange={(e) => {
+                                const lot = availableLots.find(l => l.lotNumber === e.target.value);
+                                updateFulfillAllocation(rowIdx, allocIdx, {
+                                  lotNumber: e.target.value,
+                                  productionDate: lot?.productionDate || "",
+                                  availableInLot: lot?.qty || 0,
+                                });
+                              }} style={{ ...IS, fontSize: 12 }}>
+                                <option value="">Select lot...</option>
+                                {availableLots.map(l => (
+                                  <option key={l.lotNumber} value={l.lotNumber}>
+                                    {l.lotNumber} ({l.qty} avail{l.productionDate ? `, made ${l.productionDate}` : ""})
+                                  </option>
+                                ))}
+                              </select>
+                              <input type="number" min={0} step="any" value={alloc.qty || 0} onChange={(e) => updateFulfillAllocation(rowIdx, allocIdx, { qty: Number(e.target.value) || 0 })} style={{ ...IS, fontSize: 12 }} />
+                              <span style={{ fontSize: 11, color: "#666" }}>{alloc.availableInLot ? `of ${alloc.availableInLot}` : ""}</span>
+                              <button onClick={() => removeFulfillAllocation(rowIdx, allocIdx)} title="Remove" style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 2 }}><X size={14} /></button>
+                            </div>
+                          ))}
+                          <button onClick={() => addFulfillAllocation(rowIdx)} style={{ ...B2, fontSize: 11, padding: "4px 10px", alignSelf: "flex-start", marginTop: 4 }}>
+                            <Plus size={12} /> Split across another lot
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {overdrawnLots.length > 0 && (
+                <div style={{ background: "#2a1a1a", border: "1px solid #ef444466", borderRadius: 8, padding: "10px 14px", marginBottom: 12, fontSize: 12, color: "#fca5a5" }}>
+                  <strong style={{ color: "#ef4444" }}>Cannot save — over-allocated lots:</strong>
+                  <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                    {overdrawnLots.map(l => <li key={l}>{l}</li>)}
+                  </ul>
+                </div>
+              )}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <button onClick={() => { setFulfillModal(null); setFulfillRows([]); }} style={B2}>Cancel</button>
+                <button onClick={confirmFulfillment} disabled={fulfillSubmitting || !anyAllocated || anyOverallocated || overdrawnLots.length > 0}
+                  style={{ ...B1, background: fullyCount === fulfillRows.length ? "#22c55e" : "#f59e0b", color: "#000", opacity: (fulfillSubmitting || !anyAllocated || anyOverallocated || overdrawnLots.length > 0) ? 0.4 : 1 }}>
+                  {fulfillSubmitting ? <Loader2 size={14} className="spin" /> : <PackageCheck size={14} />}
+                  {fullyCount === fulfillRows.length ? " Confirm & Mark Fulfilled" : " Confirm Partial Fulfillment"}
+                </button>
+              </div>
+            </>
+          );
+        })()}
       </Modal>
 
       {/* Wish Granted Celebration Modal — appears when this user has any

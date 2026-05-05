@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v111
+// SUPABASE VERSION: v112
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -116,6 +116,64 @@ export async function setItemVendors(itemId, rows) {
     unit_cost: Number(r.unitCost) || 0,
   }));
   const { error } = await supabase.from("item_vendors").insert(payload);
+  if (error) throw error;
+}
+
+// -- ORDER LOT ALLOCATIONS (lot # traceability per order line) --
+// Each row says: "qty_allocated of item_id from lot_number was used to fulfill
+// order_id". One order line can have multiple allocation rows when split
+// across lots. Core mechanism for recall traceability.
+
+export async function fetchOrderLotAllocations(orderId) {
+  let q = supabase.from("order_lot_allocations").select("*").order("allocated_at");
+  if (orderId) q = q.eq("order_id", orderId);
+  const { data, error } = await q;
+  if (error) throw error;
+  return (data || []).map(r => ({
+    id: r.id,
+    orderId: r.order_id,
+    itemId: r.item_id,
+    lotNumber: r.lot_number,
+    qtyAllocated: Number(r.qty_allocated) || 0,
+    locationFrom: r.location_from || "Dumpling Factory",
+    allocatedAt: r.allocated_at,
+    allocatedBy: r.allocated_by || "",
+  }));
+}
+
+export async function createOrderLotAllocations(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const payload = rows.map(r => ({
+    order_id: r.orderId,
+    item_id: r.itemId,
+    lot_number: r.lotNumber,
+    qty_allocated: Number(r.qtyAllocated) || 0,
+    location_from: r.locationFrom || "Dumpling Factory",
+    allocated_by: r.allocatedBy || "",
+  }));
+  const { data, error } = await supabase.from("order_lot_allocations").insert(payload).select();
+  if (error) throw error;
+  return (data || []).map(r => ({
+    id: r.id,
+    orderId: r.order_id,
+    itemId: r.item_id,
+    lotNumber: r.lot_number,
+    qtyAllocated: Number(r.qty_allocated) || 0,
+    locationFrom: r.location_from || "Dumpling Factory",
+    allocatedAt: r.allocated_at,
+    allocatedBy: r.allocated_by || "",
+  }));
+}
+
+// Delete all allocations for an order (used for un-fulfillment / order delete).
+export async function deleteOrderLotAllocations(orderId) {
+  const { error } = await supabase.from("order_lot_allocations").delete().eq("order_id", orderId);
+  if (error) throw error;
+}
+
+// Delete a single allocation by id (for backfill corrections).
+export async function deleteOrderLotAllocation(id) {
+  const { error } = await supabase.from("order_lot_allocations").delete().eq("id", id);
   if (error) throw error;
 }
 
