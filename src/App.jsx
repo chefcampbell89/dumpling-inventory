@@ -1,4 +1,4 @@
-// APP VERSION: v141
+// APP VERSION: v142
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -3107,11 +3107,12 @@ export default function App() {
           .filter(p => p.status === "Sent" || p.status === "Confirmed")
           .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
 
-        // ===== Outgoing orders by type (upcoming week ship dates only) =====
+        // ===== Outgoing orders by type (upcoming week ship dates) =====
         const weekEndDate = addDays(planWeekMonday, 6); // Sunday
         const lineDollars = (o) => (o.qty || 0) * getUnitPrice(o.orderType, o.item);
-        const weekOpenOrders = orders.filter(o =>
-          (o.status === "Pending" || o.status === "Confirmed") &&
+        const isDone = (o) => o.status === "Fulfilled";
+        const weekOrders = orders.filter(o =>
+          o.status !== "Cancelled" &&
           o.shipDate && o.shipDate >= planWeekMonday && o.shipDate <= weekEndDate
         );
         const ordersByType = {};
@@ -3120,7 +3121,7 @@ export default function App() {
         ordersByType.__other = {};
         typeTotals.__other = 0;
         let grandTotal = 0;
-        for (const o of weekOpenOrders) {
+        for (const o of weekOrders) {
           const t = ORDER_TYPES.includes(o.orderType) ? o.orderType : "__other";
           if (!ordersByType[t][o.customer]) ordersByType[t][o.customer] = [];
           ordersByType[t][o.customer].push(o);
@@ -3128,6 +3129,22 @@ export default function App() {
           typeTotals[t] += v;
           grandTotal += v;
         }
+        // Per type, split each customer's lines into open + done entries (done sorted last).
+        const customerEntriesFor = (t) => {
+          const group = ordersByType[t];
+          if (!group) return [];
+          const entries = [];
+          for (const [cust, lines] of Object.entries(group)) {
+            const openLines = lines.filter(o => !isDone(o));
+            const doneLines = lines.filter(isDone);
+            if (openLines.length) entries.push({ cust, lines: openLines, done: false });
+            if (doneLines.length) entries.push({ cust, lines: doneLines, done: true });
+          }
+          return entries.sort((a, b) => {
+            if (a.done !== b.done) return a.done ? 1 : -1;
+            return a.cust.localeCompare(b.cust);
+          });
+        };
         const fmtDollars = (n) => `$${Math.round(n).toLocaleString()}`;
         const shortType = (t) => t.length > 14 ? t.split(" ")[0] : t;
 
@@ -3291,29 +3308,37 @@ export default function App() {
                   <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 700 }}>{fmtDollars(grandTotal)}</span>
                 </div>
                 <div style={{ overflowY: "auto", flex: 1 }}>
-                  {weekOpenOrders.length === 0 ? (
+                  {weekOrders.length === 0 ? (
                     <div style={{ padding: 20, textAlign: "center", color: "#555", fontSize: 12 }}>No orders shipping this week.</div>
                   ) : (
                     [...ORDER_TYPES, "__other"].map(t => {
                       const group = ordersByType[t];
                       if (!group || Object.keys(group).length === 0) return null;
                       const totalCustomers = Object.keys(group).length;
+                      const entries = customerEntriesFor(t);
                       return (
                         <div key={t}>
                           <div style={{ padding: "8px 14px", background: "#16161e", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#a78bfa", letterSpacing: "0.05em", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #2a2a3a" }}>
                             <span>{t === "__other" ? "Other" : shortType(t)} <span style={{ color: "#555", fontWeight: 500 }}>({totalCustomers})</span></span>
                             <span style={{ color: "#22c55e", fontSize: 11 }}>{fmtDollars(typeTotals[t])}</span>
                           </div>
-                          {Object.entries(group).map(([cust, lines]) => {
-                            const custTotal = lines.reduce((s, o) => s + lineDollars(o), 0);
+                          {entries.map((e, idx) => {
+                            const custTotal = e.lines.reduce((s, o) => s + lineDollars(o), 0);
+                            const nameColor = e.done ? "#666" : "#e0e0e0";
+                            const itemColor = e.done ? "#555" : "#888";
+                            const dollarColor = e.done ? "#3f6f4f" : "#22c55e";
+                            const decoration = e.done ? "line-through" : "none";
                             return (
-                              <div key={cust} style={{ padding: "8px 14px", borderBottom: "1px solid #1a1a2a" }}>
+                              <div key={`${e.cust}-${idx}-${e.done ? "d" : "o"}`} style={{ padding: "8px 14px", borderBottom: "1px solid #1a1a2a", opacity: e.done ? 0.7 : 1 }}>
                                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-                                  <div style={{ fontSize: 12, fontWeight: 600, color: "#e0e0e0" }}>{cust}</div>
-                                  <div style={{ fontSize: 11, color: "#22c55e", fontWeight: 600, whiteSpace: "nowrap" }}>{fmtDollars(custTotal)}</div>
+                                  <div style={{ fontSize: 12, fontWeight: 600, color: nameColor, textDecoration: decoration }}>
+                                    {e.cust}
+                                    {e.done && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#3f6f4f", textDecoration: "none", letterSpacing: "0.05em" }}>SHIPPED</span>}
+                                  </div>
+                                  <div style={{ fontSize: 11, color: dollarColor, fontWeight: 600, whiteSpace: "nowrap", textDecoration: decoration }}>{fmtDollars(custTotal)}</div>
                                 </div>
-                                <div style={{ fontSize: 10, color: "#888", marginTop: 2 }}>
-                                  {lines.map(o => {
+                                <div style={{ fontSize: 10, color: itemColor, marginTop: 2, textDecoration: decoration }}>
+                                  {e.lines.map(o => {
                                     const m = o.item.match(/^\d+-(\w+)/);
                                     const it = gi(o.item);
                                     return `${o.qty} ${m ? m[1] : (it?.name || o.item)}`;
