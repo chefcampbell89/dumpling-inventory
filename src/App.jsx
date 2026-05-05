@@ -1,4 +1,4 @@
-// APP VERSION: v139
+// APP VERSION: v140
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -5016,26 +5016,43 @@ export default function App() {
           return events;
         };
 
-        // For the allocate form: when lot # entered, look up its item and available qty
-        const allocateLotInfo = (() => {
-          if (!lotAllocateForm.lotNumber) return null;
-          const lot = lots.find(l => l.lotNumber === lotAllocateForm.lotNumber);
-          if (!lot) return null;
-          const item = allItems.find(i => i.id === lot.itemId);
-          return { lot, item };
+        // SKU-first allocation flow:
+        //   1. Pick a lot-tracked SKU
+        //   2. Pick from lots available for that SKU
+        //   3. Pick from open customer orders for that SKU
+        //   4. Set qty
+
+        // SKUs with at least one available lot
+        const itemsWithLots = (() => {
+          const ids = new Set(lots.filter(l => l.qty > 0).map(l => l.itemId));
+          return allItems
+            .filter(i => ids.has(i.id))
+            .sort((a, b) => (a.id || "").localeCompare(b.id || ""));
         })();
-        // Available customer orders that have an unfulfilled line for this lot's item
-        const candidateOrders = (() => {
-          if (!allocateLotInfo) return [];
-          return orders
-            .filter(o => o.item === allocateLotInfo.lot.itemId && o.status !== "Fulfilled" && o.status !== "Cancelled")
-            .map(o => ({
-              ...o,
-              alreadyAllocated: allocatedQtyForLine(o.id),
-              remaining: o.qty - allocatedQtyForLine(o.id),
-            }))
-            .filter(o => o.remaining > 0);
-        })();
+
+        // Available lots for the selected SKU (FIFO order)
+        const availableLotsForSelectedItem = lotAllocateForm.itemId
+          ? (lotsByItem[lotAllocateForm.itemId] || [])
+              .filter(l => l.qty > 0)
+              .sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""))
+          : [];
+
+        // Selected lot record (if any)
+        const selectedLot = lotAllocateForm.itemId && lotAllocateForm.lotNumber
+          ? lots.find(l => l.itemId === lotAllocateForm.itemId && l.lotNumber === lotAllocateForm.lotNumber)
+          : null;
+
+        // Open customer orders with unfulfilled lines for the selected SKU
+        const candidateOrders = lotAllocateForm.itemId
+          ? orders
+              .filter(o => o.item === lotAllocateForm.itemId && o.status !== "Fulfilled" && o.status !== "Cancelled")
+              .map(o => ({
+                ...o,
+                alreadyAllocated: allocatedQtyForLine(o.id),
+                remaining: o.qty - allocatedQtyForLine(o.id),
+              }))
+              .filter(o => o.remaining > 0)
+          : [];
 
         const allActiveLots = lots
           .filter(l => l.qty > 0)
@@ -5109,117 +5126,157 @@ export default function App() {
               );
             })}
 
-            {/* Allocate Lot form */}
+            {/* Allocate Lot form — SKU first, then lot, then destination */}
             <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "16px 18px", marginBottom: 14 }}>
               <h3 style={{ margin: "0 0 10px", fontSize: 15, color: "#e0e0e0", display: "flex", alignItems: "center", gap: 8 }}>
                 <PackageCheck size={16} /> Allocate a Lot
               </h3>
-              <p style={{ fontSize: 12, color: "#888", margin: "0 0 12px" }}>
+              <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>
                 Push a specific lot to a customer order. Useful for backfilling historical orders or hand-picking when FIFO isn't right.
               </p>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <div>
-                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Lot Number</label>
-                  <input
-                    value={lotAllocateForm.lotNumber}
-                    onChange={(e) => setLotAllocateForm(f => ({ ...f, lotNumber: e.target.value, orderId: "", qty: 0 }))}
-                    placeholder="e.g. 60003-040626"
-                    style={IS}
-                    list="all-lots"
-                  />
-                  <datalist id="all-lots">
-                    {allActiveLots.map(l => <option key={`${l.itemId}|${l.lotNumber}`} value={l.lotNumber} />)}
-                  </datalist>
-                  {allocateLotInfo && (
-                    <div style={{ fontSize: 11, color: "#22c55e", marginTop: 4 }}>
-                      ✓ {allocateLotInfo.item?.name} • {allocateLotInfo.lot.qty} available
+
+              {/* Step 1: SKU */}
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>
+                  <span style={{ color: "#fbbf24", fontWeight: 700 }}>1.</span> SKU
+                </label>
+                <select
+                  value={lotAllocateForm.itemId}
+                  onChange={(e) => setLotAllocateForm({ itemId: e.target.value, lotNumber: "", orderId: "", qty: 0 })}
+                  style={IS}
+                >
+                  <option value="">Select SKU...</option>
+                  {itemsWithLots.map(it => (
+                    <option key={it.id} value={it.id}>[{it.id}] {it.name}</option>
+                  ))}
+                </select>
+                {itemsWithLots.length === 0 && (
+                  <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>No lot-tracked SKUs with available inventory.</div>
+                )}
+              </div>
+
+              {/* Step 2: Lot */}
+              {lotAllocateForm.itemId && (
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>
+                    <span style={{ color: "#fbbf24", fontWeight: 700 }}>2.</span> Available Lots
+                    <span style={{ color: "#666", marginLeft: 6, fontWeight: 400 }}>(oldest first)</span>
+                  </label>
+                  {availableLotsForSelectedItem.length === 0 ? (
+                    <div style={{ fontSize: 12, color: "#ef4444", padding: "8px 0" }}>No active lots for this SKU.</div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      {availableLotsForSelectedItem.map(l => {
+                        const isSelected = lotAllocateForm.lotNumber === l.lotNumber;
+                        return (
+                          <label key={l.lotNumber}
+                            style={{ display: "grid", gridTemplateColumns: "20px 1fr 100px 100px", alignItems: "center", gap: 8,
+                              padding: "8px 12px", borderRadius: 6, cursor: "pointer",
+                              background: isSelected ? "#fbbf2422" : "#16161e",
+                              border: `1px solid ${isSelected ? "#fbbf24" : "#2a2a3a"}` }}>
+                            <input type="radio" name="alloc-lot" checked={isSelected}
+                              onChange={() => setLotAllocateForm(f => ({ ...f, lotNumber: l.lotNumber, qty: 0 }))}
+                              style={{ accentColor: "#fbbf24" }} />
+                            <span style={{ fontFamily: "monospace", color: isSelected ? "#fbbf24" : "#e0e0e0", fontWeight: isSelected ? 700 : 500 }}>{l.lotNumber}</span>
+                            <span style={{ fontSize: 12, color: "#888", textAlign: "right" }}>{l.qty} avail</span>
+                            <span style={{ fontSize: 11, color: "#666", textAlign: "right" }}>made {l.productionDate || "?"}</span>
+                          </label>
+                        );
+                      })}
                     </div>
                   )}
-                  {lotAllocateForm.lotNumber && !allocateLotInfo && (
-                    <div style={{ fontSize: 11, color: "#ef4444", marginTop: 4 }}>Lot not found in active inventory</div>
+                </div>
+              )}
+
+              {/* Step 3: Destination */}
+              {lotAllocateForm.itemId && lotAllocateForm.lotNumber && (
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>
+                    <span style={{ color: "#fbbf24", fontWeight: 700 }}>3.</span> Where is this going?
+                  </label>
+                  {candidateOrders.length === 0 ? (
+                    <div style={{ fontSize: 12, color: "#888", padding: "8px 0" }}>
+                      No open customer orders with a line for this SKU.
+                    </div>
+                  ) : (
+                    <select
+                      value={lotAllocateForm.orderId}
+                      onChange={(e) => setLotAllocateForm(f => ({ ...f, orderId: e.target.value, qty: 0 }))}
+                      style={IS}
+                    >
+                      <option value="">Select customer order...</option>
+                      {candidateOrders.map(o => (
+                        <option key={o.id} value={o.id}>
+                          {o.customer} • {o.date} • need {o.remaining} more (Order {o.id})
+                        </option>
+                      ))}
+                    </select>
                   )}
+                  <div style={{ fontSize: 10, color: "#555", marginTop: 4, fontStyle: "italic" }}>
+                    Internal-location transfers coming in a future update.
+                  </div>
                 </div>
-                <div>
-                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Send to Customer Order</label>
-                  <select
-                    value={lotAllocateForm.orderId}
-                    onChange={(e) => setLotAllocateForm(f => ({ ...f, orderId: e.target.value }))}
-                    disabled={!allocateLotInfo}
-                    style={IS}
-                  >
-                    <option value="">Select order...</option>
-                    {candidateOrders.map(o => (
-                      <option key={o.id} value={o.id}>
-                        {o.customer} • {o.date} • need {o.remaining} more (Order {o.id})
-                      </option>
-                    ))}
-                  </select>
-                  {allocateLotInfo && candidateOrders.length === 0 && (
-                    <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>No open orders need this SKU.</div>
-                  )}
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Quantity</label>
-                  <input
-                    type="number" min={0} step="any"
-                    value={lotAllocateForm.qty || 0}
-                    onChange={(e) => setLotAllocateForm(f => ({ ...f, qty: Number(e.target.value) || 0 }))}
-                    style={IS}
-                  />
-                  {allocateLotInfo && lotAllocateForm.orderId && (() => {
-                    const o = candidateOrders.find(c => c.id === lotAllocateForm.orderId);
-                    const max = Math.min(allocateLotInfo.lot.qty, o?.remaining || 0);
-                    return <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>Max: {max}</div>;
-                  })()}
-                </div>
-                <div style={{ display: "flex", alignItems: "flex-end" }}>
-                  <button
-                    onClick={async () => {
-                      if (!allocateLotInfo) { show("Lot not found", "error"); return; }
-                      if (!lotAllocateForm.orderId) { show("Pick an order", "error"); return; }
-                      if (lotAllocateForm.qty <= 0) { show("Quantity must be > 0", "error"); return; }
-                      const o = candidateOrders.find(c => c.id === lotAllocateForm.orderId);
-                      if (!o) return;
-                      const max = Math.min(allocateLotInfo.lot.qty, o.remaining);
-                      if (lotAllocateForm.qty > max) { show(`Quantity exceeds available (max ${max})`, "error"); return; }
-                      try {
-                        const inserted = await createOrderLotAllocations([{
-                          orderId: o.id, itemId: o.item, lotNumber: lotAllocateForm.lotNumber,
-                          qtyAllocated: lotAllocateForm.qty,
-                          locationFrom: allocateLotInfo.item?.location || "Dumpling Factory",
-                          allocatedBy: profile?.email || "",
-                        }]);
-                        setOrderLotAllocations(prev => [...prev, ...inserted]);
-                        // Decrement lot inventory
-                        try { await adjustLotQty(o.item, lotAllocateForm.lotNumber, -lotAllocateForm.qty, null, null); } catch (e) { console.warn(e.message); }
-                        setLots(prev => prev.map(l => l.itemId === o.item && l.lotNumber === lotAllocateForm.lotNumber ? { ...l, qty: l.qty - lotAllocateForm.qty } : l).filter(l => l.qty > 0));
-                        // If line is now fully allocated, mark Fulfilled
-                        const newTotal = allocatedQtyForLine(o.id) + lotAllocateForm.qty;
-                        if (newTotal >= o.qty) {
-                          const updated = { ...o, status: "Fulfilled" };
-                          setOrders(prev => prev.map(x => x.id === o.id ? updated : x));
-                          try { await upsertOrder(updated); } catch (e) { console.warn(e.message); }
-                          // Also deduct item.qty (matches existing fulfillment behavior)
-                          const it = allItems.find(i => i.id === o.item);
-                          if (it) {
-                            const newQty = it.qty - o.qty;
-                            const isPart = parts.some(p => p.id === it.id);
-                            if (isPart) setParts(prev => prev.map(p => p.id === it.id ? { ...p, qty: newQty } : p));
-                            else setAssemblies(prev => prev.map(a => a.id === it.id ? { ...a, qty: newQty } : a));
-                            try { await updateItemQty(it.id, newQty); } catch (e) { console.warn(e.message); }
+              )}
+
+              {/* Step 4: Qty + Allocate */}
+              {lotAllocateForm.itemId && lotAllocateForm.lotNumber && lotAllocateForm.orderId && (() => {
+                const o = candidateOrders.find(c => c.id === lotAllocateForm.orderId);
+                const max = o ? Math.min(selectedLot?.qty || 0, o.remaining) : 0;
+                return (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, alignItems: "flex-end" }}>
+                    <div>
+                      <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>
+                        <span style={{ color: "#fbbf24", fontWeight: 700 }}>4.</span> Quantity
+                        <span style={{ color: "#666", marginLeft: 6, fontWeight: 400 }}>(max {max})</span>
+                      </label>
+                      <input
+                        type="number" min={0} max={max} step="any"
+                        value={lotAllocateForm.qty || 0}
+                        onChange={(e) => setLotAllocateForm(f => ({ ...f, qty: Math.min(max, Number(e.target.value) || 0) }))}
+                        style={IS}
+                      />
+                    </div>
+                    <button
+                      onClick={async () => {
+                        if (!selectedLot || !o) return;
+                        if (lotAllocateForm.qty <= 0) { show("Quantity must be > 0", "error"); return; }
+                        if (lotAllocateForm.qty > max) { show(`Quantity exceeds available (max ${max})`, "error"); return; }
+                        try {
+                          const inserted = await createOrderLotAllocations([{
+                            orderId: o.id, itemId: o.item, lotNumber: lotAllocateForm.lotNumber,
+                            qtyAllocated: lotAllocateForm.qty,
+                            locationFrom: allItems.find(i => i.id === o.item)?.location || "Dumpling Factory",
+                            allocatedBy: profile?.email || "",
+                          }]);
+                          setOrderLotAllocations(prev => [...prev, ...inserted]);
+                          try { await adjustLotQty(o.item, lotAllocateForm.lotNumber, -lotAllocateForm.qty, null, null); } catch (e) { console.warn(e.message); }
+                          setLots(prev => prev.map(l => l.itemId === o.item && l.lotNumber === lotAllocateForm.lotNumber ? { ...l, qty: l.qty - lotAllocateForm.qty } : l).filter(l => l.qty > 0));
+                          const newTotal = allocatedQtyForLine(o.id) + lotAllocateForm.qty;
+                          if (newTotal >= o.qty) {
+                            const updated = { ...o, status: "Fulfilled" };
+                            setOrders(prev => prev.map(x => x.id === o.id ? updated : x));
+                            try { await upsertOrder(updated); } catch (e) { console.warn(e.message); }
+                            const it = allItems.find(i => i.id === o.item);
+                            if (it) {
+                              const newQty = it.qty - o.qty;
+                              const isPart = parts.some(p => p.id === it.id);
+                              if (isPart) setParts(prev => prev.map(p => p.id === it.id ? { ...p, qty: newQty } : p));
+                              else setAssemblies(prev => prev.map(a => a.id === it.id ? { ...a, qty: newQty } : a));
+                              try { await updateItemQty(it.id, newQty); } catch (e) { console.warn(e.message); }
+                            }
                           }
-                        }
-                        show(`Allocated ${lotAllocateForm.qty} of ${lotAllocateForm.lotNumber} to ${o.customer}`);
-                        setLotAllocateForm({ lotNumber: "", itemId: "", orderId: "", qty: 0 });
-                      } catch (e) { show(e.message, "error"); }
-                    }}
-                    style={{ ...B1, width: "100%" }}
-                    disabled={!allocateLotInfo || !lotAllocateForm.orderId || lotAllocateForm.qty <= 0}
-                  >
-                    <PackageCheck size={14} /> Allocate
-                  </button>
-                </div>
-              </div>
+                          show(`Allocated ${lotAllocateForm.qty} of ${lotAllocateForm.lotNumber} to ${o.customer}`);
+                          setLotAllocateForm({ itemId: "", lotNumber: "", orderId: "", qty: 0 });
+                        } catch (e) { show(e.message, "error"); }
+                      }}
+                      style={{ ...B1, height: 36, padding: "0 18px" }}
+                      disabled={lotAllocateForm.qty <= 0 || lotAllocateForm.qty > max}
+                    >
+                      <PackageCheck size={14} /> Allocate
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* All active lots */}
