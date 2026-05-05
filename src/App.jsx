@@ -1,4 +1,4 @@
-// APP VERSION: v136
+// APP VERSION: v138
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -2833,7 +2833,7 @@ export default function App() {
         const runDateOf = (r) => r.plannedDate || r.date;
         const buildWeek = (mondayStr) => {
           const satDate = addDays(mondayStr, 5);
-          const baseDays = [0, 1, 2, 3, 4].map(off => addDays(mondayStr, off));
+          const days = [0, 1, 2, 3, 4, 5].map(off => addDays(mondayStr, off));
           const runsByDate = {};
           for (const r of prodRuns) {
             if (!isPlanRun(r)) continue;
@@ -2843,8 +2843,6 @@ export default function App() {
             const m = (r.assemblyId || "").match(/^\d+-(\w+)/);
             runsByDate[rd].push({ pl: m ? m[1] : "?", qty: r.qtyProduced || 0, type: typeOf(r) });
           }
-          const showSat = (runsByDate[satDate] || []).length > 0;
-          const days = showSat ? [...baseDays, satDate] : baseDays;
           const cells = days.map((d, i) => {
             const runs = runsByDate[d] || [];
             const byKey = {};
@@ -2861,8 +2859,13 @@ export default function App() {
           });
           return { mondayStr, cells };
         };
-        const week1 = buildWeek(planWeekMonday);
-        const week2 = buildWeek(addDays(planWeekMonday, 7));
+        const week1Full = buildWeek(planWeekMonday);
+        const week2Full = buildWeek(addDays(planWeekMonday, 7));
+        const showSat = week1Full.cells[5].lines.length > 0 || week2Full.cells[5].lines.length > 0;
+        const nCols = showSat ? 6 : 5;
+        const week1 = { ...week1Full, cells: week1Full.cells.slice(0, nCols) };
+        const week2 = { ...week2Full, cells: week2Full.cells.slice(0, nCols) };
+        const headerLabels = dayLabels.slice(0, nCols);
 
         // ===== Inventory by flavor =====
         const _dpCache = {};
@@ -3031,38 +3034,44 @@ export default function App() {
                   <span>Production Plan</span>
                   <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>Fills &amp; Batches only</span>
                 </div>
+                {/* Shared day-of-week header */}
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${nCols}, 1fr)`, gap: 1, background: "#2a2a3a", borderBottom: "1px solid #2a2a3a" }}>
+                  {headerLabels.map((lbl, i) => (
+                    <div key={i} style={{ background: "#16161e", padding: "5px 6px", fontSize: 10, color: "#888", fontWeight: 700, textTransform: "uppercase", textAlign: "center", letterSpacing: "0.05em" }}>{lbl}</div>
+                  ))}
+                </div>
                 {[
-                  { label: "This Week", w: week1 },
-                  { label: "Next Week", w: week2 },
+                  { label: "This Week", w: week1, showLabel: false },
+                  { label: "Next Week", w: week2, showLabel: true },
                 ].map((row, ri) => (
-                  <div key={ri}>
-                    <div style={{ padding: "6px 12px", background: "#16161e", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#a78bfa", letterSpacing: "0.05em", display: "flex", justifyContent: "space-between", borderTop: ri === 0 ? "none" : "1px solid #2a2a3a", borderBottom: "1px solid #2a2a3a" }}>
-                      <span>{row.label}</span>
-                      <span style={{ color: "#555", fontWeight: 500 }}>Wk of {row.w.mondayStr}</span>
-                    </div>
-                    <div style={{ display: "grid", gridTemplateColumns: `repeat(${row.w.cells.length}, 1fr)`, gap: 1, background: "#2a2a3a" }}>
+                  <React.Fragment key={ri}>
+                    {row.showLabel && (
+                      <div style={{ padding: "3px 12px", background: "#16161e", fontSize: 9, fontWeight: 700, textTransform: "uppercase", color: "#a78bfa", letterSpacing: "0.05em", display: "flex", justifyContent: "space-between", borderTop: "1px solid #2a2a3a", borderBottom: "1px solid #2a2a3a" }}>
+                        <span>{row.label}</span>
+                        <span style={{ color: "#555", fontWeight: 500 }}>Wk of {row.w.mondayStr}</span>
+                      </div>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: `repeat(${nCols}, 1fr)`, gap: 1, background: "#2a2a3a" }}>
                       {row.w.cells.map((c, i) => (
-                        <div key={i} style={{ background: "#1e1e2e", padding: "10px 8px", minHeight: 110 }}>
-                          <div style={{ fontSize: 11, color: "#888", fontWeight: 600, textTransform: "uppercase" }}>{c.label}</div>
-                          <div style={{ fontSize: 9, color: "#555", marginBottom: 6 }}>{c.date.slice(5)}</div>
+                        <div key={i} style={{ background: "#1e1e2e", padding: "5px 6px 7px" }}>
+                          <div style={{ fontSize: 8, color: "#555", fontWeight: 400, marginBottom: 3, textAlign: "right" }}>{c.date.slice(5)}</div>
                           {c.lines.length === 0 ? (
-                            <div style={{ fontSize: 11, color: "#444", fontStyle: "italic" }}>—</div>
+                            <div style={{ fontSize: 10, color: "#3a3a4a" }}>—</div>
                           ) : (
-                            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                              {c.lines.slice(0, 5).map((ln, j) => (
-                                <div key={j} style={{ fontSize: 13, color: "#e0e0e0", fontWeight: 600, display: "flex", alignItems: "baseline", gap: 4 }}>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                              {c.lines.map((ln, j) => (
+                                <div key={j} style={{ fontSize: 12, color: "#e0e0e0", fontWeight: 600, display: "flex", alignItems: "baseline", gap: 3, lineHeight: 1.15 }}>
                                   <span style={{ color: "#fbbf24" }}>{ln.qty}</span>
                                   <span style={{ color: "#a78bfa" }}>{ln.pl}</span>
-                                  <span style={{ fontSize: 9, color: ln.type === "B" ? "#22c55e" : "#06b6d4", fontWeight: 700 }}>{ln.type}</span>
+                                  <span style={{ fontSize: 8, color: ln.type === "B" ? "#22c55e" : "#06b6d4", fontWeight: 700 }}>{ln.type}</span>
                                 </div>
                               ))}
-                              {c.lines.length > 5 && <div style={{ fontSize: 10, color: "#666" }}>+{c.lines.length - 5}</div>}
                             </div>
                           )}
                         </div>
                       ))}
                     </div>
-                  </div>
+                  </React.Fragment>
                 ))}
               </div>
 
