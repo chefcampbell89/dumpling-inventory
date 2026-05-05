@@ -1,4 +1,4 @@
-// APP VERSION: v133
+// APP VERSION: v135
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -24,7 +24,7 @@ import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
   ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
-  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles, TrendingUp, TrendingDown, ChevronLeft, Calendar, LayoutDashboard, BarChart3, Activity, Minus as MinusIcon,
+  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles, TrendingUp, TrendingDown, ChevronLeft, Calendar, LayoutDashboard, BarChart3, Activity, Minus as MinusIcon, Menu,
 } from "lucide-react";
 
 import { LineChart, Line, ResponsiveContainer, Tooltip as ChartTooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend } from "recharts";
@@ -643,11 +643,16 @@ export default function App() {
   const [editOriginalLot, setEditOriginalLot] = useState("");
 
   // ---- Dashboard State ----
-  const [dashView, setDashView] = useState("daily");
   const [dailyNote, setDailyNote] = useState({ text: "", updatedAt: null, updatedBy: "" });
   const [editingNote, setEditingNote] = useState(false);
   const [noteText, setNoteText] = useState("");
-  const [blockersOpen, setBlockersOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isNarrow, setIsNarrow] = useState(typeof window !== "undefined" ? window.innerWidth < 900 : false);
+  useEffect(() => {
+    const onResize = () => setIsNarrow(window.innerWidth < 900);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   // Config aliases (so existing JSX references keep working)
   const LEVELS = cfgLevels;
@@ -1224,82 +1229,8 @@ export default function App() {
     });
   }, [productLines, planItems, allItems, autoForecast]);
 
-  // ---- Dashboard Computed Data (sourced from draft production runs) ----
+  // ---- Dashboard helpers ----
   const todayStr = useMemo(() => fmtDate(new Date()), []);
-
-  const todaysDraftRuns = useMemo(() => {
-    return prodRuns.filter(r => (r.status || "Complete") === "Draft" && r.plannedDate === todayStr);
-  }, [prodRuns, todayStr]);
-
-  const todaysForecast = useMemo(() => {
-    const byLine = {};
-    for (const r of todaysDraftRuns) {
-      const m = r.assemblyId.match(/^\d+-(\w+)/);
-      const pl = m ? m[1] : "?";
-      if (!byLine[pl]) byLine[pl] = { productLine: pl, plannedQty: 0 };
-      byLine[pl].plannedQty += r.qtyProduced;
-    }
-    return Object.values(byLine);
-  }, [todaysDraftRuns]);
-
-  const todaysShipments = useMemo(() => {
-    return orders.filter(o => o.shipDate === todayStr);
-  }, [orders, todayStr]);
-
-  const weekShipments = useMemo(() => {
-    const monday = getMonday(todayStr);
-    const sunday = addDays(monday, 6);
-    return orders.filter(o => o.shipDate && o.shipDate >= monday && o.shipDate <= sunday);
-  }, [orders, todayStr]);
-
-  const weekForecast = useMemo(() => {
-    const monday = getMonday(todayStr);
-    const sunday = addDays(monday, 6);
-    const weekDraftRuns = prodRuns.filter(r => (r.status || "Complete") === "Draft" && r.plannedDate && r.plannedDate >= monday && r.plannedDate <= sunday);
-    const weekCompleteRuns = prodRuns.filter(r => (r.status || "Complete") === "Complete" && r.date && r.date >= monday && r.date <= sunday);
-    const byLine = {};
-    for (const r of weekDraftRuns) {
-      const m = r.assemblyId.match(/^\d+-(\w+)/);
-      const pl = m ? m[1] : "?";
-      if (!byLine[pl]) byLine[pl] = { planned: 0, actual: 0 };
-      byLine[pl].planned += r.qtyProduced;
-    }
-    for (const r of weekCompleteRuns) {
-      const m = r.assemblyId.match(/^\d+-(\w+)/);
-      const pl = m ? m[1] : "?";
-      if (!byLine[pl]) byLine[pl] = { planned: 0, actual: 0 };
-      byLine[pl].actual += r.qtyProduced;
-    }
-    return { byLine };
-  }, [prodRuns, todayStr]);
-
-  const todaysBlockers = useMemo(() => {
-    if (todaysDraftRuns.length === 0) return [];
-    const rawNeeds = {};
-    const explodeToRaw = (id, mult) => {
-      const it = allItems.find(i => i.id === id);
-      if (!it) return;
-      if (getLevel(it.id) === 100) {
-        if (!rawNeeds[it.id]) rawNeeds[it.id] = { item: it, needed: 0 };
-        rawNeeds[it.id].needed += mult;
-        return;
-      }
-      if (it.bom) for (const l of it.bom) explodeToRaw(l.partId, l.qty * mult);
-    };
-    for (const r of todaysDraftRuns) {
-      explodeToRaw(r.assemblyId, r.qtyProduced);
-    }
-    return Object.values(rawNeeds)
-      .filter(r => r.item.qty < r.needed)
-      .map(r => ({
-        id: r.item.id, name: r.item.name,
-        needed: Math.ceil(r.needed * 1000) / 1000,
-        onHand: r.item.qty,
-        shortfall: Math.ceil((r.needed - r.item.qty) * 1000) / 1000,
-        unit: r.item.unit,
-      }))
-      .sort((a, b) => b.shortfall - a.shortfall);
-  }, [todaysDraftRuns, allItems]);
 
   // Load drafts and completed runs for the currently viewed planning week
   useEffect(() => {
@@ -2654,10 +2585,29 @@ export default function App() {
     show("Exported");
   };
 
-  const tabBtn = (k, lbl, ico) => (
-    <button onClick={() => { setTab(k); setSearch(""); setLevelFilter([]); setStockFilter("All"); setSortCol(null); }}
-      style={{ ...B2, background: tab === k ? "#6366f1" : "#2a2a3a", color: tab === k ? "#fff" : "#ccc", borderColor: tab === k ? "#6366f1" : "#333" }}>{ico}{lbl}</button>
-  );
+  const sideBtn = (k, lbl, ico) => {
+    const active = tab === k;
+    return (
+      <button
+        onClick={() => { setTab(k); setSearch(""); setLevelFilter([]); setStockFilter("All"); setSortCol(null); setSidebarOpen(false); }}
+        style={{
+          display: "flex", alignItems: "center", gap: 10,
+          width: "100%", padding: "10px 14px", marginBottom: 2,
+          background: active ? "#6366f1" : "transparent",
+          color: active ? "#fff" : "#bbb",
+          border: "none", borderRadius: 8,
+          fontSize: 13, fontWeight: active ? 600 : 500,
+          cursor: "pointer", textAlign: "left",
+          transition: "background 120ms",
+        }}
+        onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "#23233355"; }}
+        onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
+      >
+        <span style={{ display: "inline-flex", width: 16, justifyContent: "center" }}>{ico}</span>
+        <span>{lbl}</span>
+      </button>
+    );
+  };
 
   // ============================================================
   // RENDER
@@ -2725,19 +2675,75 @@ export default function App() {
       )}
 
       {/* ====== MAIN APP (only when authenticated) ====== */}
-      {!loading && authUser && (<>
+      {!loading && authUser && (<div style={{ display: "flex", alignItems: "flex-start", gap: 0, minHeight: "100vh", margin: "-16px -20px" }}>
+
+      {/* ===== SIDEBAR ===== */}
+      {(!isNarrow || sidebarOpen) && (
+        <>
+          {isNarrow && (
+            <div onClick={() => setSidebarOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 90 }} />
+          )}
+          <aside style={{
+            width: 220,
+            background: "#16161e",
+            borderRight: "1px solid #2a2a3a",
+            padding: "18px 12px",
+            position: isNarrow ? "fixed" : "sticky",
+            top: 0,
+            left: 0,
+            height: "100vh",
+            overflowY: "auto",
+            zIndex: 100,
+            flexShrink: 0,
+            boxShadow: isNarrow ? "2px 0 20px rgba(0,0,0,0.5)" : "none",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18, padding: "0 6px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Sparkles size={20} style={{ color: "#fbbf24" }} />
+                <span style={{ fontSize: 15, fontWeight: 700, background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>{appName}</span>
+              </div>
+              {isNarrow && (
+                <button onClick={() => setSidebarOpen(false)} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", padding: 4 }}><X size={16} /></button>
+              )}
+            </div>
+            <nav>
+              {sideBtn("dashboard", "Dashboard", <LayoutDashboard size={14} />)}
+              {sideBtn("inventory", "Inventory", <Package size={14} />)}
+              {sideBtn("items", "Item Master", <Layers size={14} />)}
+              {sideBtn("orders", "Orders", <ShoppingCart size={14} />)}
+              {sideBtn("vendors", "Vendors", <Building2 size={14} />)}
+              {sideBtn("mrp", "Purchase Needs", <ClipboardList size={14} />)}
+              {sideBtn("pos", "Purchase Orders", <FileText size={14} />)}
+              {sideBtn("receiving", "Receiving", <PackageCheck size={14} />)}
+              {sideBtn("production", "Production", <Hammer size={14} />)}
+              {sideBtn("planning", "Planning", <TrendingUp size={14} />)}
+              {sideBtn("performance", "Performance", <BarChart3 size={14} />)}
+              {sideBtn("log", "Transaction Log", <ScrollText size={14} />)}
+              {isAdmin && sideBtn("admin", "Admin Config", <Settings size={14} />)}
+            </nav>
+          </aside>
+        </>
+      )}
+
+      {/* ===== MAIN ===== */}
+      <div style={{ flex: 1, minWidth: 0, padding: "16px 20px" }}>
 
       {/* Toast */}
       {toast && <div style={{ position: "fixed", top: 20, right: 20, background: toast.t === "error" ? "#dc2626" : "#16a34a", color: "#fff", padding: "12px 20px", borderRadius: 8, fontSize: 14, zIndex: 2000, display: "flex", alignItems: "center", gap: 8, boxShadow: "0 4px 20px rgba(0,0,0,0.4)" }}><CheckCircle size={16} />{toast.msg}</div>}
 
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}>
-            <Sparkles size={26} style={{ color: "#fbbf24" }} />
-            <span style={{ background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>{appName}</span>
-          </h1>
-          <p style={{ margin: "2px 0 0", color: "#555", fontSize: 12 }}>Powered by Ops Genie</p>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {isNarrow && (
+            <button onClick={() => setSidebarOpen(true)} style={{ ...B2, padding: "6px 8px" }} title="Menu"><Menu size={16} /></button>
+          )}
+          <div>
+            <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}>
+              <Sparkles size={26} style={{ color: "#fbbf24" }} />
+              <span style={{ background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>{appName}</span>
+            </h1>
+            <p style={{ margin: "2px 0 0", color: "#555", fontSize: 12 }}>Powered by Ops Genie</p>
+          </div>
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           {/* Golden Lamps */}
@@ -2769,23 +2775,6 @@ export default function App() {
         <Stat icon={<span style={{ fontSize: 18 }}>&#129791;</span>} label="Total Dumplings" value={stats.totalPcs.toLocaleString()} accent="#f59e0b" />
         <Stat icon={<ShoppingCart size={18} />} label="Open Orders" value={orderStats.pending} accent="#ec4899" />
       </div>}
-
-      {/* Tab Bar */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        {tabBtn("dashboard", "Dashboard", <LayoutDashboard size={14} />)}
-        {tabBtn("inventory", "Inventory", <Package size={14} />)}
-        {tabBtn("items", "Item Master", <Layers size={14} />)}
-        {tabBtn("orders", "Orders", <ShoppingCart size={14} />)}
-        {tabBtn("vendors", "Vendors", <Building2 size={14} />)}
-        {tabBtn("mrp", "Purchase Needs", <ClipboardList size={14} />)}
-        {tabBtn("pos", "Purchase Orders", <FileText size={14} />)}
-        {tabBtn("receiving", "Receiving", <PackageCheck size={14} />)}
-        {tabBtn("production", "Production", <Hammer size={14} />)}
-        {tabBtn("planning", "Planning", <TrendingUp size={14} />)}
-        {tabBtn("performance", "Performance", <BarChart3 size={14} />)}
-        {tabBtn("log", "Transaction Log", <ScrollText size={14} />)}
-        {isAdmin && tabBtn("admin", "Admin Config", <Settings size={14} />)}
-      </div>
 
       {/* Filters (hidden on dashboard / performance) */}
       {tab !== "dashboard" && tab !== "performance" && <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
@@ -2827,23 +2816,38 @@ export default function App() {
         const todayDisplay = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
         const isStale = dailyNote.updatedAt && dailyNote.updatedAt.slice(0, 10) !== todayStr;
 
-        // Group shipments by customer+shipDate
-        const shipSource = dashView === "daily" ? todaysShipments : weekShipments;
-        const shipGroups = {};
-        for (const o of shipSource) {
-          const key = `${o.customer}|||${o.shipDate}`;
-          if (!shipGroups[key]) shipGroups[key] = { customer: o.customer, shipDate: o.shipDate, lines: [] };
-          shipGroups[key].lines.push(o);
+        // ===== Production Plan week (Sunday flip) =====
+        const dow = new Date().getDay(); // 0=Sun ... 6=Sat
+        const weekRefDate = dow === 0 ? addDays(todayStr, 1) : todayStr;
+        const planWeekMonday = getMonday(weekRefDate);
+        const dayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const baseDays = [0, 1, 2, 3, 4].map(off => addDays(planWeekMonday, off));
+        const satDate = addDays(planWeekMonday, 5);
+
+        const runDateOf = (r) => r.plannedDate || r.date;
+        const weekRunsByDate = {};
+        for (const r of prodRuns) {
+          const rd = runDateOf(r);
+          if (!rd || rd < planWeekMonday || rd > satDate) continue;
+          if (!weekRunsByDate[rd]) weekRunsByDate[rd] = [];
+          const m = (r.assemblyId || "").match(/^\d+-(\w+)/);
+          weekRunsByDate[rd].push({ pl: m ? m[1] : "?", qty: r.qtyProduced || 0 });
         }
-        const shipGroupArr = Object.values(shipGroups);
+        const showSat = (weekRunsByDate[satDate] || []).length > 0;
+        const planDays = showSat ? [...baseDays, satDate] : baseDays;
+        const dayCells = planDays.map((d, i) => {
+          const runs = weekRunsByDate[d] || [];
+          const byPl = {};
+          for (const r of runs) byPl[r.pl] = (byPl[r.pl] || 0) + r.qty;
+          return {
+            date: d,
+            label: dayLabels[i],
+            lines: Object.entries(byPl).map(([pl, qty]) => ({ pl, qty })).sort((a, b) => b.qty - a.qty),
+          };
+        });
+        const planFromTomorrow = dow === 0;
 
-        // Pieces calculator
-        const calcPieces = (productLine, batches) => {
-          const batchItem = allItems.find(i => i.id === `250-${productLine} Batch`);
-          return batchItem && batchItem.piecesPerUnit > 0 ? Math.round(batches * batchItem.piecesPerUnit) : 0;
-        };
-
-        // Calculate dumplings per unit for any item by walking BOM tree
+        // ===== Inventory by flavor =====
         const _dpCache = {};
         const dumplingsPer = (itemId) => {
           if (_dpCache[itemId] !== undefined) return _dpCache[itemId];
@@ -2855,75 +2859,123 @@ export default function App() {
           for (const b of item.bom) total += b.qty * dumplingsPer(b.partId);
           return (_dpCache[itemId] = total);
         };
+        const isCateringId = (id) => /catering/i.test(id);
+        const flavorOfId = (id) => { const m = (id || "").match(/^\d+-(\w+)/); return m ? m[1] : null; };
+        const flavorRows = productLines.map(pl => {
+          const has = (id) => allItems.find(i => i.id === id);
+          const sumQty = (filterFn) => allItems.filter(filterFn).reduce((s, i) => s + (i.qty || 0), 0);
+          const bins = sumQty(i => getLevel(i.id) === 300 && flavorOfId(i.id) === pl);
+          const packItem = has(`400-${pl} Pack`);
+          const packs = packItem ? (packItem.qty || 0) : 0;
+          const fsItem = has(`400-${pl} Food Service Case`);
+          const fsCases = fsItem ? (fsItem.qty || 0) : 0;
+          const cateringQty = sumQty(i => getLevel(i.id) === 400 && flavorOfId(i.id) === pl && isCateringId(i.id));
+          const retailCaseItem = has(`500-${pl} Retail Case`);
+          const retailCases = retailCaseItem ? (retailCaseItem.qty || 0) : 0;
+          const totalDumplings = allItems.filter(i => flavorOfId(i.id) === pl && (i.qty || 0) > 0 && dumplingsPer(i.id) > 0)
+            .reduce((s, i) => s + i.qty * dumplingsPer(i.id), 0);
+          const onOrder = orders
+            .filter(o => (o.status === "Pending" || o.status === "Confirmed") && flavorOfId(o.item) === pl)
+            .reduce((s, o) => s + (o.qty || 0) * dumplingsPer(o.item), 0);
+          return {
+            pl, bins, packs, fsCases, cateringQty, retailCases,
+            totalDumplings: Math.round(totalDumplings),
+            onOrder: Math.round(onOrder),
+            diff: Math.round(totalDumplings - onOrder),
+          };
+        });
 
-        // Flavor breakdown: on-order vs in-inventory dumplings
-        const flavorBreakdown = productLines.map(pl => {
-          // On order (pending + confirmed)
-          const onOrderItems = orders.filter(o => {
-            if (o.status !== "Pending" && o.status !== "Confirmed") return false;
-            const m = o.item.match(/^\d+-(\w+)/);
-            return m && m[1] === pl;
-          });
-          const onOrderPcs = onOrderItems.reduce((s, o) => s + o.qty * dumplingsPer(o.item), 0);
+        // ===== POs Awaiting =====
+        const awaitingPOs = pos
+          .filter(p => p.status === "Sent" || p.status === "Confirmed")
+          .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
 
-          // In inventory: all items with this product line that have dumplings
-          const invPcs = allItems.filter(i => {
-            const m = i.id.match(/^\d+-(\w+)/);
-            return m && m[1] === pl && i.qty > 0 && dumplingsPer(i.id) > 0;
-          }).reduce((s, i) => s + i.qty * dumplingsPer(i.id), 0);
-
-          return { pl, onOrderPcs: Math.round(onOrderPcs), invPcs: Math.round(invPcs) };
-        }).filter(fb => fb.onOrderPcs > 0 || fb.invPcs > 0);
-
-        // Tomorrow's shipments
-        const tomorrowStr = addDays(todayStr, 1);
-        const tomorrowShipments = orders.filter(o => o.shipDate === tomorrowStr);
-        const todayShipPcs = todaysShipments.reduce((s, o) => s + o.qty * dumplingsPer(o.item), 0);
-        const tomorrowShipPcs = tomorrowShipments.reduce((s, o) => s + o.qty * dumplingsPer(o.item), 0);
-        const todayShipGroups = {};
-        for (const o of todaysShipments) {
-          const key = `${o.customer}|||${o.shipDate}`;
-          if (!todayShipGroups[key]) todayShipGroups[key] = { customer: o.customer, shipDate: o.shipDate, lines: [] };
-          todayShipGroups[key].lines.push(o);
+        // ===== Outgoing orders by type (upcoming week ship dates only) =====
+        const weekEndDate = addDays(planWeekMonday, 6); // Sunday
+        const lineDollars = (o) => (o.qty || 0) * getUnitPrice(o.orderType, o.item);
+        const weekOpenOrders = orders.filter(o =>
+          (o.status === "Pending" || o.status === "Confirmed") &&
+          o.shipDate && o.shipDate >= planWeekMonday && o.shipDate <= weekEndDate
+        );
+        const ordersByType = {};
+        const typeTotals = {};
+        for (const t of ORDER_TYPES) { ordersByType[t] = {}; typeTotals[t] = 0; }
+        ordersByType.__other = {};
+        typeTotals.__other = 0;
+        let grandTotal = 0;
+        for (const o of weekOpenOrders) {
+          const t = ORDER_TYPES.includes(o.orderType) ? o.orderType : "__other";
+          if (!ordersByType[t][o.customer]) ordersByType[t][o.customer] = [];
+          ordersByType[t][o.customer].push(o);
+          const v = lineDollars(o);
+          typeTotals[t] += v;
+          grandTotal += v;
         }
-        const todayShipGroupArr = Object.values(todayShipGroups);
-        const tomorrowShipGroups = {};
-        for (const o of tomorrowShipments) {
-          const key = `${o.customer}|||${o.shipDate}`;
-          if (!tomorrowShipGroups[key]) tomorrowShipGroups[key] = { customer: o.customer, shipDate: o.shipDate, lines: [] };
-          tomorrowShipGroups[key].lines.push(o);
-        }
-        const tomorrowShipGroupArr = Object.values(tomorrowShipGroups);
+        const fmtDollars = (n) => `$${Math.round(n).toLocaleString()}`;
+        const shortType = (t) => t.length > 14 ? t.split(" ")[0] : t;
 
-        // Actual production logged today/week (completed runs)
-        const todayCompletedRuns = prodRuns.filter(r => (r.status || "Complete") === "Complete" && r.date === todayStr);
-        const actualByLine = {};
-        for (const r of todayCompletedRuns) {
-          const m = r.assemblyId.match(/^\d+-(\w+)/);
-          if (m) actualByLine[m[1]] = (actualByLine[m[1]] || 0) + r.qtyProduced;
+        // ===== Demand chart =====
+        const currentMonday = getMonday(todayStr);
+        const weeks = [];
+        for (let i = 12; i >= 0; i -= 1) {
+          const ws = addDays(currentMonday, -7 * i);
+          const we = addDays(ws, 6);
+          const m = parseDate(ws);
+          weeks.push({ weekStart: ws, weekEnd: we, label: `${m.toLocaleString("en-US", { month: "short" })} ${m.getDate()}` });
         }
+        const weekIndexFor = (dateStr) => {
+          if (!dateStr) return -1;
+          const d = parseDate(dateStr);
+          for (let i = 0; i < weeks.length; i += 1) {
+            const s = parseDate(weeks[i].weekStart);
+            const e = parseDate(weeks[i].weekEnd);
+            if (d >= s && d <= e) return i;
+          }
+          return -1;
+        };
+        const flavorsSeen = new Set();
+        const flavorWeekTotals = {};
+        for (const o of orders) {
+          if ((o.status || "").toLowerCase() !== "fulfilled") continue;
+          const wi = weekIndexFor(o.shipDate || o.date);
+          if (wi < 0) continue;
+          const item = allItems.find(i => i.id === o.item);
+          if (!item) continue;
+          const ppu = item.piecesPerUnit || 0;
+          if (ppu <= 0) continue;
+          const fl = flavorOfId(item.id) || "—";
+          flavorsSeen.add(fl);
+          if (!flavorWeekTotals[fl]) flavorWeekTotals[fl] = Array(weeks.length).fill(0);
+          flavorWeekTotals[fl][wi] += (Number(o.qty) || 0) * ppu;
+        }
+        const flavors = [...flavorsSeen].sort();
+        const flavorChartData = weeks.map((w, i) => {
+          const row = { week: w.label };
+          for (const fl of flavors) row[fl] = (flavorWeekTotals[fl] || [])[i] || 0;
+          return row;
+        });
+        const flavorPalette = ["#fbbf24", "#a78bfa", "#22c55e", "#ef4444", "#06b6d4", "#f97316", "#ec4899", "#84cc16"];
 
-        // Forecast data from draft runs
-        const forecastRows = dashView === "daily"
-          ? todaysForecast
-          : Object.entries(weekForecast.byLine).sort().map(([pl, d]) => ({ productLine: pl, plannedQty: d.planned, actualQty: d.actual }));
-        const totalBatches = dashView === "daily" ? todaysForecast.reduce((s, fd) => s + fd.plannedQty, 0) : Object.values(weekForecast.byLine).reduce((s, v) => s + v.planned, 0);
-        const totalPieces = forecastRows.reduce((s, fd) => s + calcPieces(fd.productLine, fd.plannedQty), 0);
+        const panel = { background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" };
+        const panelHead = { padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc", display: "flex", alignItems: "center", justifyContent: "space-between" };
+        const dashGrid = {
+          display: "grid",
+          gridTemplateColumns: isNarrow ? "1fr" : "minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.3fr)",
+          gridAutoRows: "min-content",
+          gap: 14,
+          marginBottom: 14,
+        };
 
         return (
           <div>
-            {/* Header + Toggle */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <h2 style={{ margin: 0, fontSize: 18, color: "#e0e0e0" }}>{todayDisplay}</h2>
-              <div style={{ display: "flex", gap: 4 }}>
-                <button onClick={() => setDashView("daily")} style={{ ...B2, background: dashView === "daily" ? "#6366f1" : "#2a2a3a", color: dashView === "daily" ? "#fff" : "#ccc", borderColor: dashView === "daily" ? "#6366f1" : "#333", fontSize: 12, padding: "6px 14px" }}>Daily</button>
-                <button onClick={() => setDashView("weekly")} style={{ ...B2, background: dashView === "weekly" ? "#6366f1" : "#2a2a3a", color: dashView === "weekly" ? "#fff" : "#ccc", borderColor: dashView === "weekly" ? "#6366f1" : "#333", fontSize: 12, padding: "6px 14px" }}>Weekly</button>
-              </div>
+            {/* Header */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <h2 style={{ margin: 0, fontSize: 17, color: "#e0e0e0" }}>{todayDisplay}</h2>
             </div>
 
             {/* Manager's Note */}
-            <div style={{ background: "#1e1e2e", borderRadius: 10, border: isStale ? "1px solid #f59e0b33" : "1px solid #2a2a3a", padding: "16px 20px", marginBottom: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: isStale ? "1px solid #f59e0b33" : "1px solid #2a2a3a", padding: "12px 16px", marginBottom: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
                 <div style={{ fontSize: 11, color: "#888", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
                   {"Manager's Note"}
                   {isStale && <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 10, fontWeight: 400 }}>(stale)</span>}
@@ -2937,8 +2989,8 @@ export default function App() {
               </div>
               {editingNote ? (
                 <div>
-                  <textarea value={noteText} onChange={e => setNoteText(e.target.value)} rows={3} style={{ ...IS, resize: "vertical", fontSize: 14, lineHeight: 1.6 }} autoFocus />
-                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+                  <textarea value={noteText} onChange={e => setNoteText(e.target.value)} rows={2} style={{ ...IS, resize: "vertical", fontSize: 13, lineHeight: 1.5 }} autoFocus />
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
                     <button onClick={() => setEditingNote(false)} style={B2}>Cancel</button>
                     <button onClick={async () => {
                       const note = { text: noteText, updatedAt: new Date().toISOString(), updatedBy: profile?.name || profile?.email || "" };
@@ -2949,249 +3001,200 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                <div onClick={() => { if (isAdmin) { setNoteText(dailyNote.text || ""); setEditingNote(true); } }} style={{ fontSize: 14, color: "#d0d0d0", lineHeight: 1.6, whiteSpace: "pre-wrap", cursor: isAdmin ? "pointer" : "default", minHeight: 20 }}>
+                <div onClick={() => { if (isAdmin) { setNoteText(dailyNote.text || ""); setEditingNote(true); } }} style={{ fontSize: 13, color: "#d0d0d0", lineHeight: 1.5, whiteSpace: "pre-wrap", cursor: isAdmin ? "pointer" : "default", minHeight: 18 }}>
                   {dailyNote.text || (isAdmin ? <span style={{ color: "#555", fontStyle: "italic" }}>Click to add a note...</span> : <span style={{ color: "#555", fontStyle: "italic" }}>No note set.</span>)}
                 </div>
               )}
             </div>
 
-            {/* Summary Stats */}
-            <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-              <Stat icon={<Hammer size={18} />} label={dashView === "daily" ? "Batches Planned" : "Week Batches"} value={totalBatches} accent="#8b5cf6" />
-              <Stat icon={<span style={{ fontSize: 18 }}>&#129791;</span>} label="Expected Pieces" value={totalPieces > 0 ? totalPieces.toLocaleString() : "\u2014"} accent="#f59e0b" />
-              <Stat icon={<PackageCheck size={18} />} label={dashView === "daily" ? "Shipments Today" : "Shipments This Week"} value={dashView === "daily" ? todayShipGroupArr.length : shipGroupArr.length} accent="#22c55e" />
-              {todaysBlockers.length > 0 && <Stat icon={<AlertTriangle size={18} />} label="Blockers" value={todaysBlockers.length} accent="#ef4444" />}
-            </div>
+            {/* ===== 6-Panel Grid ===== */}
+            <div style={dashGrid}>
 
-            {/* Dumplings by Flavor */}
-            {flavorBreakdown.length > 0 && (
-              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
-                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Dumplings by Flavor</div>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>
-                    <th style={TH}>Flavor</th>
-                    <th style={{ ...TH, textAlign: "center" }}>On Order</th>
-                    <th style={{ ...TH, textAlign: "center" }}>In Inventory</th>
-                    <th style={{ ...TH, textAlign: "center" }}>Difference</th>
-                  </tr></thead>
-                  <tbody>
-                    {flavorBreakdown.map(fb => {
-                      const diff = fb.invPcs - fb.onOrderPcs;
-                      return (
-                        <tr key={fb.pl}>
-                          <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{fb.pl}</td>
-                          <td style={{ ...TD, textAlign: "center", color: "#f59e0b" }}>{fb.onOrderPcs.toLocaleString()}</td>
-                          <td style={{ ...TD, textAlign: "center", color: "#22c55e" }}>{fb.invPcs.toLocaleString()}</td>
-                          <td style={{ ...TD, textAlign: "center", fontWeight: 600, color: diff >= 0 ? "#22c55e" : "#ef4444" }}>{diff >= 0 ? "+" : ""}{diff.toLocaleString()}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              {/* #1 Production Plan */}
+              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "1 / 2", gridRow: isNarrow ? "auto" : "1 / 2" }}>
+                <div style={panelHead}>
+                  <span>Production Plan {planFromTomorrow ? "• Next Week" : "• This Week"}</span>
+                  <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>Week of {planWeekMonday}</span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${planDays.length}, 1fr)`, gap: 1, background: "#2a2a3a" }}>
+                  {dayCells.map((c, i) => (
+                    <div key={i} style={{ background: "#1e1e2e", padding: "10px 8px", minHeight: 130 }}>
+                      <div style={{ fontSize: 11, color: "#888", fontWeight: 600, textTransform: "uppercase" }}>{c.label}</div>
+                      <div style={{ fontSize: 9, color: "#555", marginBottom: 8 }}>{c.date.slice(5)}</div>
+                      {c.lines.length === 0 ? (
+                        <div style={{ fontSize: 11, color: "#444", fontStyle: "italic" }}>—</div>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          {c.lines.slice(0, 4).map((ln, j) => (
+                            <div key={j} style={{ fontSize: 13, color: "#e0e0e0", fontWeight: 600 }}>
+                              <span style={{ color: "#fbbf24" }}>{ln.qty}</span> <span style={{ color: "#a78bfa" }}>{ln.pl}</span>
+                            </div>
+                          ))}
+                          {c.lines.length > 4 && <div style={{ fontSize: 10, color: "#666" }}>+{c.lines.length - 4} more</div>}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
-            )}
 
-            {/* Production Plan Table */}
-            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
-              <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>
-                {dashView === "daily" ? "Today's Production Plan" : "This Week's Production Plan"}
+              {/* #4 Genie image */}
+              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "2 / 3", gridRow: isNarrow ? "auto" : "1 / 2", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #1e1e2e, #2a1e3e)", padding: 0, minHeight: 160 }}>
+                <img
+                  src="/genie.png"
+                  alt="Dumpling Genie"
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                  onError={(e) => { e.currentTarget.outerHTML = '<div style="font-size:64px;padding:30px;text-align:center">🧞‍♂️</div>'; }}
+                />
               </div>
-              {forecastRows.length === 0 ? (
-                <div style={{ padding: 24, textAlign: "center", color: "#555", fontSize: 13 }}>No production planned. Set up in the Planning tab.</div>
-              ) : (
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>
-                    <th style={TH}>Product Line</th>
-                    <th style={{ ...TH, textAlign: "center" }}>Planned</th>
-                    <th style={{ ...TH, textAlign: "center" }}>Actual</th>
-                    <th style={{ ...TH, textAlign: "center" }}>Expected Pcs</th>
-                  </tr></thead>
-                  <tbody>
-                    {forecastRows.map(fd => {
-                      const actual = dashView === "daily" ? (actualByLine[fd.productLine] || 0) : (fd.actualQty || 0);
-                      const pcs = calcPieces(fd.productLine, fd.plannedQty);
+
+              {/* #6 Outgoing Orders */}
+              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "3 / 4", gridRow: isNarrow ? "auto" : "1 / 3", display: "flex", flexDirection: "column", maxHeight: isNarrow ? 500 : 600 }}>
+                <div style={panelHead}>
+                  <span>Outgoing Orders <span style={{ color: "#666", fontWeight: 400, fontSize: 11 }}>· upcoming week</span></span>
+                  <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 700 }}>{fmtDollars(grandTotal)}</span>
+                </div>
+                <div style={{ overflowY: "auto", flex: 1 }}>
+                  {weekOpenOrders.length === 0 ? (
+                    <div style={{ padding: 20, textAlign: "center", color: "#555", fontSize: 12 }}>No orders shipping this week.</div>
+                  ) : (
+                    [...ORDER_TYPES, "__other"].map(t => {
+                      const group = ordersByType[t];
+                      if (!group || Object.keys(group).length === 0) return null;
+                      const totalCustomers = Object.keys(group).length;
                       return (
-                        <tr key={fd.productLine}>
-                          <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{fd.productLine}</td>
-                          <td style={{ ...TD, textAlign: "center", fontWeight: 600 }}>{fd.plannedQty}</td>
-                          <td style={{ ...TD, textAlign: "center", color: actual >= fd.plannedQty ? "#22c55e" : "#f59e0b", fontWeight: 600 }}>{actual}</td>
-                          <td style={{ ...TD, textAlign: "center", color: "#888" }}>{pcs > 0 ? pcs.toLocaleString() : "\u2014"}</td>
+                        <div key={t}>
+                          <div style={{ padding: "8px 14px", background: "#16161e", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#a78bfa", letterSpacing: "0.05em", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #2a2a3a" }}>
+                            <span>{t === "__other" ? "Other" : shortType(t)} <span style={{ color: "#555", fontWeight: 500 }}>({totalCustomers})</span></span>
+                            <span style={{ color: "#22c55e", fontSize: 11 }}>{fmtDollars(typeTotals[t])}</span>
+                          </div>
+                          {Object.entries(group).map(([cust, lines]) => {
+                            const custTotal = lines.reduce((s, o) => s + lineDollars(o), 0);
+                            return (
+                              <div key={cust} style={{ padding: "8px 14px", borderBottom: "1px solid #1a1a2a" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                                  <div style={{ fontSize: 12, fontWeight: 600, color: "#e0e0e0" }}>{cust}</div>
+                                  <div style={{ fontSize: 11, color: "#22c55e", fontWeight: 600, whiteSpace: "nowrap" }}>{fmtDollars(custTotal)}</div>
+                                </div>
+                                <div style={{ fontSize: 10, color: "#888", marginTop: 2 }}>
+                                  {lines.map(o => {
+                                    const m = o.item.match(/^\d+-(\w+)/);
+                                    const it = gi(o.item);
+                                    return `${o.qty} ${m ? m[1] : (it?.name || o.item)}`;
+                                  }).join(", ")}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              {/* #2 Inventory by Flavor */}
+              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "1 / 2", gridRow: isNarrow ? "auto" : "2 / 3" }}>
+                <div style={panelHead}><span>Inventory by Flavor</span></div>
+                {flavorRows.length === 0 ? (
+                  <div style={{ padding: 20, textAlign: "center", color: "#555", fontSize: 12 }}>No flavors found.</div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr>
+                          <th style={TH}>Flavor</th>
+                          <th style={{ ...TH, textAlign: "center" }}>Bins</th>
+                          <th style={{ ...TH, textAlign: "center" }}>Packs</th>
+                          <th style={{ ...TH, textAlign: "center" }}>FS Cases</th>
+                          <th style={{ ...TH, textAlign: "center" }}>Catering</th>
+                          <th style={{ ...TH, textAlign: "center" }}>Retail Cs</th>
+                          <th style={{ ...TH, textAlign: "right" }}>Total Dumplings</th>
+                          <th style={{ ...TH, textAlign: "right" }}>On Order</th>
+                          <th style={{ ...TH, textAlign: "right" }}>Diff</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
-            </div>
+                      </thead>
+                      <tbody>
+                        {flavorRows.map(r => (
+                          <tr key={r.pl}>
+                            <td style={{ ...TD, fontWeight: 700, color: "#a78bfa" }}>{r.pl}</td>
+                            <td style={{ ...TD, textAlign: "center" }}>{r.bins || "—"}</td>
+                            <td style={{ ...TD, textAlign: "center" }}>{r.packs || "—"}</td>
+                            <td style={{ ...TD, textAlign: "center" }}>{r.fsCases || "—"}</td>
+                            <td style={{ ...TD, textAlign: "center" }}>{r.cateringQty || "—"}</td>
+                            <td style={{ ...TD, textAlign: "center" }}>{r.retailCases || "—"}</td>
+                            <td style={{ ...TD, textAlign: "right", fontWeight: 600, color: "#22c55e" }}>{r.totalDumplings.toLocaleString()}</td>
+                            <td style={{ ...TD, textAlign: "right", color: "#f59e0b" }}>{r.onOrder.toLocaleString()}</td>
+                            <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: r.diff >= 0 ? "#22c55e" : "#ef4444" }}>
+                              {r.diff >= 0 ? "+" : ""}{r.diff.toLocaleString()}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
 
-            {/* Shipments */}
-            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
-              {dashView === "daily" ? (<>
-                {/* Today */}
-                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: "#ccc" }}>{"Today's Shipments"}</span>
-                  <span style={{ fontSize: 11, color: "#888" }}>
-                    {todayShipGroupArr.length} order{todayShipGroupArr.length !== 1 ? "s" : ""}
-                    {todayShipPcs > 0 && <span style={{ marginLeft: 6, color: "#f59e0b" }}>{Math.round(todayShipPcs).toLocaleString()} pcs</span>}
-                  </span>
+              {/* #5 POs Awaiting */}
+              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "2 / 3", gridRow: isNarrow ? "auto" : "2 / 3", display: "flex", flexDirection: "column", maxHeight: 320 }}>
+                <div style={panelHead}>
+                  <span>POs Awaiting</span>
+                  <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>{awaitingPOs.length}</span>
                 </div>
-                {todayShipGroupArr.length === 0 ? (
-                  <div style={{ padding: 16, textAlign: "center", color: "#555", fontSize: 13, borderBottom: "1px solid #2a2a3a" }}>No shipments today.</div>
-                ) : (
-                  <div style={{ borderBottom: "1px solid #2a2a3a" }}>
-                    {todayShipGroupArr.map((sg, i) => {
-                      const allDone = sg.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
-                      return (
-                        <div key={i} style={{ padding: "10px 16px", borderBottom: i < todayShipGroupArr.length - 1 ? "1px solid #1a1a2a" : "none", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                          <div>
-                            <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 14 }}>{sg.customer}</div>
-                            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
-                              {sg.lines.map(o => { const it = gi(o.item); return `${o.qty}x ${it?.name || o.item}`; }).join(", ")}
-                            </div>
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            {allDone ? (
-                              <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>Shipped</span>
-                            ) : (
-                              <button onClick={() => shipAllLines(sg.lines)} style={{ ...B1, padding: "6px 14px", background: "#22c55e", fontSize: 12 }}>
-                                <PackageCheck size={13} /> Ship All
-                              </button>
-                            )}
-                          </div>
+                <div style={{ overflowY: "auto", flex: 1 }}>
+                  {awaitingPOs.length === 0 ? (
+                    <div style={{ padding: 20, textAlign: "center", color: "#555", fontSize: 12 }}>None awaiting.</div>
+                  ) : (
+                    awaitingPOs.map((p, i) => (
+                      <div key={p.id} onClick={() => setTab("pos")} style={{ padding: "10px 14px", borderBottom: i < awaitingPOs.length - 1 ? "1px solid #2a2a3a" : "none", cursor: "pointer" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontFamily: "monospace", fontSize: 11, fontWeight: 700, color: "#6366f1" }}>{p.id}</span>
+                          <span style={{ fontSize: 9, fontWeight: 600, padding: "2px 6px", borderRadius: 4, background: p.status === "Confirmed" ? "#22c55e22" : "#f59e0b22", color: p.status === "Confirmed" ? "#22c55e" : "#f59e0b" }}>{p.status}</span>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-                {/* Tomorrow */}
-                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1a1a28" }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: "#ccc" }}>{"Tomorrow's Shipments"}</span>
-                  <span style={{ fontSize: 11, color: "#888" }}>
-                    {tomorrowShipGroupArr.length} order{tomorrowShipGroupArr.length !== 1 ? "s" : ""}
-                    {tomorrowShipPcs > 0 && <span style={{ marginLeft: 6, color: "#f59e0b" }}>{Math.round(tomorrowShipPcs).toLocaleString()} pcs</span>}
-                  </span>
-                </div>
-                {tomorrowShipGroupArr.length === 0 ? (
-                  <div style={{ padding: 16, textAlign: "center", color: "#555", fontSize: 13 }}>No shipments tomorrow.</div>
-                ) : (
-                  <div>
-                    {tomorrowShipGroupArr.map((sg, i) => {
-                      const allDone = sg.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
-                      return (
-                        <div key={i} style={{ padding: "10px 16px", borderBottom: i < tomorrowShipGroupArr.length - 1 ? "1px solid #1a1a2a" : "none", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                          <div>
-                            <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 14 }}>{sg.customer}</div>
-                            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
-                              {sg.lines.map(o => { const it = gi(o.item); return `${o.qty}x ${it?.name || o.item}`; }).join(", ")}
-                            </div>
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            {allDone ? (
-                              <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>Shipped</span>
-                            ) : (
-                              <span style={{ fontSize: 11, color: "#888" }}>Upcoming</span>
-                            )}
-                          </div>
+                        <div style={{ fontSize: 12, color: "#e0e0e0", marginTop: 3, fontWeight: 500 }}>{p.vendor}</div>
+                        <div style={{ fontSize: 10, color: "#666", marginTop: 2, display: "flex", justifyContent: "space-between" }}>
+                          <span>{p.lines.length} item{p.lines.length !== 1 ? "s" : ""} • {p.date}</span>
+                          <span style={{ color: "#f59e0b", fontWeight: 600 }}>${(p.total || 0).toFixed(0)}</span>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </>) : (<>
-                {/* Weekly view */}
-                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>
-                  {"This Week's Shipments"}
-                  {shipGroupArr.length > 0 && <span style={{ marginLeft: 8, fontSize: 11, color: "#888" }}>({shipGroupArr.length} order{shipGroupArr.length !== 1 ? "s" : ""})</span>}
-                </div>
-                {shipGroupArr.length === 0 ? (
-                  <div style={{ padding: 24, textAlign: "center", color: "#555", fontSize: 13 }}>No shipments this week.</div>
-                ) : (
-                  <div>
-                    {shipGroupArr.map((sg, i) => {
-                      const allDone = sg.lines.every(o => o.status === "Fulfilled" || o.status === "Cancelled");
-                      return (
-                        <div key={i} style={{ padding: "10px 16px", borderBottom: i < shipGroupArr.length - 1 ? "1px solid #1a1a2a" : "none", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                          <div>
-                            <div style={{ fontWeight: 600, color: "#e0e0e0", fontSize: 14 }}>{sg.customer}</div>
-                            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
-                              {sg.lines.map(o => { const it = gi(o.item); return `${o.qty}x ${it?.name || o.item}`; }).join(", ")}
-                            </div>
-                            <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>Ship: {sg.shipDate}</div>
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            {allDone ? (
-                              <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>Shipped</span>
-                            ) : (
-                              <button onClick={() => shipAllLines(sg.lines)} style={{ ...B1, padding: "6px 14px", background: "#22c55e", fontSize: 12 }}>
-                                <PackageCheck size={13} /> Ship All
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </>)}
-            </div>
-
-            {/* Runway (weekly only) */}
-            {dashView === "weekly" && runwayData.length > 0 && (
-              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 16 }}>
-                <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Inventory Runway</div>
-                <div style={{ display: "flex", flexWrap: "wrap" }}>
-                  {runwayData.map(r => {
-                    const color = r.weeksLeft === Infinity ? "#6366f1" : r.weeksLeft < 1 ? "#ef4444" : r.weeksLeft < 2 ? "#f59e0b" : r.weeksLeft < 4 ? "#22c55e" : "#6366f1";
-                    return (
-                      <div key={r.productLine} style={{ flex: "1 1 120px", padding: "14px 18px", borderRight: "1px solid #2a2a3a", textAlign: "center" }}>
-                        <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>{r.productLine}</div>
-                        <div style={{ fontSize: 20, fontWeight: 700, color }}>{r.weeksLeft === Infinity ? "\u221E" : r.weeksLeft.toFixed(1)}</div>
-                        <div style={{ fontSize: 10, color: "#666" }}>weeks</div>
                       </div>
-                    );
-                  })}
+                    ))
+                  )}
                 </div>
               </div>
-            )}
+            </div>
 
-            {/* Production Blockers (collapsible) */}
-            {todaysBlockers.length > 0 && (
-              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #ef444433", overflow: "hidden" }}>
-                <div onClick={() => setBlockersOpen(o => !o)} style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    {blockersOpen ? <ChevronDown size={14} style={{ color: "#888" }} /> : <ChevronRight size={14} style={{ color: "#888" }} />}
-                    <span style={{ fontSize: 13, fontWeight: 600, color: "#ef4444" }}>
-                      <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6 }} />
-                      Production Blockers
-                    </span>
+            {/* #3 Dumpling Demand Over Time */}
+            <div style={panel}>
+              <div style={panelHead}>
+                <span>Dumpling Demand Over Time</span>
+                <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>Fulfilled orders, last 13 weeks</span>
+              </div>
+              <div style={{ padding: "14px 16px" }}>
+                {flavors.length === 0 ? (
+                  <p style={{ color: "#555", fontSize: 12, textAlign: "center", margin: "30px 0" }}>No fulfilled orders in the last 13 weeks.</p>
+                ) : (
+                  <div style={{ height: 220 }}>
+                    <ResponsiveContainer>
+                      <LineChart data={flavorChartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                        <CartesianGrid stroke="#2a2a3a" strokeDasharray="3 3" />
+                        <XAxis dataKey="week" stroke="#666" fontSize={11} />
+                        <YAxis stroke="#666" fontSize={11} />
+                        <ChartTooltip contentStyle={{ background: "#16161e", border: "1px solid #2a2a3a", borderRadius: 6, fontSize: 12 }} />
+                        <Legend wrapperStyle={{ fontSize: 11 }} />
+                        {flavors.map((fl, idx) => (
+                          <Line key={fl} type="monotone" dataKey={fl} stroke={flavorPalette[idx % flavorPalette.length]} strokeWidth={2} dot={false} />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
                   </div>
-                  <span style={{ background: "#ef444422", color: "#ef4444", padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{todaysBlockers.length}</span>
-                </div>
-                {blockersOpen && (
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead><tr>
-                      <th style={TH}>Material</th>
-                      <th style={{ ...TH, textAlign: "center" }}>Needed</th>
-                      <th style={{ ...TH, textAlign: "center" }}>On Hand</th>
-                      <th style={{ ...TH, textAlign: "center" }}>Short</th>
-                    </tr></thead>
-                    <tbody>
-                      {todaysBlockers.map(b => (
-                        <tr key={b.id}>
-                          <td style={{ ...TD, fontWeight: 500 }}>{b.name}</td>
-                          <td style={{ ...TD, textAlign: "center" }}>{b.needed} {b.unit}</td>
-                          <td style={{ ...TD, textAlign: "center", color: "#f59e0b" }}>{b.onHand} {b.unit}</td>
-                          <td style={{ ...TD, textAlign: "center", color: "#ef4444", fontWeight: 600 }}>{b.shortfall} {b.unit}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
                 )}
               </div>
-            )}
+            </div>
           </div>
         );
       })()}
+
 
       {/* ================== INVENTORY TABLE ================== */}
       {tab === "inventory" && (
@@ -5999,7 +6002,8 @@ export default function App() {
         </div>
       </Modal>
 
-      </>)}
+      </div>
+      </div>)}
     </div>
   );
 }
