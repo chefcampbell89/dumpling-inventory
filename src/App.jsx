@@ -1,4 +1,4 @@
-// APP VERSION: v140
+// APP VERSION: v141
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1493,6 +1493,11 @@ export default function App() {
   };
 
   const setGroupStatus = async (group, newStatus) => {
+    // Intercept "Fulfilled" — must go through lot allocation flow.
+    if (newStatus === "Fulfilled") {
+      openFulfillModal(group.lines);
+      return;
+    }
     const updated = group.lines.map(o => ({ ...o, status: newStatus }));
     setOrders(prev => prev.map(o => {
       const match = updated.find(u => u.id === o.id);
@@ -3718,6 +3723,11 @@ export default function App() {
                                     ) : (
                                       <select value={o.status} onClick={e => e.stopPropagation()} onChange={async (e) => {
                                         const ns = e.target.value;
+                                        // Intercept Fulfilled — must go through lot allocation flow
+                                        if (ns === "Fulfilled" && o.status !== "Fulfilled") {
+                                          openFulfillModal([o]);
+                                          return;
+                                        }
                                         const updated = { ...o, status: ns };
                                         setOrders(prev => prev.map(x => x.id === o.id ? updated : x));
                                         try { await upsertOrder(updated); } catch (err) { console.warn(err); }
@@ -6185,7 +6195,7 @@ export default function App() {
               </div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Qty</label><input type="number" value={form.qty || 0} onChange={(e) => setForm((f) => ({ ...f, qty: Number(e.target.value) }))} style={IS} /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Date</label><input type="date" value={form.date || ""} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} style={IS} /></div>
-              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status</label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.map((s) => <option key={s}>{s}</option>)}</select></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status <span style={{ color: "#666", fontSize: 10 }}>(use Ship to fulfill)</span></label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.filter(s => s !== "Fulfilled" && s !== "Partially Fulfilled").map((s) => <option key={s}>{s}</option>)}{form.status === "Fulfilled" && <option>Fulfilled</option>}</select></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Order Type</label><select value={form.orderType || ""} onChange={(e) => setForm((f) => ({ ...f, orderType: e.target.value }))} style={IS}><option value="">Select...</option>{ORDER_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Unit Price</label><input value={form.orderType && form.item ? `$${getUnitPrice(form.orderType, form.item).toFixed(2)}` : "—"} readOnly style={{ ...IS, opacity: 0.6 }} /></div>
               <div style={{ gridColumn: "1/3" }}><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label><input value={form.notes || ""} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} style={IS} /></div>
@@ -6204,7 +6214,7 @@ export default function App() {
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Customer</label><input value={form.customer || ""} onChange={(e) => setForm((f) => ({ ...f, customer: e.target.value }))} style={IS} placeholder="Customer name" /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Date</label><input type="date" value={form.date || ""} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} style={IS} /></div>
               <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Order Type</label><select value={form.orderType || ""} onChange={(e) => setForm((f) => ({ ...f, orderType: e.target.value }))} style={IS}><option value="">Select...</option>{ORDER_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></div>
-              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status</label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.map((s) => <option key={s}>{s}</option>)}</select></div>
+              <div><label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Status <span style={{ color: "#666", fontSize: 10 }}>(use Ship to fulfill)</span></label><select value={form.status || "Pending"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={IS}>{ORD_STATUSES.filter(s => s !== "Fulfilled" && s !== "Partially Fulfilled").map((s) => <option key={s}>{s}</option>)}{form.status === "Fulfilled" && <option>Fulfilled</option>}</select></div>
             </div>
             <div style={{ borderTop: "1px solid #2a2a3a", paddingTop: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
