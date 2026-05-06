@@ -1,4 +1,4 @@
-// APP VERSION: v150
+// APP VERSION: v152
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -659,22 +659,9 @@ export default function App() {
   const [noteText, setNoteText] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isNarrow, setIsNarrow] = useState(typeof window !== "undefined" ? window.innerWidth < 900 : false);
-  const dashCol1Ref = useRef(null);
-  const [dashCol1Height, setDashCol1Height] = useState(null);
-  // Measure col 1 (Production Plan + Inventory) so cols 2 and 3 can match its bottom.
-  // Re-observe whenever we re-enter the dashboard (the ref attaches a fresh node).
-  useEffect(() => {
-    if (tab !== "dashboard") return undefined;
-    const el = dashCol1Ref.current;
-    if (!el || typeof ResizeObserver === "undefined") return undefined;
-    const ro = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      setDashCol1Height(Math.round(entry.contentRect.height));
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [tab]);
+  // Col 1 (Production Plan + Inventory) drives the dashboard row height via
+  // align-items:stretch on the grid; cols 2 and 3 use position:absolute children
+  // so they don't contribute to row sizing — pure CSS, no measurement needed.
   useEffect(() => {
     const onResize = () => setIsNarrow(window.innerWidth < 900);
     window.addEventListener("resize", onResize);
@@ -3257,11 +3244,16 @@ export default function App() {
         const dashGrid = {
           display: "grid",
           gridTemplateColumns: isNarrow ? "1fr" : "minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.3fr)",
-          alignItems: "start",
+          alignItems: isNarrow ? "start" : "stretch",
           gap: 14,
           marginBottom: 14,
         };
         const colStack = { display: "flex", flexDirection: "column", gap: 14, minWidth: 0 };
+        // Wrappers for cols 2 and 3: position:relative cell with min-height 0 so the
+        // cell's natural height contributes 0 to the grid row; absolute children fill
+        // the cell, which gets stretched to col 1's natural height by align-items:stretch.
+        const overlayCellStyle = isNarrow ? null : { position: "relative", minHeight: 0, minWidth: 0 };
+        const overlayChildStyle = isNarrow ? null : { position: "absolute", inset: 0 };
 
         return (
           <div>
@@ -3308,7 +3300,7 @@ export default function App() {
             <div style={dashGrid}>
 
               {/* ===== Col 1: Production Plan + Inventory by Flavor ===== */}
-              <div ref={dashCol1Ref} style={colStack}>
+              <div style={colStack}>
 
               {/* #1 Production Plan */}
               <div style={{ ...panel }}>
@@ -3425,7 +3417,8 @@ export default function App() {
               </div>{/* end Col 1 */}
 
               {/* ===== Col 2: Genie + POs Awaiting ===== */}
-              <div style={{ ...colStack, ...(isNarrow || !dashCol1Height ? {} : { height: dashCol1Height, overflow: "hidden" }) }}>
+              <div style={isNarrow ? colStack : overlayCellStyle}>
+              <div style={isNarrow ? null : { ...overlayChildStyle, ...colStack }}>
 
               {/* #4 Genie image */}
               <div style={{ ...panel, display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #1e1e2e, #2a1e3e)", padding: 0, height: 200, flex: "0 0 auto" }}>
@@ -3464,10 +3457,13 @@ export default function App() {
                 </div>
               </div>
 
-              </div>{/* end Col 2 */}
+              </div>{/* end Col 2 inner */}
+              </div>{/* end Col 2 cell */}
 
+              {/* ===== Col 3: Outgoing Orders ===== */}
+              <div style={isNarrow ? null : overlayCellStyle}>
               {/* #6 Outgoing Orders */}
-              <div style={{ ...panel, display: "flex", flexDirection: "column", maxHeight: isNarrow ? 500 : (dashCol1Height || "100%"), minHeight: 0 }}>
+              <div style={{ ...panel, display: "flex", flexDirection: "column", ...(isNarrow ? { maxHeight: 500 } : overlayChildStyle), minHeight: 0 }}>
                 <div style={panelHead}>
                   <span>Outgoing Orders <span style={{ color: "#666", fontWeight: 400, fontSize: 11 }}>· upcoming week</span></span>
                   <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 700 }}>{fmtDollars(grandTotal)}</span>
@@ -3518,6 +3514,7 @@ export default function App() {
                   )}
                 </div>
               </div>
+              </div>{/* end Col 3 cell */}
 
             </div>
 
