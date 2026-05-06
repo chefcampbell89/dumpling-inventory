@@ -1,4 +1,4 @@
-// APP VERSION: v144
+// APP VERSION: v145
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -3242,10 +3242,11 @@ export default function App() {
         const dashGrid = {
           display: "grid",
           gridTemplateColumns: isNarrow ? "1fr" : "minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.3fr)",
-          gridAutoRows: "min-content",
+          alignItems: "stretch",
           gap: 14,
           marginBottom: 14,
         };
+        const colStack = { display: "flex", flexDirection: "column", gap: 14, minWidth: 0 };
 
         return (
           <div>
@@ -3291,8 +3292,11 @@ export default function App() {
             {/* ===== 6-Panel Grid ===== */}
             <div style={dashGrid}>
 
+              {/* ===== Col 1: Production Plan + Inventory by Flavor ===== */}
+              <div style={colStack}>
+
               {/* #1 Production Plan */}
-              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "1 / 2", gridRow: isNarrow ? "auto" : "1 / 2" }}>
+              <div style={{ ...panel }}>
                 <div style={panelHead}>
                   <span>Production Plan</span>
                   <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>Fills &amp; Batches only</span>
@@ -3339,71 +3343,8 @@ export default function App() {
                 ))}
               </div>
 
-              {/* #4 Genie image */}
-              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "2 / 3", gridRow: isNarrow ? "auto" : "1 / 2", alignSelf: "start", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #1e1e2e, #2a1e3e)", padding: 0, height: 200 }}>
-                <img
-                  src="/genie.png"
-                  alt="Dumpling Genie"
-                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                  onError={(e) => { e.currentTarget.outerHTML = '<div style="font-size:64px;padding:30px;text-align:center">🧞‍♂️</div>'; }}
-                />
-              </div>
-
-              {/* #6 Outgoing Orders */}
-              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "3 / 4", gridRow: isNarrow ? "auto" : "1 / 3", display: "flex", flexDirection: "column", maxHeight: isNarrow ? 500 : "100%", minHeight: 0 }}>
-                <div style={panelHead}>
-                  <span>Outgoing Orders <span style={{ color: "#666", fontWeight: 400, fontSize: 11 }}>· upcoming week</span></span>
-                  <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 700 }}>{fmtDollars(grandTotal)}</span>
-                </div>
-                <div style={{ overflowY: "auto", flex: 1 }}>
-                  {weekOrders.length === 0 ? (
-                    <div style={{ padding: 20, textAlign: "center", color: "#555", fontSize: 12 }}>No orders shipping this week.</div>
-                  ) : (
-                    [...ORDER_TYPES, "__other"].map(t => {
-                      const group = ordersByType[t];
-                      if (!group || Object.keys(group).length === 0) return null;
-                      const totalCustomers = Object.keys(group).length;
-                      const entries = customerEntriesFor(t);
-                      return (
-                        <div key={t}>
-                          <div style={{ padding: "8px 14px", background: "#16161e", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#a78bfa", letterSpacing: "0.05em", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #2a2a3a" }}>
-                            <span>{t === "__other" ? "Other" : shortType(t)} <span style={{ color: "#555", fontWeight: 500 }}>({totalCustomers})</span></span>
-                            <span style={{ color: "#22c55e", fontSize: 11 }}>{fmtDollars(typeTotals[t])}</span>
-                          </div>
-                          {entries.map((e, idx) => {
-                            const custTotal = e.lines.reduce((s, o) => s + lineDollars(o), 0);
-                            const nameColor = e.done ? "#666" : "#e0e0e0";
-                            const itemColor = e.done ? "#555" : "#888";
-                            const dollarColor = e.done ? "#3f6f4f" : "#22c55e";
-                            const decoration = e.done ? "line-through" : "none";
-                            return (
-                              <div key={`${e.cust}-${idx}-${e.done ? "d" : "o"}`} style={{ padding: "8px 14px", borderBottom: "1px solid #1a1a2a", opacity: e.done ? 0.7 : 1 }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-                                  <div style={{ fontSize: 12, fontWeight: 600, color: nameColor, textDecoration: decoration }}>
-                                    {e.cust}
-                                    {e.done && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#3f6f4f", textDecoration: "none", letterSpacing: "0.05em" }}>SHIPPED</span>}
-                                  </div>
-                                  <div style={{ fontSize: 11, color: dollarColor, fontWeight: 600, whiteSpace: "nowrap", textDecoration: decoration }}>{fmtDollars(custTotal)}</div>
-                                </div>
-                                <div style={{ fontSize: 10, color: itemColor, marginTop: 2, textDecoration: decoration }}>
-                                  {e.lines.map(o => {
-                                    const m = o.item.match(/^\d+-(\w+)/);
-                                    const it = gi(o.item);
-                                    return `${o.qty} ${m ? m[1] : (it?.name || o.item)}`;
-                                  }).join(", ")}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-
               {/* #2 Inventory by Flavor */}
-              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "1 / 2", gridRow: isNarrow ? "auto" : "2 / 3", display: "flex", flexDirection: "column", maxHeight: 260 }}>
+              <div style={{ ...panel, display: "flex", flexDirection: "column", maxHeight: 320, flex: "0 0 auto" }}>
                 <div style={panelHead}><span>Inventory by Flavor</span></div>
                 {flavorRows.length === 0 ? (
                   <div style={{ padding: 20, textAlign: "center", color: "#555", fontSize: 12 }}>No flavors found.</div>
@@ -3466,8 +3407,23 @@ export default function App() {
                 })()}
               </div>
 
+              </div>{/* end Col 1 */}
+
+              {/* ===== Col 2: Genie + POs Awaiting ===== */}
+              <div style={colStack}>
+
+              {/* #4 Genie image */}
+              <div style={{ ...panel, display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #1e1e2e, #2a1e3e)", padding: 0, height: 200, flex: "0 0 auto" }}>
+                <img
+                  src="/genie.png"
+                  alt="Dumpling Genie"
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                  onError={(e) => { e.currentTarget.outerHTML = '<div style="font-size:64px;padding:30px;text-align:center">🧞‍♂️</div>'; }}
+                />
+              </div>
+
               {/* #5 POs Awaiting */}
-              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "2 / 3", gridRow: isNarrow ? "auto" : "2 / 3", display: "flex", flexDirection: "column", maxHeight: 320 }}>
+              <div style={{ ...panel, display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: 200 }}>
                 <div style={panelHead}>
                   <span>POs Awaiting</span>
                   <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>{awaitingPOs.length}</span>
@@ -3492,6 +3448,62 @@ export default function App() {
                   )}
                 </div>
               </div>
+
+              </div>{/* end Col 2 */}
+
+              {/* #6 Outgoing Orders */}
+              <div style={{ ...panel, display: "flex", flexDirection: "column", maxHeight: isNarrow ? 500 : "100%", minHeight: 0 }}>
+                <div style={panelHead}>
+                  <span>Outgoing Orders <span style={{ color: "#666", fontWeight: 400, fontSize: 11 }}>· upcoming week</span></span>
+                  <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 700 }}>{fmtDollars(grandTotal)}</span>
+                </div>
+                <div style={{ overflowY: "auto", flex: 1 }}>
+                  {weekOrders.length === 0 ? (
+                    <div style={{ padding: 20, textAlign: "center", color: "#555", fontSize: 12 }}>No orders shipping this week.</div>
+                  ) : (
+                    [...ORDER_TYPES, "__other"].map(t => {
+                      const group = ordersByType[t];
+                      if (!group || Object.keys(group).length === 0) return null;
+                      const totalCustomers = Object.keys(group).length;
+                      const entries = customerEntriesFor(t);
+                      return (
+                        <div key={t}>
+                          <div style={{ padding: "8px 14px", background: "#16161e", fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#a78bfa", letterSpacing: "0.05em", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #2a2a3a" }}>
+                            <span>{t === "__other" ? "Other" : shortType(t)} <span style={{ color: "#555", fontWeight: 500 }}>({totalCustomers})</span></span>
+                            <span style={{ color: "#22c55e", fontSize: 11 }}>{fmtDollars(typeTotals[t])}</span>
+                          </div>
+                          {entries.map((e, idx) => {
+                            const custTotal = e.lines.reduce((s, o) => s + lineDollars(o), 0);
+                            const nameColor = e.done ? "#666" : "#e0e0e0";
+                            const itemColor = e.done ? "#555" : "#888";
+                            const dollarColor = e.done ? "#3f6f4f" : "#22c55e";
+                            const decoration = e.done ? "line-through" : "none";
+                            return (
+                              <div key={`${e.cust}-${idx}-${e.done ? "d" : "o"}`} style={{ padding: "8px 14px", borderBottom: "1px solid #1a1a2a", opacity: e.done ? 0.7 : 1 }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                                  <div style={{ fontSize: 12, fontWeight: 600, color: nameColor, textDecoration: decoration }}>
+                                    {e.cust}
+                                    {e.done && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#3f6f4f", textDecoration: "none", letterSpacing: "0.05em" }}>SHIPPED</span>}
+                                  </div>
+                                  <div style={{ fontSize: 11, color: dollarColor, fontWeight: 600, whiteSpace: "nowrap", textDecoration: decoration }}>{fmtDollars(custTotal)}</div>
+                                </div>
+                                <div style={{ fontSize: 10, color: itemColor, marginTop: 2, textDecoration: decoration }}>
+                                  {e.lines.map(o => {
+                                    const m = o.item.match(/^\d+-(\w+)/);
+                                    const it = gi(o.item);
+                                    return `${o.qty} ${m ? m[1] : (it?.name || o.item)}`;
+                                  }).join(", ")}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
             </div>
 
             {/* #3 Dumpling Demand Over Time */}
