@@ -1,4 +1,4 @@
-// APP VERSION: v146
+// APP VERSION: v147
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1026,21 +1026,20 @@ export default function App() {
         try { await upsertOrder(updated); } catch (e) { console.warn("Order update failed:", e.message); }
       }
 
-      // 5) Log the shipment to the transaction log (one receipt per ship action)
+      // 5) Log the shipment to the transaction log (one receipt per order line)
       const shippedLines = lineUpdates.filter(u => u.fullyAllocated);
-      if (shippedLines.length > 0) {
-        const customer = shippedLines[0].line.customer || "?";
+      for (let si = 0; si < shippedLines.length; si += 1) {
+        const u = shippedLines[si];
+        const it = allItems.find(i => i.id === u.line.item);
+        const customer = u.line.customer || "?";
         const shipReceipt = {
-          id: `SHIP-${Date.now()}`,
+          id: `SHIP-${Date.now()}-${si}`,
           poId: null,
           type: "Shipment",
           date: new Date().toISOString().slice(0, 10),
-          notes: `Shipped to ${customer} (${shippedLines.length} line${shippedLines.length === 1 ? "" : "s"})`,
+          notes: `Shipped ${u.line.qty} ${it?.name || u.line.item} to ${customer}`,
           createdBy: profile?.email || "",
-          lines: shippedLines.map(u => {
-            const it = allItems.find(i => i.id === u.line.item);
-            return { partId: u.line.item, name: it?.name || u.line.item, qtyExpected: u.line.qty, qtyReceived: u.line.qty, unit: it?.unit || "" };
-          }),
+          lines: [{ partId: u.line.item, name: it?.name || u.line.item, qtyExpected: u.line.qty, qtyReceived: u.line.qty, unit: it?.unit || "" }],
         };
         setReceipts(prev => [{ ...shipReceipt, createdAt: new Date().toISOString() }, ...prev]);
         try { await createReceipt(shipReceipt); } catch (e) { console.warn("Shipment log failed:", e.message); }
