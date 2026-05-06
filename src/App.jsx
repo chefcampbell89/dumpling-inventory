@@ -1,4 +1,4 @@
-// APP VERSION: v142
+// APP VERSION: v143
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1026,6 +1026,26 @@ export default function App() {
         try { await upsertOrder(updated); } catch (e) { console.warn("Order update failed:", e.message); }
       }
 
+      // 5) Log the shipment to the transaction log (one receipt per ship action)
+      const shippedLines = lineUpdates.filter(u => u.fullyAllocated);
+      if (shippedLines.length > 0) {
+        const customer = shippedLines[0].line.customer || "?";
+        const shipReceipt = {
+          id: `SHIP-${Date.now()}`,
+          poId: null,
+          type: "Shipment",
+          date: new Date().toISOString().slice(0, 10),
+          notes: `Shipped to ${customer} (${shippedLines.length} line${shippedLines.length === 1 ? "" : "s"})`,
+          createdBy: profile?.email || "",
+          lines: shippedLines.map(u => {
+            const it = allItems.find(i => i.id === u.line.item);
+            return { partId: u.line.item, name: it?.name || u.line.item, qtyExpected: u.line.qty, qtyReceived: u.line.qty, unit: it?.unit || "" };
+          }),
+        };
+        setReceipts(prev => [{ ...shipReceipt, createdAt: new Date().toISOString() }, ...prev]);
+        try { await createReceipt(shipReceipt); } catch (e) { console.warn("Shipment log failed:", e.message); }
+      }
+
       const fulfilledCount = lineUpdates.filter(u => u.fullyAllocated).length;
       const partialCount = lineUpdates.filter(u => !u.fullyAllocated && u.totalAllocated > 0).length;
       let msg = `Fulfilled ${fulfilledCount} line${fulfilledCount === 1 ? "" : "s"}`;
@@ -1073,6 +1093,19 @@ export default function App() {
       const updated = { ...line, status: "In Production" };
       setOrders(prev => prev.map(x => x.id === line.id ? updated : x));
       try { await upsertOrder(updated); } catch (e) { console.warn(e.message); }
+      // Log the reversal
+      const it = allItems.find(i => i.id === line.item);
+      const reversalReceipt = {
+        id: `UNSHIP-${Date.now()}`,
+        poId: null,
+        type: "Shipment Reversal",
+        date: new Date().toISOString().slice(0, 10),
+        notes: `Un-fulfilled line for ${line.customer || "?"}`,
+        createdBy: profile?.email || "",
+        lines: [{ partId: line.item, name: it?.name || line.item, qtyExpected: line.qty, qtyReceived: line.qty, unit: it?.unit || "" }],
+      };
+      setReceipts(prev => [{ ...reversalReceipt, createdAt: new Date().toISOString() }, ...prev]);
+      try { await createReceipt(reversalReceipt); } catch (e) { console.warn("Reversal log failed:", e.message); }
       show("Line un-fulfilled and inventory restored");
     } catch (e) { show(e.message, "error"); }
   };
@@ -1274,16 +1307,28 @@ export default function App() {
       });
     }
 
-    // Receipts (PO receipts, adjustments, manual)
+    // Receipts (PO receipts, adjustments, manual, shipments, reversals)
     for (const r of receipts) {
       const totalUnits = r.lines.reduce((s, l) => s + (l.qtyReceived || 0), 0);
-      const isAdj = r.type === "Inventory adjustment";
+      let logType = "Receipt";
+      let color = "#22c55e";
+      let desc = `${r.type}: ${r.lines.length} items, ${totalUnits} units`;
+      if (r.type === "Inventory adjustment") {
+        logType = "Adjustment"; color = "#f59e0b";
+        desc = r.notes || "Inventory adjustment";
+      } else if (r.type === "Shipment") {
+        logType = "Shipment"; color = "#ef4444";
+        desc = r.notes || `Shipment: ${r.lines.length} items, ${totalUnits} units`;
+      } else if (r.type === "Shipment Reversal") {
+        logType = "Reversal"; color = "#6366f1";
+        desc = r.notes || `Reversal: ${r.lines.length} items, ${totalUnits} units`;
+      }
       entries.push({
-        date: r.date, time: r.createdAt || r.date, type: isAdj ? "Adjustment" : "Receipt",
-        desc: isAdj ? r.notes || "Inventory adjustment" : `${r.type}: ${r.lines.length} items, ${totalUnits} units`,
+        date: r.date, time: r.createdAt || r.date, type: logType,
+        desc,
         lot: "", user: r.createdBy || "",
         detail: r.lines.map(l => `${l.name}: ${l.qtyReceived} ${l.unit}`).join(", "),
-        color: isAdj ? "#f59e0b" : "#22c55e",
+        color,
       });
     }
 
@@ -5361,6 +5406,7 @@ export default function App() {
             <Stat icon={<ScrollText size={18} />} label="Total Transactions" value={transactionLog.length} accent="#6366f1" />
             <Stat icon={<Hammer size={18} />} label="Production Runs" value={transactionLog.filter(e => e.type === "Production").length} accent="#8b5cf6" />
             <Stat icon={<PackageCheck size={18} />} label="Receipts" value={transactionLog.filter(e => e.type === "Receipt").length} accent="#22c55e" />
+            <Stat icon={<ShoppingCart size={18} />} label="Shipments" value={transactionLog.filter(e => e.type === "Shipment").length} accent="#ef4444" />
             <Stat icon={<Edit2 size={18} />} label="Adjustments" value={transactionLog.filter(e => e.type === "Adjustment").length} accent="#f59e0b" />
           </div>
 
