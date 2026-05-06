@@ -1,4 +1,4 @@
-// APP VERSION: v149
+// APP VERSION: v150
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -3257,7 +3257,7 @@ export default function App() {
         const dashGrid = {
           display: "grid",
           gridTemplateColumns: isNarrow ? "1fr" : "minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.3fr)",
-          alignItems: "stretch",
+          alignItems: "start",
           gap: 14,
           marginBottom: 14,
         };
@@ -3425,7 +3425,7 @@ export default function App() {
               </div>{/* end Col 1 */}
 
               {/* ===== Col 2: Genie + POs Awaiting ===== */}
-              <div style={{ ...colStack, ...(isNarrow || !dashCol1Height ? {} : { maxHeight: dashCol1Height, overflow: "hidden" }) }}>
+              <div style={{ ...colStack, ...(isNarrow || !dashCol1Height ? {} : { height: dashCol1Height, overflow: "hidden" }) }}>
 
               {/* #4 Genie image */}
               <div style={{ ...panel, display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #1e1e2e, #2a1e3e)", padding: 0, height: 200, flex: "0 0 auto" }}>
