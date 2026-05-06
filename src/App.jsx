@@ -1,4 +1,4 @@
-// APP VERSION: v143
+// APP VERSION: v144
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -3105,10 +3105,12 @@ export default function App() {
         };
         const week1Full = buildWeek(planWeekMonday);
         const week2Full = buildWeek(addDays(planWeekMonday, 7));
-        const showSat = week1Full.cells[5].lines.length > 0 || week2Full.cells[5].lines.length > 0;
+        const week3Full = buildWeek(addDays(planWeekMonday, 14));
+        const showSat = week1Full.cells[5].lines.length > 0 || week2Full.cells[5].lines.length > 0 || week3Full.cells[5].lines.length > 0;
         const nCols = showSat ? 6 : 5;
         const week1 = { ...week1Full, cells: week1Full.cells.slice(0, nCols) };
         const week2 = { ...week2Full, cells: week2Full.cells.slice(0, nCols) };
+        const week3 = { ...week3Full, cells: week3Full.cells.slice(0, nCols) };
         const headerLabels = dayLabels.slice(0, nCols);
 
         // ===== Inventory by flavor =====
@@ -3124,7 +3126,7 @@ export default function App() {
           return (_dpCache[itemId] = total);
         };
         const flavorOfId = (id) => { const m = (id || "").match(/^\d+-(\w+)/); return m ? m[1] : null; };
-        const flavorRows = productLines.map(pl => {
+        const flavorRows = productLines.filter(pl => pl !== "PKL").map(pl => {
           const has = (id) => allItems.find(i => i.id === id);
           const sumQty = (filterFn) => allItems.filter(filterFn).reduce((s, i) => s + (i.qty || 0), 0);
           const bins = sumQty(i => getLevel(i.id) === 300 && flavorOfId(i.id) === pl);
@@ -3304,6 +3306,7 @@ export default function App() {
                 {[
                   { label: "This Week", w: week1, showLabel: false },
                   { label: "Next Week", w: week2, showLabel: true },
+                  { label: "Week After", w: week3, showLabel: true },
                 ].map((row, ri) => (
                   <React.Fragment key={ri}>
                     {row.showLabel && (
@@ -3337,7 +3340,7 @@ export default function App() {
               </div>
 
               {/* #4 Genie image */}
-              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "2 / 3", gridRow: isNarrow ? "auto" : "1 / 2", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #1e1e2e, #2a1e3e)", padding: 0, minHeight: 160 }}>
+              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "2 / 3", gridRow: isNarrow ? "auto" : "1 / 2", alignSelf: "start", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #1e1e2e, #2a1e3e)", padding: 0, height: 200 }}>
                 <img
                   src="/genie.png"
                   alt="Dumpling Genie"
@@ -3347,7 +3350,7 @@ export default function App() {
               </div>
 
               {/* #6 Outgoing Orders */}
-              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "3 / 4", gridRow: isNarrow ? "auto" : "1 / 3", display: "flex", flexDirection: "column", maxHeight: isNarrow ? 500 : 600 }}>
+              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "3 / 4", gridRow: isNarrow ? "auto" : "1 / 3", display: "flex", flexDirection: "column", maxHeight: isNarrow ? 500 : "100%", minHeight: 0 }}>
                 <div style={panelHead}>
                   <span>Outgoing Orders <span style={{ color: "#666", fontWeight: 400, fontSize: 11 }}>· upcoming week</span></span>
                   <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 700 }}>{fmtDollars(grandTotal)}</span>
@@ -3400,44 +3403,67 @@ export default function App() {
               </div>
 
               {/* #2 Inventory by Flavor */}
-              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "1 / 2", gridRow: isNarrow ? "auto" : "2 / 3" }}>
+              <div style={{ ...panel, gridColumn: isNarrow ? "auto" : "1 / 2", gridRow: isNarrow ? "auto" : "2 / 3", display: "flex", flexDirection: "column", maxHeight: 260 }}>
                 <div style={panelHead}><span>Inventory by Flavor</span></div>
                 {flavorRows.length === 0 ? (
                   <div style={{ padding: 20, textAlign: "center", color: "#555", fontSize: 12 }}>No flavors found.</div>
-                ) : (
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                      <thead>
-                        <tr>
-                          <th style={TH}>Flavor</th>
-                          <th style={{ ...TH, textAlign: "center" }}>Bins</th>
-                          <th style={{ ...TH, textAlign: "center" }}>Packs</th>
-                          <th style={{ ...TH, textAlign: "center" }}>FS Cases</th>
-                          <th style={{ ...TH, textAlign: "center" }}>Retail Cs</th>
-                          <th style={{ ...TH, textAlign: "right" }}>Total Dumplings</th>
-                          <th style={{ ...TH, textAlign: "right" }}>On Order</th>
-                          <th style={{ ...TH, textAlign: "right" }}>Diff</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {flavorRows.map(r => (
-                          <tr key={r.pl}>
-                            <td style={{ ...TD, fontWeight: 700, color: "#a78bfa" }}>{r.pl}</td>
-                            <td style={{ ...TD, textAlign: "center" }}>{r.bins || "—"}</td>
-                            <td style={{ ...TD, textAlign: "center" }}>{r.packs || "—"}</td>
-                            <td style={{ ...TD, textAlign: "center" }}>{r.fsCases || "—"}</td>
-                            <td style={{ ...TD, textAlign: "center" }}>{r.retailCases || "—"}</td>
-                            <td style={{ ...TD, textAlign: "right", fontWeight: 600, color: "#22c55e" }}>{r.totalDumplings.toLocaleString()}</td>
-                            <td style={{ ...TD, textAlign: "right", color: "#f59e0b" }}>{r.onOrder.toLocaleString()}</td>
-                            <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: r.diff >= 0 ? "#22c55e" : "#ef4444" }}>
-                              {r.diff >= 0 ? "+" : ""}{r.diff.toLocaleString()}
+                ) : (() => {
+                  const totals = flavorRows.reduce((t, r) => ({
+                    bins: t.bins + r.bins, packs: t.packs + r.packs, fsCases: t.fsCases + r.fsCases,
+                    retailCases: t.retailCases + r.retailCases, totalDumplings: t.totalDumplings + r.totalDumplings,
+                    onOrder: t.onOrder + r.onOrder, diff: t.diff + r.diff,
+                  }), { bins: 0, packs: 0, fsCases: 0, retailCases: 0, totalDumplings: 0, onOrder: 0, diff: 0 });
+                  const stickyTH = { ...TH, position: "sticky", top: 0, background: "#1e1e2e", zIndex: 1 };
+                  const totalTD = { ...TD, fontWeight: 700, background: "#16161e", borderTop: "1px solid #2a2a3a" };
+                  return (
+                    <div style={{ overflow: "auto", flex: 1 }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                        <thead>
+                          <tr>
+                            <th style={stickyTH}>Flavor</th>
+                            <th style={{ ...stickyTH, textAlign: "center" }}>Bins</th>
+                            <th style={{ ...stickyTH, textAlign: "center" }}>Packs</th>
+                            <th style={{ ...stickyTH, textAlign: "center" }}>FS Cases</th>
+                            <th style={{ ...stickyTH, textAlign: "center" }}>Retail Cs</th>
+                            <th style={{ ...stickyTH, textAlign: "right" }}>Total Dumplings</th>
+                            <th style={{ ...stickyTH, textAlign: "right" }}>On Order</th>
+                            <th style={{ ...stickyTH, textAlign: "right" }}>Diff</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {flavorRows.map(r => (
+                            <tr key={r.pl}>
+                              <td style={{ ...TD, fontWeight: 700, color: "#a78bfa" }}>{r.pl}</td>
+                              <td style={{ ...TD, textAlign: "center" }}>{r.bins || "—"}</td>
+                              <td style={{ ...TD, textAlign: "center" }}>{r.packs || "—"}</td>
+                              <td style={{ ...TD, textAlign: "center" }}>{r.fsCases || "—"}</td>
+                              <td style={{ ...TD, textAlign: "center" }}>{r.retailCases || "—"}</td>
+                              <td style={{ ...TD, textAlign: "right", fontWeight: 600, color: "#22c55e" }}>{r.totalDumplings.toLocaleString()}</td>
+                              <td style={{ ...TD, textAlign: "right", color: "#f59e0b" }}>{r.onOrder.toLocaleString()}</td>
+                              <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: r.diff >= 0 ? "#22c55e" : "#ef4444" }}>
+                                {r.diff >= 0 ? "+" : ""}{r.diff.toLocaleString()}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr>
+                            <td style={{ ...totalTD, color: "#ccc" }}>Total</td>
+                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.bins || "—"}</td>
+                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.packs || "—"}</td>
+                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.fsCases || "—"}</td>
+                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.retailCases || "—"}</td>
+                            <td style={{ ...totalTD, textAlign: "right", color: "#22c55e" }}>{totals.totalDumplings.toLocaleString()}</td>
+                            <td style={{ ...totalTD, textAlign: "right", color: "#f59e0b" }}>{totals.onOrder.toLocaleString()}</td>
+                            <td style={{ ...totalTD, textAlign: "right", color: totals.diff >= 0 ? "#22c55e" : "#ef4444" }}>
+                              {totals.diff >= 0 ? "+" : ""}{totals.diff.toLocaleString()}
                             </td>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+                        </tfoot>
+                      </table>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* #5 POs Awaiting */}
