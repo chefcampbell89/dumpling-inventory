@@ -1,4 +1,4 @@
-// APP VERSION: v145
+// APP VERSION: v146
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -17,7 +17,7 @@ import {
   fetchWishes, createWish, countUserWishes, grantWish, ungrantWish, acknowledgeWish, fetchPendingGrantedWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles, deleteProfile as dbDeleteProfile,
   getInviteCode, setInviteCode, getLocations, getConfig, saveConfig, changePassword, supabase,
-  DEFAULT_BASE_INGREDIENTS, digitForProductLine, formatLotNumber, reserveLotNumbers, dateToMMDDYY,
+  DEFAULT_BASE_INGREDIENTS, digitForProductLine, formatLotNumber, padLotNumber, reserveLotNumbers, dateToMMDDYY,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
@@ -746,7 +746,7 @@ export default function App() {
       getConfig("app_name").then(r => { if (r) setAppName(r); }).catch(() => {});
       getConfig("forecast_config").then(r => { if (r) setForecastConfig(prev => ({ ...prev, ...r })); }).catch(() => {});
       getConfig("daily_note").then(r => { if (r) setDailyNote(r); }).catch(() => {});
-      getConfig("lot_base_ingredients").then(r => { if (Array.isArray(r) && r.length === 10) setBaseIngredients(r); }).catch(() => {});
+      getConfig("lot_base_ingredients").then(r => { if (Array.isArray(r) && r.length > 0) setBaseIngredients(r); }).catch(() => {});
       getConfig("lot_sequence_counter").then(r => { if (typeof r === "number") setLotCounter(r); }).catch(() => {});
     } catch (err) {
       console.warn("Supabase load failed, using seed data:", err.message);
@@ -1301,7 +1301,7 @@ export default function App() {
       entries.push({
         date: r.date, time: r.createdAt || r.date, type: "Production",
         desc: `Produced ${r.qtyProduced} x ${r.assemblyName}`,
-        lot: r.lotNumber || "", user: r.createdBy || "",
+        lot: padLotNumber(r.lotNumber || ""), user: r.createdBy || "",
         detail: r.consumed.map(c => `-${c.qty.toFixed(3)} ${c.name}`).join(", "),
         color: "#8b5cf6",
       });
@@ -3599,7 +3599,7 @@ export default function App() {
                                   </tr></thead>
                                   <tbody>{itemLots.map((l, li) => (
                                     <tr key={l.lotNumber + "-" + li}>
-                                      <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, padding: "4px 12px", color: l.lotNumber ? "#a78bfa" : "#555" }}>{l.lotNumber || "\u2014"}</td>
+                                      <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, padding: "4px 12px", color: l.lotNumber ? "#a78bfa" : "#555" }}>{l.lotNumber ? padLotNumber(l.lotNumber) : "\u2014"}</td>
                                       <td style={{ ...TD, fontWeight: 600, fontSize: 12, padding: "4px 12px", color: "#22c55e" }}>{l.qty}</td>
                                       <td style={{ ...TD, fontSize: 12, padding: "4px 12px", color: l.location ? "#38bdf8" : "#555" }}>{l.location || "\u2014"}</td>
                                       <td style={{ ...TD, fontSize: 12, padding: "4px 12px", color: "#888" }}>{l.productionDate || "\u2014"}</td>
@@ -4157,7 +4157,7 @@ export default function App() {
                                 <span style={{ fontWeight: 500 }}>{r.assemblyName}</span>
                                 <span style={{ color: "#888", fontSize: 11, marginLeft: 6 }}>({r.assemblyId})</span>
                               </td>
-                              <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: r.lotNumber ? "#a78bfa" : "#555" }}>{r.lotNumber || "—"}</td>
+                              <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: r.lotNumber ? "#a78bfa" : "#555" }}>{r.lotNumber ? padLotNumber(r.lotNumber) : "—"}</td>
                               <td style={{ ...TD, fontWeight: 600, color: draft ? "#f59e0b" : "#22c55e" }}>{draft ? "" : "+"}{r.qtyProduced}</td>
                               <td style={{ ...TD, fontSize: 12 }}>{r.consumed?.length || 0} items</td>
                               <td style={{ ...TD, whiteSpace: "nowrap" }}>
@@ -4261,7 +4261,7 @@ export default function App() {
                   <option value="">Select lot from {lotSourceItem.name}...</option>
                   {suggestedLots.map(l => (
                     <option key={l.lotNumber} value={l.lotNumber}>
-                      {l.lotNumber} {l.planned ? `(PLANNED — ${l.qty} on ${l.productionDate || "?"})` : `(${l.qty} avail, ${l.productionDate || "?"})`}
+                      {padLotNumber(l.lotNumber)} {l.planned ? `(PLANNED — ${l.qty} on ${l.productionDate || "?"})` : `(${l.qty} avail, ${l.productionDate || "?"})`}
                     </option>
                   ))}
                   <option value="__FRESH__">⊕ Make from fresh raw materials (new lot)</option>
@@ -4584,7 +4584,7 @@ export default function App() {
                   <option value="">Select lot from {lotSourceItem.name}...</option>
                   {suggestedLots.map(l => (
                     <option key={l.lotNumber} value={l.lotNumber}>
-                      {l.lotNumber} {l.planned ? `(PLANNED — ${l.qty} on ${l.productionDate || "?"})` : `(${l.qty} avail, ${l.productionDate || "?"})`}
+                      {padLotNumber(l.lotNumber)} {l.planned ? `(PLANNED — ${l.qty} on ${l.productionDate || "?"})` : `(${l.qty} avail, ${l.productionDate || "?"})`}
                     </option>
                   ))}
                   <option value="__FRESH__">⊕ Make from fresh raw materials (new lot)</option>
@@ -4757,7 +4757,7 @@ export default function App() {
                   <option value="">— leave blank, choose at completion —</option>
                   {suggestedLots.map(l => (
                     <option key={l.lotNumber} value={l.lotNumber}>
-                      {l.lotNumber} {l.planned ? `(PLANNED — ${l.qty} on ${l.productionDate || "?"})` : `(${l.qty} avail, ${l.productionDate || "?"})`}
+                      {padLotNumber(l.lotNumber)} {l.planned ? `(PLANNED — ${l.qty} on ${l.productionDate || "?"})` : `(${l.qty} avail, ${l.productionDate || "?"})`}
                     </option>
                   ))}
                   <option value="__FRESH__">⊕ Make from fresh raw materials (new lot)</option>
@@ -5818,15 +5818,25 @@ export default function App() {
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                       <thead>
                         <tr style={{ background: "#16161e", color: "#888", fontSize: 11, textTransform: "uppercase" }}>
-                          <th style={{ padding: "8px 10px", textAlign: "left", width: 60 }}>Digit</th>
+                          <th style={{ padding: "8px 10px", textAlign: "left", width: 80 }}>Digit</th>
                           <th style={{ padding: "8px 10px", textAlign: "left" }}>Base Ingredient Label</th>
                           <th style={{ padding: "8px 10px", textAlign: "left" }}>Product Line Codes</th>
+                          <th style={{ padding: "8px 10px", width: 50 }}></th>
                         </tr>
                       </thead>
                       <tbody>
                         {baseIngredients.map((bi, idx) => (
-                          <tr key={bi.digit} style={{ borderBottom: "1px solid #2a2a3a" }}>
-                            <td style={{ padding: "8px 10px", fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", fontSize: 14 }}>{bi.digit}</td>
+                          <tr key={idx} style={{ borderBottom: "1px solid #2a2a3a" }}>
+                            <td style={{ padding: "8px 10px" }}>
+                              <input
+                                type="number" min={0} value={bi.digit}
+                                onChange={e => {
+                                  const v = e.target.value === "" ? "" : parseInt(e.target.value, 10);
+                                  setBaseIngredients(prev => prev.map((x, i) => i === idx ? { ...x, digit: v } : x));
+                                }}
+                                style={{ ...IS, width: "100%", fontFamily: "monospace", color: "#fbbf24", fontWeight: 700, fontSize: 14, textAlign: "center" }}
+                              />
+                            </td>
                             <td style={{ padding: "8px 10px" }}>
                               <input value={bi.label} onChange={e => {
                                 const v = e.target.value;
@@ -5839,12 +5849,34 @@ export default function App() {
                                 setBaseIngredients(prev => prev.map((x, i) => i === idx ? { ...x, productLines: codes } : x));
                               }} placeholder="e.g. CB, KB" style={{ ...IS, width: "100%" }} />
                             </td>
+                            <td style={{ padding: "8px 10px", textAlign: "center" }}>
+                              <button
+                                onClick={() => {
+                                  if (!confirm(`Delete digit ${bi.digit} (${bi.label || "unnamed"})? Existing lots that already use this digit are NOT affected.`)) return;
+                                  setBaseIngredients(prev => prev.filter((_, i) => i !== idx));
+                                }}
+                                style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", padding: 4 }}
+                                title="Remove row"
+                              ><Trash2 size={14} /></button>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                    <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                    <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+                      <button onClick={() => {
+                        const usedDigits = new Set(baseIngredients.map(b => Number(b.digit)));
+                        let nextDigit = 0;
+                        while (usedDigits.has(nextDigit)) nextDigit += 1;
+                        setBaseIngredients(prev => [...prev, { digit: nextDigit, label: "", productLines: [] }]);
+                      }} style={B2}><Plus size={14} /> Add Row</button>
                       <button onClick={async () => {
+                        const seen = new Set();
+                        for (const b of baseIngredients) {
+                          if (b.digit === "" || !Number.isFinite(Number(b.digit))) { show("Each row needs a numeric digit", "error"); return; }
+                          if (seen.has(Number(b.digit))) { show(`Duplicate digit ${b.digit}`, "error"); return; }
+                          seen.add(Number(b.digit));
+                        }
                         try { await saveConfig("lot_base_ingredients", baseIngredients); show("Lot numbering saved"); }
                         catch (e) { show(e.message, "error"); }
                       }} style={B1}><Check size={14} /> Save Mapping</button>

@@ -693,6 +693,20 @@ export function formatLotNumber(digit, counter, dateStr) {
   return dateSuffix ? `${base}-${dateSuffix}` : base;
 }
 
+// Defensive normaliser for display: pads a short prefix back out to 5 chars
+// so legacy LG lots stored as "1" or "1-041926" render as "00001" / "00001-041926".
+// Anything already >=5 chars in the prefix is returned unchanged.
+export function padLotNumber(lotNum) {
+  if (lotNum === null || lotNum === undefined || lotNum === "") return "";
+  const s = String(lotNum);
+  const dashIdx = s.indexOf("-");
+  const prefix = dashIdx > 0 ? s.slice(0, dashIdx) : s;
+  const rest = dashIdx > 0 ? s.slice(dashIdx) : "";
+  if (!/^\d+$/.test(prefix)) return s; // not a numeric-prefix lot, leave alone
+  const padded = prefix.length < 5 ? prefix.padStart(5, "0") : prefix;
+  return padded + rest;
+}
+
 // Reads the current global counter, increments by `count`, persists, returns the next `count` lot numbers.
 // productLines is an array of product line codes (one per lot needed), in order.
 // dateStrs is an optional parallel array of YYYY-MM-DD dates to embed in each lot.
