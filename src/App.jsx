@@ -1,5 +1,5 @@
-// APP VERSION: v147
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+// APP VERSION: v149
+import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
   fetchBomLines, setBomForAssembly,
@@ -659,6 +659,22 @@ export default function App() {
   const [noteText, setNoteText] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isNarrow, setIsNarrow] = useState(typeof window !== "undefined" ? window.innerWidth < 900 : false);
+  const dashCol1Ref = useRef(null);
+  const [dashCol1Height, setDashCol1Height] = useState(null);
+  // Measure col 1 (Production Plan + Inventory) so cols 2 and 3 can match its bottom.
+  // Re-observe whenever we re-enter the dashboard (the ref attaches a fresh node).
+  useEffect(() => {
+    if (tab !== "dashboard") return undefined;
+    const el = dashCol1Ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      setDashCol1Height(Math.round(entry.contentRect.height));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tab]);
   useEffect(() => {
     const onResize = () => setIsNarrow(window.innerWidth < 900);
     window.addEventListener("resize", onResize);
@@ -3292,7 +3308,7 @@ export default function App() {
             <div style={dashGrid}>
 
               {/* ===== Col 1: Production Plan + Inventory by Flavor ===== */}
-              <div style={colStack}>
+              <div ref={dashCol1Ref} style={colStack}>
 
               {/* #1 Production Plan */}
               <div style={{ ...panel }}>
@@ -3343,7 +3359,7 @@ export default function App() {
               </div>
 
               {/* #2 Inventory by Flavor */}
-              <div style={{ ...panel, display: "flex", flexDirection: "column", maxHeight: 320, flex: "0 0 auto" }}>
+              <div style={{ ...panel, display: "flex", flexDirection: "column", maxHeight: 400, flex: "0 0 auto" }}>
                 <div style={panelHead}><span>Inventory by Flavor</span></div>
                 {flavorRows.length === 0 ? (
                   <div style={{ padding: 20, textAlign: "center", color: "#555", fontSize: 12 }}>No flavors found.</div>
@@ -3354,7 +3370,7 @@ export default function App() {
                     onOrder: t.onOrder + r.onOrder, diff: t.diff + r.diff,
                   }), { bins: 0, packs: 0, fsCases: 0, retailCases: 0, totalDumplings: 0, onOrder: 0, diff: 0 });
                   const stickyTH = { ...TH, position: "sticky", top: 0, background: "#1e1e2e", zIndex: 1 };
-                  const totalTD = { ...TD, fontWeight: 700, background: "#16161e", borderTop: "1px solid #2a2a3a" };
+                  const totalTD = { ...TD, fontWeight: 700, background: "#16161e", borderTop: "1px solid #2a2a3a", position: "sticky", bottom: 0 };
                   return (
                     <div style={{ overflow: "auto", flex: 1 }}>
                       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -3409,7 +3425,7 @@ export default function App() {
               </div>{/* end Col 1 */}
 
               {/* ===== Col 2: Genie + POs Awaiting ===== */}
-              <div style={colStack}>
+              <div style={{ ...colStack, ...(isNarrow || !dashCol1Height ? {} : { maxHeight: dashCol1Height, overflow: "hidden" }) }}>
 
               {/* #4 Genie image */}
               <div style={{ ...panel, display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #1e1e2e, #2a1e3e)", padding: 0, height: 200, flex: "0 0 auto" }}>
@@ -3422,7 +3438,7 @@ export default function App() {
               </div>
 
               {/* #5 POs Awaiting */}
-              <div style={{ ...panel, display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: 200 }}>
+              <div style={{ ...panel, display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: 0 }}>
                 <div style={panelHead}>
                   <span>POs Awaiting</span>
                   <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>{awaitingPOs.length}</span>
@@ -3451,7 +3467,7 @@ export default function App() {
               </div>{/* end Col 2 */}
 
               {/* #6 Outgoing Orders */}
-              <div style={{ ...panel, display: "flex", flexDirection: "column", maxHeight: isNarrow ? 500 : "100%", minHeight: 0 }}>
+              <div style={{ ...panel, display: "flex", flexDirection: "column", maxHeight: isNarrow ? 500 : (dashCol1Height || "100%"), minHeight: 0 }}>
                 <div style={panelHead}>
                   <span>Outgoing Orders <span style={{ color: "#666", fontWeight: 400, fontSize: 11 }}>· upcoming week</span></span>
                   <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 700 }}>{fmtDollars(grandTotal)}</span>
