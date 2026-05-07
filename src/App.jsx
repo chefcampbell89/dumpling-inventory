@@ -1,4 +1,4 @@
-// APP VERSION: v152
+// APP VERSION: v153
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1298,8 +1298,9 @@ export default function App() {
   const transactionLog = useMemo(() => {
     const entries = [];
 
-    // Production runs
+    // Production runs — only completed runs; drafts haven't moved any inventory yet
     for (const r of prodRuns) {
+      if ((r.status || "Complete") !== "Complete") continue;
       entries.push({
         date: r.date, time: r.createdAt || r.date, type: "Production",
         desc: `Produced ${r.qtyProduced} x ${r.assemblyName}`,
