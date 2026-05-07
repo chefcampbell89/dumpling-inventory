@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v112
+// SUPABASE VERSION: v113
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -454,6 +454,55 @@ export async function completeProductionRun(runId, consumed) {
     )
     if (cErr) throw cErr
   }
+}
+
+// Admin-only: rename the lot # on a completed production run, keeping
+// inventory_lots and order_lot_allocations in sync. Three cases:
+//   - The new lot # already exists for this item → merge qty into it,
+//     delete the old row
+//   - Old lot still has a row → just rename it
+//   - Old lot row is gone (already shipped/consumed) → no-op on inventory
+// In all cases, allocations referencing the old lot are remapped, and
+// the production_runs row is updated.
+export async function renameProductionRunLot(runId, itemId, oldLot, newLot) {
+  if (!newLot || !String(newLot).trim()) throw new Error("New lot # is required")
+  const newLotStr = String(newLot).trim()
+  if (newLotStr === oldLot) return
+
+  // 1. Look up old + new inventory_lots rows
+  const { data: oldRow, error: oErr } = await supabase.from("inventory_lots")
+    .select("*").eq("item_id", itemId).eq("lot_number", oldLot).maybeSingle()
+  if (oErr) throw oErr
+  const { data: existingNew, error: nErr } = await supabase.from("inventory_lots")
+    .select("*").eq("item_id", itemId).eq("lot_number", newLotStr).maybeSingle()
+  if (nErr) throw nErr
+
+  if (oldRow && existingNew) {
+    // Merge: add old qty to existing new row, delete old row
+    const mergedQty = Number(existingNew.qty) + Number(oldRow.qty)
+    const { error: e1 } = await supabase.from("inventory_lots")
+      .update({ qty: mergedQty }).eq("id", existingNew.id)
+    if (e1) throw e1
+    const { error: e2 } = await supabase.from("inventory_lots").delete().eq("id", oldRow.id)
+    if (e2) throw e2
+  } else if (oldRow) {
+    // Simple rename
+    const { error } = await supabase.from("inventory_lots")
+      .update({ lot_number: newLotStr }).eq("id", oldRow.id)
+    if (error) throw error
+  }
+  // If no oldRow, on-hand has gone to zero; nothing to update on inventory_lots.
+
+  // 2. Remap any allocations that referenced the old lot
+  const { error: aErr } = await supabase.from("order_lot_allocations")
+    .update({ lot_number: newLotStr })
+    .eq("item_id", itemId).eq("lot_number", oldLot)
+  if (aErr) throw aErr
+
+  // 3. Update the production_runs row itself
+  const { error: pErr } = await supabase.from("production_runs")
+    .update({ lot_number: newLotStr }).eq("id", runId)
+  if (pErr) throw pErr
 }
 
 // -- INVENTORY QTY BULK UPDATES --

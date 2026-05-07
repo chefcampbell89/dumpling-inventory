@@ -1,4 +1,4 @@
-// APP VERSION: v154
+// APP VERSION: v155
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -11,7 +11,7 @@ import {
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
   fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
-  fetchProductionRuns, createProductionRun, updateProductionRun, deleteProductionRuns, fetchDraftRunsForWeek, fetchCompletedRunsForWeek, completeProductionRun,
+  fetchProductionRuns, createProductionRun, updateProductionRun, deleteProductionRuns, fetchDraftRunsForWeek, fetchCompletedRunsForWeek, completeProductionRun, renameProductionRunLot,
   fetchInventoryLots, adjustLotQty,
   zeroAllInventory, bulkUpdateItemQtys,
   fetchWishes, createWish, countUserWishes, grantWish, ungrantWish, acknowledgeWish, fetchPendingGrantedWishes,
@@ -649,6 +649,10 @@ export default function App() {
   const [draftToComplete, setDraftToComplete] = useState(null);
   const [editDraftModal, setEditDraftModal] = useState(false);
   const [editDraftForm, setEditDraftForm] = useState({});
+  // Admin-only: edit lot # on a completed run (typo / wrong lot correction)
+  const [editLotModal, setEditLotModal] = useState(null);   // run object or null
+  const [editLotValue, setEditLotValue] = useState("");
+  const [editLotSubmitting, setEditLotSubmitting] = useState(false);
   // When editing a draft we re-use the prod* states so the same consumption tree
   // and lot picker UI from the Complete modal can be shown. editingDraftId tracks
   // which draft is being edited; null = not editing.
@@ -2389,6 +2393,47 @@ export default function App() {
         show("Draft deleted");
       }
     } catch (e) { show(e.message, "error"); }
+  };
+
+  // Admin-only: fix an incorrect lot # on a completed production run.
+  // Renames inventory_lots, remaps order_lot_allocations, updates the run.
+  const submitEditLot = async () => {
+    const run = editLotModal;
+    if (!run) return;
+    const newLot = String(editLotValue || "").trim();
+    if (!newLot) { show("New lot # is required", "error"); return; }
+    if (newLot === (run.lotNumber || "")) { setEditLotModal(null); return; }
+    setEditLotSubmitting(true);
+    try {
+      await renameProductionRunLot(run.id, run.assemblyId, run.lotNumber || "", newLot);
+      // Update local state
+      setProdRuns(prev => prev.map(r => r.id === run.id ? { ...r, lotNumber: newLot } : r));
+      setLots(prev => {
+        const oldKey = `${run.assemblyId}|${run.lotNumber}`;
+        const newKey = `${run.assemblyId}|${newLot}`;
+        // Find old + existing new lot rows
+        const oldIdx = prev.findIndex(l => l.itemId === run.assemblyId && l.lotNumber === run.lotNumber);
+        const newIdx = prev.findIndex(l => l.itemId === run.assemblyId && l.lotNumber === newLot);
+        if (oldIdx === -1) return prev;
+        if (newIdx !== -1 && newIdx !== oldIdx) {
+          // Merge old qty into new, drop old
+          const merged = [...prev];
+          merged[newIdx] = { ...merged[newIdx], qty: Number(merged[newIdx].qty) + Number(merged[oldIdx].qty) };
+          merged.splice(oldIdx, 1);
+          return merged;
+        }
+        // Simple rename
+        return prev.map((l, i) => i === oldIdx ? { ...l, lotNumber: newLot } : l);
+      });
+      // Update allocations in local state
+      setOrderLotAllocations(prev => prev.map(a => a.itemId === run.assemblyId && a.lotNumber === run.lotNumber ? { ...a, lotNumber: newLot } : a));
+      show(`Lot # updated: ${run.lotNumber || "(blank)"} → ${newLot}`);
+      setEditLotModal(null);
+      setEditLotValue("");
+    } catch (e) {
+      show(e.message, "error");
+    }
+    setEditLotSubmitting(false);
   };
 
   const renderConsumptionTree = (bom, multiplier, depth = 0) => (
@@ -4250,7 +4295,7 @@ export default function App() {
                               <td style={{ ...TD, fontWeight: 600, color: draft ? "#f59e0b" : "#22c55e" }}>{draft ? "" : "+"}{r.qtyProduced}</td>
                               <td style={{ ...TD, fontSize: 12 }}>{r.consumed?.length || 0} items</td>
                               <td style={{ ...TD, whiteSpace: "nowrap" }}>
-                                {draft && (
+                                {draft ? (
                                   <div style={{ display: "flex", gap: 4 }}>
                                     <button onClick={() => {
                                       setDraftToComplete(r);
@@ -4268,6 +4313,14 @@ export default function App() {
                                       <Trash2 size={12} />
                                     </button>
                                   </div>
+                                ) : (
+                                  isAdmin && (
+                                    <button onClick={() => { setEditLotModal(r); setEditLotValue(r.lotNumber || ""); }}
+                                      style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#a78bfa", borderColor: "#a78bfa44" }}
+                                      title="Fix lot # (admin)">
+                                      <Edit2 size={12} /> Lot #
+                                    </button>
+                                  )
                                 )}
                               </td>
                             </tr>
@@ -4887,6 +4940,56 @@ export default function App() {
             <Check size={14} /> Save
           </button>
         </div>
+      </Modal>
+
+      {/* ================== EDIT LOT # ON COMPLETED RUN (admin) ================== */}
+      <Modal open={!!editLotModal} onClose={() => { if (!editLotSubmitting) { setEditLotModal(null); setEditLotValue(""); } }} title="Fix Lot # on Completed Run">
+        {editLotModal && (() => {
+          const run = editLotModal;
+          const oldLot = run.lotNumber || "";
+          const lotRow = lots.find(l => l.itemId === run.assemblyId && l.lotNumber === oldLot);
+          const onHand = lotRow ? Number(lotRow.qty) : 0;
+          const allocsForLot = orderLotAllocations.filter(a => a.itemId === run.assemblyId && a.lotNumber === oldLot);
+          const newLot = String(editLotValue || "").trim();
+          const newLotRow = newLot ? lots.find(l => l.itemId === run.assemblyId && l.lotNumber === newLot) : null;
+          const wouldMerge = !!newLotRow && newLot !== oldLot;
+          return (
+            <div>
+              <div style={{ background: "#16161e", border: "1px solid #2a2a3a", borderRadius: 8, padding: 12, marginBottom: 14, fontSize: 12, color: "#bbb", lineHeight: 1.5 }}>
+                <div style={{ marginBottom: 4 }}><span style={{ color: "#888" }}>Run:</span> <span style={{ fontFamily: "monospace", color: "#8b5cf6" }}>{run.id}</span></div>
+                <div style={{ marginBottom: 4 }}><span style={{ color: "#888" }}>Item:</span> {run.assemblyName} <span style={{ color: "#666" }}>({run.assemblyId})</span></div>
+                <div style={{ marginBottom: 4 }}><span style={{ color: "#888" }}>Current Lot #:</span> <span style={{ fontFamily: "monospace", color: "#a78bfa" }}>{oldLot ? padLotNumber(oldLot) : "(blank)"}</span></div>
+                <div style={{ marginBottom: 4 }}><span style={{ color: "#888" }}>On hand in this lot:</span> <span style={{ color: "#22c55e", fontWeight: 600 }}>{onHand}</span></div>
+                <div><span style={{ color: "#888" }}>Allocations referencing this lot:</span> <span style={{ color: "#f59e0b", fontWeight: 600 }}>{allocsForLot.length}</span></div>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>New Lot # *</label>
+                <input value={editLotValue} onChange={e => setEditLotValue(e.target.value)}
+                  placeholder="Correct lot #" style={IS} autoFocus />
+                {wouldMerge && (
+                  <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 6 }}>
+                    ⚠ Lot <span style={{ fontFamily: "monospace" }}>{padLotNumber(newLot)}</span> already exists for this item with on-hand <b>{Number(newLotRow.qty)}</b>. Submitting will <b>merge</b> the {onHand} from the old lot into it (new total: {onHand + Number(newLotRow.qty)}) and delete the old lot row.
+                  </div>
+                )}
+                {!wouldMerge && newLot && newLot !== oldLot && (
+                  <div style={{ fontSize: 11, color: "#888", marginTop: 6 }}>
+                    Will rename the lot row in inventory and remap any allocations. Production-run record will reflect the new lot #.
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <button onClick={() => { setEditLotModal(null); setEditLotValue(""); }} disabled={editLotSubmitting} style={B2}>Cancel</button>
+                <button onClick={submitEditLot}
+                  disabled={editLotSubmitting || !newLot || newLot === oldLot}
+                  style={{ ...B1, opacity: (editLotSubmitting || !newLot || newLot === oldLot) ? 0.4 : 1 }}>
+                  <Check size={14} /> {editLotSubmitting ? "Saving…" : (wouldMerge ? "Merge & Update" : "Update Lot #")}
+                </button>
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
 
       {/* ================== PERFORMANCE ================== */}
