@@ -1,4 +1,4 @@
-// APP VERSION: v153
+// APP VERSION: v154
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -591,6 +591,10 @@ export default function App() {
   const [lotAllocateForm, setLotAllocateForm] = useState({ lotNumber: "", itemId: "", orderId: "", qty: 0 });
   const [toast, setToast] = useState(null);
   const [expanded, setExpanded] = useState({});
+  // Transaction log: per-row drill-down toggle + CSV export date range
+  const [txExpanded, setTxExpanded] = useState({});
+  const [txExportFrom, setTxExportFrom] = useState("");
+  const [txExportTo, setTxExportTo] = useState("");
   const [delConfirm, setDelConfirm] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importTab, setImportTab] = useState("items");
@@ -1294,19 +1298,37 @@ export default function App() {
     };
   }, [orders, getUnitPrice]);
 
-  // Unified transaction log from existing data
+  // Unified transaction log from existing data.
+  // Each entry includes a `lines` array of granular part movements for drill-down.
   const transactionLog = useMemo(() => {
     const entries = [];
+    const unitOf = (id) => allItems.find(i => i.id === id)?.unit || "";
 
     // Production runs — only completed runs; drafts haven't moved any inventory yet
     for (const r of prodRuns) {
       if ((r.status || "Complete") !== "Complete") continue;
+      const lotPad = padLotNumber(r.lotNumber || "");
+      const lines = [
+        // Output (the produced assembly enters inventory at this lot)
+        {
+          sign: "+", qty: Number(r.qtyProduced) || 0, unit: unitOf(r.assemblyId),
+          itemId: r.assemblyId, itemName: r.assemblyName, lotNumber: lotPad,
+        },
+        // Consumed (each input part deducted from inventory)
+        ...(r.consumed || []).map(c => ({
+          sign: "-", qty: Number(c.qty) || 0, unit: c.unit || unitOf(c.partId),
+          itemId: c.partId, itemName: c.name, lotNumber: "",
+        })),
+      ];
       entries.push({
+        id: r.id,
         date: r.date, time: r.createdAt || r.date, type: "Production",
         desc: `Produced ${r.qtyProduced} x ${r.assemblyName}`,
-        lot: padLotNumber(r.lotNumber || ""), user: r.createdBy || "",
-        detail: r.consumed.map(c => `-${c.qty.toFixed(3)} ${c.name}`).join(", "),
+        lot: lotPad, user: r.createdBy || "",
+        detail: (r.consumed || []).map(c => `-${c.qty.toFixed(3)} ${c.name}`).join(", "),
+        notes: r.notes || "",
         color: "#8b5cf6",
+        lines,
       });
     }
 
@@ -1316,29 +1338,83 @@ export default function App() {
       let logType = "Receipt";
       let color = "#22c55e";
       let desc = `${r.type}: ${r.lines.length} items, ${totalUnits} units`;
+      let direction = "+"; // default: receipts add to inventory
       if (r.type === "Inventory adjustment") {
         logType = "Adjustment"; color = "#f59e0b";
         desc = r.notes || "Inventory adjustment";
+        // qtyReceived sign reflects direction for adjustments
       } else if (r.type === "Shipment") {
         logType = "Shipment"; color = "#ef4444";
         desc = r.notes || `Shipment: ${r.lines.length} items, ${totalUnits} units`;
+        direction = "-";
       } else if (r.type === "Shipment Reversal") {
         logType = "Reversal"; color = "#6366f1";
         desc = r.notes || `Reversal: ${r.lines.length} items, ${totalUnits} units`;
+        direction = "+";
       }
+      const lines = r.lines.map(l => {
+        // For adjustments, qtyReceived can be negative — reflect that in sign
+        const q = Number(l.qtyReceived) || 0;
+        const sign = logType === "Adjustment" ? (q >= 0 ? "+" : "-") : direction;
+        return {
+          sign, qty: Math.abs(q), unit: l.unit || unitOf(l.partId),
+          itemId: l.partId, itemName: l.name, lotNumber: "",
+        };
+      });
       entries.push({
+        id: r.id,
         date: r.date, time: r.createdAt || r.date, type: logType,
         desc,
         lot: "", user: r.createdBy || "",
         detail: r.lines.map(l => `${l.name}: ${l.qtyReceived} ${l.unit}`).join(", "),
+        notes: r.notes || "",
         color,
+        lines,
       });
     }
 
     // Sort newest first
     entries.sort((a, b) => (b.time || b.date || "").localeCompare(a.time || a.date || ""));
     return entries;
-  }, [prodRuns, receipts]);
+  }, [prodRuns, receipts, allItems]);
+
+  // ---- Transaction Log: CSV export (one row per line move) ----
+  const exportTransactionLogCSV = useCallback(() => {
+    const from = txExportFrom || "0000-00-00";
+    const to = txExportTo || "9999-99-99";
+    const inRange = transactionLog.filter(e => (e.date || "") >= from && (e.date || "") <= to);
+    if (inRange.length === 0) {
+      show("No transactions in that date range", "error");
+      return;
+    }
+    const escape = (v) => {
+      const s = v == null ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ["Date", "Type", "TransactionID", "Description", "ItemID", "ItemName", "Direction", "Qty", "Unit", "Lot", "User", "Notes"];
+    const rows = [header.join(",")];
+    let lineCount = 0;
+    for (const e of inRange) {
+      for (const ln of (e.lines || [])) {
+        rows.push([
+          e.date || "", e.type, e.id || "", e.desc || "",
+          ln.itemId || "", ln.itemName || "",
+          ln.sign, ln.qty, ln.unit || "",
+          ln.lotNumber || e.lot || "",
+          e.user || "", e.notes || "",
+        ].map(escape).join(","));
+        lineCount += 1;
+      }
+    }
+    const blob = new Blob([rows.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    const fromTag = txExportFrom || "all";
+    const toTag = txExportTo || "all";
+    a.download = `transaction_log_${fromTag}_to_${toTag}.csv`;
+    a.click();
+    show(`Exported ${lineCount} line${lineCount === 1 ? "" : "s"} from ${inRange.length} transaction${inRange.length === 1 ? "" : "s"}`);
+  }, [transactionLog, txExportFrom, txExportTo, show]);
 
   const stats = useMemo(() => {
     const low = allItems.filter((i) => i.minStock > 0 && i.qty <= i.minStock).length;
@@ -5451,7 +5527,13 @@ export default function App() {
       })()}
 
       {/* ================== TRANSACTION LOG ================== */}
-      {tab === "log" && (
+      {tab === "log" && (() => {
+        const filteredLog = transactionLog.filter(e => {
+          if (!search) return true;
+          const s = search.toLowerCase();
+          return e.desc.toLowerCase().includes(s) || (e.user || "").toLowerCase().includes(s) || e.type.toLowerCase().includes(s) || (e.lot || "").toLowerCase().includes(s) || (e.detail || "").toLowerCase().includes(s) || (e.lines || []).some(ln => (ln.itemName || "").toLowerCase().includes(s) || (ln.itemId || "").toLowerCase().includes(s));
+        });
+        return (
         <div>
           <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
             <Stat icon={<ScrollText size={18} />} label="Total Transactions" value={transactionLog.length} accent="#6366f1" />
@@ -5461,45 +5543,118 @@ export default function App() {
             <Stat icon={<Edit2 size={18} />} label="Adjustments" value={transactionLog.filter(e => e.type === "Adjustment").length} accent="#f59e0b" />
           </div>
 
+          {/* Export controls */}
+          <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "10px 14px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, color: "#888", fontWeight: 600 }}>Export CSV</span>
+            <label style={{ fontSize: 11, color: "#666", display: "flex", alignItems: "center", gap: 6 }}>
+              From
+              <input type="date" value={txExportFrom} onChange={e => setTxExportFrom(e.target.value)} style={{ ...IS, padding: "4px 8px", fontSize: 12, width: 140 }} />
+            </label>
+            <label style={{ fontSize: 11, color: "#666", display: "flex", alignItems: "center", gap: 6 }}>
+              To
+              <input type="date" value={txExportTo} onChange={e => setTxExportTo(e.target.value)} style={{ ...IS, padding: "4px 8px", fontSize: 12, width: 140 }} />
+            </label>
+            <button onClick={exportTransactionLogCSV} style={B1}><Download size={14} /> Export CSV</button>
+            {(txExportFrom || txExportTo) && (
+              <button onClick={() => { setTxExportFrom(""); setTxExportTo(""); }} style={{ ...B2, fontSize: 11 }}>Clear</button>
+            )}
+            <span style={{ fontSize: 11, color: "#555", marginLeft: "auto" }}>
+              {(() => {
+                const from = txExportFrom || "0000-00-00";
+                const to = txExportTo || "9999-99-99";
+                const n = transactionLog.filter(e => (e.date || "") >= from && (e.date || "") <= to).length;
+                return `${n} transaction${n === 1 ? "" : "s"} in range`;
+              })()}
+            </span>
+          </div>
+
           <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 800 }}>
                 <thead><tr>
+                  <th style={{ ...TH, width: 28 }}></th>
                   {["Date", "Type", "Description", "Lot #", "Detail", "User"].map(h => <th key={h} style={TH}>{h}</th>)}
                 </tr></thead>
                 <tbody>
-                  {transactionLog.length === 0 ? (
-                    <tr><td colSpan={6} style={{ ...TD, textAlign: "center", color: "#555", padding: 32 }}>
+                  {filteredLog.length === 0 ? (
+                    <tr><td colSpan={7} style={{ ...TD, textAlign: "center", color: "#555", padding: 32 }}>
                       <ScrollText size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
                       <p style={{ margin: 0 }}>No transactions recorded yet.</p>
                     </td></tr>
                   ) : (
-                    transactionLog.filter(e => {
-                      if (!search) return true;
-                      const s = search.toLowerCase();
-                      return e.desc.toLowerCase().includes(s) || e.user.toLowerCase().includes(s) || e.type.toLowerCase().includes(s) || (e.lot || "").toLowerCase().includes(s) || (e.detail || "").toLowerCase().includes(s);
-                    }).map((e, i) => (
-                      <tr key={i}>
-                        <td style={{ ...TD, fontSize: 12, color: "#888", whiteSpace: "nowrap" }}>{e.date}</td>
-                        <td style={TD}>
-                          <span style={{ background: e.color + "22", color: e.color, padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{e.type}</span>
-                        </td>
-                        <td style={{ ...TD, fontSize: 13 }}>{e.desc}</td>
-                        <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: e.lot ? "#a78bfa" : "#555" }}>{e.lot || "—"}</td>
-                        <td style={{ ...TD, fontSize: 11, color: "#888", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.detail || ""}</td>
-                        <td style={{ ...TD, fontSize: 11, color: "#666" }}>{e.user}</td>
-                      </tr>
-                    ))
+                    filteredLog.map((e, i) => {
+                      const key = `${e.id || ""}-${e.type}-${i}`;
+                      const isOpen = !!txExpanded[key];
+                      const hasLines = (e.lines || []).length > 0;
+                      return (
+                        <React.Fragment key={key}>
+                          <tr style={{ cursor: hasLines ? "pointer" : "default" }} onClick={() => { if (hasLines) setTxExpanded(prev => ({ ...prev, [key]: !prev[key] })); }}>
+                            <td style={TD}>
+                              {hasLines && (
+                                <button onClick={(ev) => { ev.stopPropagation(); setTxExpanded(prev => ({ ...prev, [key]: !prev[key] })); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#888", padding: 2 }} title={isOpen ? "Collapse" : "Expand"}>
+                                  {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                </button>
+                              )}
+                            </td>
+                            <td style={{ ...TD, fontSize: 12, color: "#888", whiteSpace: "nowrap" }}>{e.date}</td>
+                            <td style={TD}>
+                              <span style={{ background: e.color + "22", color: e.color, padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{e.type}</span>
+                            </td>
+                            <td style={{ ...TD, fontSize: 13 }}>{e.desc}</td>
+                            <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: e.lot ? "#a78bfa" : "#555" }}>{e.lot || "—"}</td>
+                            <td style={{ ...TD, fontSize: 11, color: "#888", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.detail || ""}</td>
+                            <td style={{ ...TD, fontSize: 11, color: "#666" }}>{e.user}</td>
+                          </tr>
+                          {isOpen && hasLines && (
+                            <tr>
+                              <td colSpan={7} style={{ ...TD, background: "#16161e", padding: "10px 14px 12px 48px" }}>
+                                <div style={{ fontSize: 10, color: "#666", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Line-Level Movements</div>
+                                <table style={{ width: "auto", borderCollapse: "collapse", fontSize: 12 }}>
+                                  <thead>
+                                    <tr>
+                                      <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Direction</th>
+                                      <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Qty</th>
+                                      <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Unit</th>
+                                      <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Item ID</th>
+                                      <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Item Name</th>
+                                      <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Lot #</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {e.lines.map((ln, li) => {
+                                      const lvl = getLevel(ln.itemId);
+                                      const sColor = ln.sign === "+" ? "#22c55e" : "#ef4444";
+                                      return (
+                                        <tr key={li}>
+                                          <td style={{ ...TD, padding: "4px 12px", color: sColor, fontWeight: 700, textAlign: "center" }}>{ln.sign}</td>
+                                          <td style={{ ...TD, padding: "4px 12px", color: sColor, fontWeight: 600 }}>{ln.qty}</td>
+                                          <td style={{ ...TD, padding: "4px 12px", color: "#888", fontSize: 11 }}>{ln.unit || "—"}</td>
+                                          <td style={{ ...TD, padding: "4px 12px", fontFamily: "monospace", fontSize: 11, color: LEVELS[lvl]?.color || "#888" }}>{ln.itemId}</td>
+                                          <td style={{ ...TD, padding: "4px 12px" }}>{ln.itemName}</td>
+                                          <td style={{ ...TD, padding: "4px 12px", fontFamily: "monospace", fontSize: 11, color: ln.lotNumber ? "#a78bfa" : "#555" }}>{ln.lotNumber || "—"}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                                {e.notes && <div style={{ marginTop: 8, fontSize: 11, color: "#888" }}><span style={{ color: "#666", fontWeight: 600 }}>Notes:</span> {e.notes}</div>}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
             </div>
             <div style={{ padding: "8px 14px", borderTop: "1px solid #2a2a3a", color: "#555", fontSize: 11 }}>
-              {transactionLog.length} transactions
+              {filteredLog.length} of {transactionLog.length} transactions
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* ================== ADMIN CONFIG ================== */}
       {tab === "admin" && isAdmin && (() => {
