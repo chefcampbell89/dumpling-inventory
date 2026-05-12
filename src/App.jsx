@@ -1,4 +1,4 @@
-// APP VERSION: v155
+// APP VERSION: v156
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -9,7 +9,7 @@ import {
   fetchToastJobs, setToastJobCategory,
   fetchOrderLotAllocations, createOrderLotAllocations, deleteOrderLotAllocations, deleteOrderLotAllocation,
   fetchOrders, upsertOrder, deleteOrder as dbDeleteOrder,
-  fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, deletePO as dbDeletePO,
+  fetchPurchaseOrders, createPurchaseOrder, updatePOStatus, updatePOLines, deletePO as dbDeletePO,
   fetchReceipts, createReceipt, updateItemQty,
   fetchProductionRuns, createProductionRun, updateProductionRun, deleteProductionRuns, fetchDraftRunsForWeek, fetchCompletedRunsForWeek, completeProductionRun, renameProductionRunLot,
   fetchInventoryLots, adjustLotQty,
@@ -547,6 +547,11 @@ export default function App() {
   const [manualPOModal, setManualPOModal] = useState(false);
   const [manualPOForm, setManualPOForm] = useState({ vendor: "", notes: "" });
   const [manualPOLines, setManualPOLines] = useState([]);
+  // Edit existing (unreceived) PO: add / remove / change line items
+  const [editPOModal, setEditPOModal] = useState(null); // PO object or null
+  const [editPOLines, setEditPOLines] = useState([]);
+  const [editPONotes, setEditPONotes] = useState("");
+  const [editPOSubmitting, setEditPOSubmitting] = useState(false);
   const [prodRuns, setProdRuns] = useState([]);
   const [prodModal, setProdModal] = useState(false);
   const [prodAssembly, setProdAssembly] = useState("");
@@ -2523,6 +2528,36 @@ export default function App() {
     setManualPOModal(false);
   };
 
+  // ---- EDIT EXISTING (UNRECEIVED) PO ----
+  const openEditPO = (po) => {
+    setEditPOModal(po);
+    setEditPOLines(po.lines.map(l => ({ ...l })));
+    setEditPONotes(po.notes || "");
+  };
+
+  const submitEditPO = async () => {
+    if (!editPOModal) return;
+    const valid = editPOLines.filter(l => l.partId && Number(l.qty) > 0);
+    if (valid.length === 0) { show("PO needs at least one line with qty > 0", "error"); return; }
+    const lines = valid.map(l => ({
+      partId: l.partId, name: l.name,
+      qty: Number(l.qty), unit: l.unit,
+      unitCost: Number(l.unitCost),
+      total: Number(l.qty) * Number(l.unitCost),
+    }));
+    const total = lines.reduce((s, l) => s + l.total, 0);
+    setEditPOSubmitting(true);
+    try {
+      await updatePOLines(editPOModal.id, lines, total, editPONotes);
+      setPOs(prev => prev.map(p => p.id === editPOModal.id ? { ...p, lines, total, notes: editPONotes } : p));
+      show(`Updated ${editPOModal.id}`);
+      setEditPOModal(null);
+    } catch (e) {
+      show(e.message, "error");
+    }
+    setEditPOSubmitting(false);
+  };
+
   // ---- RECEIVING ----
   const openReceiveFromPO = (poId) => {
     const po = pos.find(p => p.id === poId);
@@ -4109,6 +4144,7 @@ export default function App() {
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                         <span style={{ fontSize: 18, fontWeight: 700, color: "#f59e0b" }}>${po.total.toFixed(2)}</span>
                         <button onClick={(e) => { e.stopPropagation(); printPO(po); }} style={{ ...B2, padding: "5px 10px" }}><Printer size={13} /></button>
+                        {po.status !== "Received" && po.status !== "Cancelled" && <button onClick={(e) => { e.stopPropagation(); openEditPO(po); }} style={{ ...B2, padding: "5px 10px", borderColor: "#6366f1", color: "#6366f1" }} title="Edit line items"><Edit2 size={13} /></button>}
                         {po.status !== "Received" && po.status !== "Cancelled" && <button onClick={(e) => { e.stopPropagation(); openReceiveFromPO(po.id); }} style={{ ...B2, padding: "5px 10px", borderColor: "#22c55e", color: "#22c55e" }}><PackageCheck size={13} /></button>}
                         <select value={po.status} onClick={(e) => e.stopPropagation()} onChange={async (e) => { e.stopPropagation(); const ns = e.target.value; setPOs((p) => p.map((x) => x.id === po.id ? { ...x, status: ns } : x)); try { await updatePOStatus(po.id, ns); } catch (err) { console.warn(err); } }} style={{ ...IS, width: "auto", minWidth: 90, padding: "4px 8px", fontSize: 12 }}>
                           {PO_STATUSES.map((s) => <option key={s}>{s}</option>)}
@@ -6374,6 +6410,72 @@ export default function App() {
             <button onClick={submitManualPO} style={B1}><FileText size={14} /> Create PO</button>
           </div>
         </div>
+      </Modal>
+
+      {/* ================== EDIT PO MODAL ================== */}
+      <Modal open={!!editPOModal} onClose={() => { if (!editPOSubmitting) setEditPOModal(null); }} title={editPOModal ? `Edit ${editPOModal.id}` : "Edit PO"} wide>
+        {editPOModal && (
+          <div>
+            <div style={{ background: "#16161e", border: "1px solid #2a2a3a", borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 12, color: "#bbb", display: "flex", gap: 16, flexWrap: "wrap" }}>
+              <div><span style={{ color: "#888" }}>Vendor:</span> <strong style={{ color: "#e0e0e0" }}>{editPOModal.vendor}</strong></div>
+              <div><span style={{ color: "#888" }}>Status:</span> <span style={{ color: sC(editPOModal.status) }}>{editPOModal.status}</span></div>
+              <div><span style={{ color: "#888" }}>Date:</span> {editPOModal.date}</div>
+              {editPOModal.paymentTerms && <div><span style={{ color: "#888" }}>Terms:</span> {editPOModal.paymentTerms}</div>}
+              {editPOModal.leadDays > 0 && <div><span style={{ color: "#888" }}>Lead:</span> {editPOModal.leadDays} days</div>}
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label>
+              <input value={editPONotes} onChange={e => setEditPONotes(e.target.value)} placeholder="Optional notes" style={IS} />
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc" }}>Line Items</div>
+              <button onClick={() => setEditPOLines(prev => [...prev, { partId: "", name: "", qty: 0, unit: "", unitCost: 0 }])} style={B2}><Plus size={14} /> Add Line</button>
+            </div>
+
+            <div style={{ overflowX: "auto", border: "1px solid #2a2a3a", borderRadius: 8, marginBottom: 16 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr>{["Item", "Qty", "Unit", "Unit Cost", "Line Total", ""].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {editPOLines.length === 0 ? (
+                    <tr><td colSpan={6} style={{ ...TD, textAlign: "center", color: "#555", padding: 20 }}>No lines. Click "Add Line" to add one.</td></tr>
+                  ) : editPOLines.map((line, i) => (
+                    <tr key={i}>
+                      <td style={TD}>
+                        <SkuAutocomplete value={line.partId}
+                          onChange={(id) => {
+                            const p = parts.find(x => x.id === id);
+                            setEditPOLines(prev => prev.map((l, j) => j === i ? { ...l, partId: id, name: p?.name || l.name, unit: p?.unit || l.unit, unitCost: l.unitCost > 0 ? l.unitCost : (p?.avgCost || 0) } : l));
+                          }}
+                          skuOpts={parts}
+                          placeholder="Type to search item…"
+                          style={{ minWidth: 240 }}
+                          inputStyle={{ fontSize: 12 }} />
+                      </td>
+                      <td style={TD}><input type="number" step="any" min="0" value={line.qty} onChange={e => setEditPOLines(prev => prev.map((l, j) => j === i ? { ...l, qty: Number(e.target.value) } : l))} style={{ ...IS, width: 80, fontSize: 12 }} /></td>
+                      <td style={{ ...TD, fontSize: 12, color: "#888" }}>{line.unit}</td>
+                      <td style={TD}><input type="number" step="0.01" min="0" value={line.unitCost} onChange={e => setEditPOLines(prev => prev.map((l, j) => j === i ? { ...l, unitCost: Number(e.target.value) } : l))} style={{ ...IS, width: 90, fontSize: 12 }} /></td>
+                      <td style={{ ...TD, fontSize: 12, fontWeight: 600, color: "#f59e0b" }}>${(Number(line.qty) * Number(line.unitCost)).toFixed(2)}</td>
+                      <td style={TD}><button onClick={() => setEditPOLines(prev => prev.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }} title="Remove line"><Minus size={14} /></button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#f59e0b" }}>
+                New Total: ${editPOLines.reduce((s, l) => s + Number(l.qty) * Number(l.unitCost), 0).toFixed(2)}
+                <span style={{ fontSize: 11, fontWeight: 400, color: "#666", marginLeft: 10 }}>(was ${editPOModal.total.toFixed(2)})</span>
+              </span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setEditPOModal(null)} disabled={editPOSubmitting} style={B2}>Cancel</button>
+                <button onClick={submitEditPO} disabled={editPOSubmitting} style={{ ...B1, opacity: editPOSubmitting ? 0.4 : 1 }}><Check size={14} /> {editPOSubmitting ? "Saving…" : "Save Changes"}</button>
+              </div>
+            </div>
+          </div>
+        )}
       </Modal>
 
       {/* ================== RECEIVING MODAL ================== */}

@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v113
+// SUPABASE VERSION: v114
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -285,6 +285,27 @@ export async function createPurchaseOrder(po) {
 export async function updatePOStatus(id, status) {
   const { error } = await supabase.from("purchase_orders").update({ status }).eq("id", id)
   if (error) throw error
+}
+
+// Replace the line items on an existing PO (used for editing open POs before
+// they've been received). Deletes all po_lines for the PO, inserts the new
+// set, and updates the PO total (and optionally notes).
+export async function updatePOLines(poId, lines, total, notes) {
+  const { error: dErr } = await supabase.from("po_lines").delete().eq("po_id", poId)
+  if (dErr) throw dErr
+  if (lines.length > 0) {
+    const { error: iErr } = await supabase.from("po_lines").insert(
+      lines.map(l => ({
+        po_id: poId, part_id: l.partId, name: l.name,
+        qty: l.qty, unit: l.unit, unit_cost: l.unitCost, total: l.total,
+      }))
+    )
+    if (iErr) throw iErr
+  }
+  const update = { total: Number(total) || 0 }
+  if (notes !== undefined) update.notes = notes
+  const { error: pErr } = await supabase.from("purchase_orders").update(update).eq("id", poId)
+  if (pErr) throw pErr
 }
 
 export async function deletePO(id) {
