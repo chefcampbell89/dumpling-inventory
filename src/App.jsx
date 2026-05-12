@@ -1,4 +1,4 @@
-// APP VERSION: v160
+// APP VERSION: v161
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -33,6 +33,18 @@ import { LineChart, Line, ResponsiveContainer, Tooltip as ChartTooltip, BarChart
 // ============================================================
 // CONSTANTS
 // ============================================================
+
+// Format a Date as YYYY-MM-DD in the USER'S LOCAL TIMEZONE.
+// IMPORTANT: never use `todayLocal()` for a date stamp —
+// that returns UTC, so records created after ~7-8pm Eastern get tagged with
+// tomorrow's date. Use this helper instead for anything that represents a
+// calendar date (PO date, receipt date, order date, etc.). Full timestamps
+// (createdAt / updatedAt) are still fine as ISO since the browser will display
+// them in local time.
+const todayLocal = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 
 const DEFAULT_LEVELS = {
   100: { label: "100 - Raw Materials", color: "#6366f1", cat: "Raw Material" },
@@ -1072,7 +1084,7 @@ export default function App() {
           id: `SHIP-${Date.now()}-${si}`,
           poId: null,
           type: "Shipment",
-          date: new Date().toISOString().slice(0, 10),
+          date: todayLocal(),
           notes: `Shipped ${u.line.qty} ${it?.name || u.line.item} to ${customer}${lotSummary}`,
           createdBy: profile?.email || "",
           lines,
@@ -1150,7 +1162,7 @@ export default function App() {
         id: `UNSHIP-${Date.now()}`,
         poId: null,
         type: "Shipment Reversal",
-        date: new Date().toISOString().slice(0, 10),
+        date: todayLocal(),
         notes: `Un-fulfilled line for ${line.customer || "?"}${lotSummary}`,
         createdBy: profile?.email || "",
         lines: revLines,
@@ -1901,7 +1913,7 @@ export default function App() {
     // Log as receipt (inventory adjustment)
     const rcptId = `ADJ-${Date.now()}`;
     const rcpt = {
-      id: rcptId, poId: null, type: "Inventory adjustment", date: new Date().toISOString().slice(0, 10),
+      id: rcptId, poId: null, type: "Inventory adjustment", date: todayLocal(),
       notes: `Admin adjustment: ${adjItem.qty} -> ${newQty} (${diff > 0 ? "+" : ""}${diff})${adjNotes ? " | " + adjNotes : ""}`,
       createdBy: profile?.email || "", lines: [{ partId: adjItem.id, name: adjItem.name, qtyExpected: adjItem.qty, qtyReceived: newQty, unit: adjItem.unit }],
     };
@@ -1967,7 +1979,7 @@ export default function App() {
     for (const vName of Object.keys(buckets)) {
       const vObj = vendors.find((v) => v.name === vName);
       const pid = `PO-${String(pos.length + npos.length + 1 + i).padStart(3, "0")}`;
-      const po = { id: pid, vendor: vName, vendorId: vObj?.id || "", date: new Date().toISOString().slice(0, 10), status: "Draft", lines: buckets[vName].lines, total: buckets[vName].total, paymentTerms: vObj?.paymentTerms || "", leadDays: vObj?.leadDays || 0, notes: "" };
+      const po = { id: pid, vendor: vName, vendorId: vObj?.id || "", date: todayLocal(), status: "Draft", lines: buckets[vName].lines, total: buckets[vName].total, paymentTerms: vObj?.paymentTerms || "", leadDays: vObj?.leadDays || 0, notes: "" };
       npos.push(po);
       try { await createPurchaseOrder(po); } catch (e) { console.warn("PO save failed:", e.message); }
       i += 1;
@@ -2619,7 +2631,7 @@ export default function App() {
     const pid = `PO-${String(pos.length + 1).padStart(3, "0")}`;
     const total = validLines.reduce((s, l) => s + l.qty * l.unitCost, 0);
     const po = {
-      id: pid, vendor: manualPOForm.vendor, vendorId: vObj?.id || "", date: new Date().toISOString().slice(0, 10),
+      id: pid, vendor: manualPOForm.vendor, vendorId: vObj?.id || "", date: todayLocal(),
       status: "Draft", total, paymentTerms: vObj?.paymentTerms || "", leadDays: vObj?.leadDays || 0,
       notes: manualPOForm.notes,
       lines: validLines.map(l => ({ partId: l.partId, name: l.name, qty: l.qty, unit: l.unit, unitCost: l.unitCost, total: l.qty * l.unitCost })),
@@ -2692,10 +2704,10 @@ export default function App() {
     const validLines = rcvLines.filter(l => l.partId && l.qtyReceived > 0);
     if (validLines.length === 0) { show("No items to receive", "error"); return; }
 
-    const receiptId = `RCV-${new Date().toISOString().slice(0,10)}-${String(receipts.length + 1).padStart(3, "0")}`;
+    const receiptId = `RCV-${todayLocal()}-${String(receipts.length + 1).padStart(3, "0")}`;
     const receipt = {
       id: receiptId, poId: rcvMode === "po" ? rcvPO : null, type: rcvType,
-      date: new Date().toISOString().slice(0, 10), notes: rcvNotes, createdBy: profile?.email || "",
+      date: todayLocal(), notes: rcvNotes, createdBy: profile?.email || "",
       lines: validLines,
     };
 

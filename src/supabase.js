@@ -1,4 +1,11 @@
-// SUPABASE VERSION: v115
+// SUPABASE VERSION: v116
+
+// Format a Date as YYYY-MM-DD in local timezone. Avoid .toISOString().slice(0,10)
+// for date stamps — that returns UTC and breaks for users west of UTC after
+// their local 7-8pm.
+function localDateStr(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+}
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -450,7 +457,11 @@ export async function fetchDraftRunsForWeek(weekStart) {
 }
 
 export async function fetchCompletedRunsForWeek(weekStart) {
-  const weekEnd = new Date(new Date(weekStart + "T00:00:00").getTime() + 6 * 86400000).toISOString().slice(0, 10)
+  // Build weekEnd by walking local-time getDate so we don't drift across DST or
+  // round-trip through UTC (which broke for users east of UTC).
+  const ws = new Date(weekStart + "T00:00:00")
+  ws.setDate(ws.getDate() + 6)
+  const weekEnd = localDateStr(ws)
   const { data, error } = await supabase.from("production_runs")
     .select("id, assembly_name, qty_produced, run_date, status")
     .eq("status", "Complete")
@@ -565,7 +576,7 @@ export async function bulkUpdateItemQtys(lotRows, skuIds) {
   // 2. Insert new lot rows (one per unique SKU+batch+location)
   const insertRows = aggregated.filter(r => r.qty > 0).map(r => ({
     item_id: r.itemId, lot_number: r.lotNumber, qty: r.qty,
-    production_date: new Date().toISOString().slice(0, 10),
+    production_date: localDateStr(),
     location: r.location || "",
   }))
   if (insertRows.length > 0) {
