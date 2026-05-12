@@ -1,4 +1,4 @@
-// APP VERSION: v158
+// APP VERSION: v159
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1485,16 +1485,33 @@ export default function App() {
   }, [allItems, parts, assemblies, orders]);
 
   // ---- MRP Explosion ----
+  // Two input modes:
+  //   - "orders":     demand = open customer orders (Pending / Confirmed / In Production)
+  //   - "production": demand = user-selected draft (scheduled) production runs
+  // Both modes explode BOMs down to level 100 raw materials, subtract on-hand,
+  // and bucket shortfalls by vendor for PO generation.
+  const [mrpSource, setMrpSource] = useState("orders"); // "orders" | "production"
+  const [mrpSelectedRunIds, setMrpSelectedRunIds] = useState([]);
   const mrp = useMemo(() => {
-    const oo = orders.filter((o) => o.status === "Pending" || o.status === "Confirmed" || o.status === "In Production");
+    // Build the demand row list (what we need to make, and how many).
+    let demandRows = [];
+    if (mrpSource === "production") {
+      const selected = new Set(mrpSelectedRunIds);
+      demandRows = prodRuns
+        .filter(r => (r.status || "Complete") === "Draft" && selected.has(r.id))
+        .map(r => ({ item: r.assemblyId, qty: Number(r.qtyProduced) || 0, runId: r.id }));
+    } else {
+      const oo = orders.filter(o => o.status === "Pending" || o.status === "Confirmed" || o.status === "In Production");
+      demandRows = oo.map(o => ({ item: o.item, qty: Number(o.qty) || 0, orderId: o.id }));
+    }
     const needs = {};
     const explode = (id, mult) => {
-      const it = allItems.find((i) => i.id === id);
+      const it = allItems.find(i => i.id === id);
       if (!it) return;
       if (getLevel(it.id) === 100) { if (!needs[it.id]) needs[it.id] = { ...it, required: 0 }; needs[it.id].required += mult; return; }
       if (it.bom) for (const l of it.bom) explode(l.partId, l.qty * mult);
     };
-    for (const o of oo) explode(o.item, o.qty);
+    for (const d of demandRows) explode(d.item, d.qty);
     const rows = Object.values(needs).map((r) => ({
       ...r, required: Math.ceil(r.required * 1000) / 1000,
       shortfall: Math.max(0, Math.ceil((r.required - r.qty) * 1000) / 1000),
@@ -1509,8 +1526,18 @@ export default function App() {
       byVendor[vid].lines.push(r);
       byVendor[vid].total += r.purchaseCost;
     }
-    return { oo, rows, byVendor: Object.values(byVendor), totalCost: rows.reduce((s, r) => s + r.purchaseCost, 0), critical: rows.filter((r) => r.shortfall > 0).length, covered: rows.filter((r) => r.shortfall === 0).length };
-  }, [orders, allItems]);
+    return {
+      source: mrpSource,
+      demandRows,
+      // Keep `oo` for backward compat with the existing stat label/count.
+      oo: demandRows,
+      rows,
+      byVendor: Object.values(byVendor),
+      totalCost: rows.reduce((s, r) => s + r.purchaseCost, 0),
+      critical: rows.filter((r) => r.shortfall > 0).length,
+      covered: rows.filter((r) => r.shortfall === 0).length,
+    };
+  }, [orders, allItems, mrpSource, mrpSelectedRunIds, prodRuns]);
 
   // ---- Planning Helpers ----
   const fmtDate = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
@@ -4121,15 +4148,91 @@ export default function App() {
       )}
 
       {/* ================== MRP TAB ================== */}
-      {tab === "mrp" && (
+      {tab === "mrp" && (() => {
+        const draftRuns = prodRuns
+          .filter(r => (r.status || "Complete") === "Draft")
+          .sort((a, b) => (a.plannedDate || a.date || "").localeCompare(b.plannedDate || b.date || ""));
+        const selectedSet = new Set(mrpSelectedRunIds);
+        const allDraftIds = draftRuns.map(r => r.id);
+        const allSelected = draftRuns.length > 0 && draftRuns.every(r => selectedSet.has(r.id));
+        const toggleRun = (id) => {
+          setMrpSelectedRunIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+        };
+        const demandLabel = mrpSource === "production" ? "Selected Runs" : "Open Orders";
+        return (
         <div>
+          {/* Source selector */}
+          <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
+            {[
+              { k: "orders", label: "From Open Orders", icon: <ShoppingCart size={13} /> },
+              { k: "production", label: "From Scheduled Production", icon: <Hammer size={13} /> },
+            ].map(opt => (
+              <button key={opt.k} onClick={() => setMrpSource(opt.k)}
+                style={{ ...B2, background: mrpSource === opt.k ? "#6366f1" : "#2a2a3a", color: mrpSource === opt.k ? "#fff" : "#ccc", borderColor: mrpSource === opt.k ? "#6366f1" : "#333", fontSize: 12, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 }}>
+                {opt.icon} {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Draft-run picker (only in production mode) */}
+          {mrpSource === "production" && (
+            <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden", marginBottom: 14 }}>
+              <div style={{ padding: "10px 14px", borderBottom: "1px solid #2a2a3a", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "#ccc" }}>Scheduled Production Runs (Drafts)</span>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={() => setMrpSelectedRunIds(allSelected ? [] : allDraftIds)}
+                    disabled={draftRuns.length === 0}
+                    style={{ ...B2, fontSize: 11, padding: "4px 10px", opacity: draftRuns.length === 0 ? 0.4 : 1 }}>
+                    {allSelected ? "Clear All" : "Select All"}
+                  </button>
+                  <span style={{ fontSize: 11, color: "#888", alignSelf: "center", marginLeft: 6 }}>
+                    {mrpSelectedRunIds.length} of {draftRuns.length} selected
+                  </span>
+                </div>
+              </div>
+              {draftRuns.length === 0 ? (
+                <div style={{ padding: 24, textAlign: "center", color: "#555", fontSize: 12 }}>
+                  No draft production runs. Schedule production on the Planning tab first.
+                </div>
+              ) : (
+                <div style={{ maxHeight: 320, overflowY: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead><tr style={{ position: "sticky", top: 0, background: "#1e1e2e", zIndex: 1 }}>
+                      <th style={{ ...TH, width: 28 }}></th>
+                      {["Run ID", "Planned", "Assembly", "Qty", "Lot #"].map(h => <th key={h} style={TH}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>
+                      {draftRuns.map(r => {
+                        const checked = selectedSet.has(r.id);
+                        return (
+                          <tr key={r.id} onClick={() => toggleRun(r.id)}
+                            style={{ cursor: "pointer", background: checked ? "rgba(99,102,241,0.08)" : undefined }}>
+                            <td style={TD}>
+                              <input type="checkbox" checked={checked} onChange={() => toggleRun(r.id)}
+                                onClick={(e) => e.stopPropagation()} style={{ cursor: "pointer" }} />
+                            </td>
+                            <td style={{ ...TD, fontFamily: "monospace", fontSize: 11, color: "#8b5cf6" }}>{r.id}</td>
+                            <td style={{ ...TD, color: "#888" }}>{r.plannedDate || r.date || "—"}</td>
+                            <td style={TD}>{r.assemblyName} <span style={{ color: "#888", fontSize: 10 }}>({r.assemblyId})</span></td>
+                            <td style={{ ...TD, fontWeight: 600, color: "#f59e0b" }}>{r.qtyProduced}</td>
+                            <td style={{ ...TD, fontFamily: "monospace", fontSize: 11, color: r.lotNumber ? "#a78bfa" : "#555" }}>{r.lotNumber ? padLotNumber(r.lotNumber) : "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-            <Stat icon={<ShoppingCart size={18} />} label="Open Orders" value={mrp.oo.length} accent="#6366f1" />
+            <Stat icon={mrpSource === "production" ? <Hammer size={18} /> : <ShoppingCart size={18} />} label={demandLabel} value={mrp.demandRows.length} accent="#6366f1" />
             <Stat icon={<AlertTriangle size={18} />} label="Materials Short" value={mrp.critical} accent={mrp.critical > 0 ? "#ef4444" : "#22c55e"} />
             <Stat icon={<CheckCircle size={18} />} label="Covered" value={mrp.covered} accent="#22c55e" />
             <Stat icon={<DollarSign size={18} />} label="Purchase Needed" value={`$${mrp.totalCost.toFixed(2)}`} accent="#f59e0b" />
           </div>
-          {mrp.oo.length === 0 ? <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: 40, textAlign: "center", color: "#555" }}><p>No open orders to plan for.</p></div> : <>
+          {mrp.demandRows.length === 0 ? <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: 40, textAlign: "center", color: "#555" }}><p>{mrpSource === "production" ? "Select one or more scheduled production runs to plan against." : "No open orders to plan for."}</p></div> : <>
             <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}><button onClick={genPOs} style={{ ...B1, background: "#f59e0b", color: "#000" }}><FileText size={15} /> Generate POs by Vendor</button></div>
             <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
               <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Raw Material Requirements (exploded from open orders)</div>
@@ -4167,7 +4270,8 @@ export default function App() {
             </div>
           </>}
         </div>
-      )}
+        );
+      })()}
 
       {/* ================== PURCHASE ORDERS TAB ================== */}
       {tab === "pos" && (
