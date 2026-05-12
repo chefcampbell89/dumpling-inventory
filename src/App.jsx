@@ -1,4 +1,4 @@
-// APP VERSION: v159
+// APP VERSION: v160
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -634,7 +634,7 @@ export default function App() {
   const MAX_WISHES = 3;
 
   // ---- Planning / Forecast State ----
-  const [forecastConfig, setForecastConfig] = useState({ horizonWeeks: 4, lookbackWeeks: 8, workDays: ["Mon","Tue","Wed","Thu","Fri"] });
+  const [forecastConfig, setForecastConfig] = useState({ horizonWeeks: 4, lookbackWeeks: 8, workDays: ["Mon","Tue","Wed","Thu","Fri"], mrpDemandLevels: [250] });
   // ---- Lot Numbering Config ----
   const [baseIngredients, setBaseIngredients] = useState(DEFAULT_BASE_INGREDIENTS);
   const [lotCounter, setLotCounter] = useState(0);
@@ -1429,6 +1429,33 @@ export default function App() {
 
     // Sort newest first
     entries.sort((a, b) => (b.time || b.date || "").localeCompare(a.time || a.date || ""));
+
+    // Compute before / after qty for every line move. Walk backwards from each
+    // item's current on-hand: the most recent transaction's `after` == current
+    // qty, and each older transaction's `after` == the next newer one's `before`.
+    const movesByItem = new Map(); // itemId -> [{ entryIdx, lineIdx }, …] newest first
+    for (let i = 0; i < entries.length; i += 1) {
+      const e = entries[i];
+      for (let j = 0; j < (e.lines || []).length; j += 1) {
+        const ln = e.lines[j];
+        if (!ln.itemId) continue;
+        if (!movesByItem.has(ln.itemId)) movesByItem.set(ln.itemId, []);
+        movesByItem.get(ln.itemId).push({ entryIdx: i, lineIdx: j });
+      }
+    }
+    for (const [itemId, moves] of movesByItem.entries()) {
+      const item = allItems.find(x => x.id === itemId);
+      // If the item has been deleted, fall back to 0 so the math still works.
+      let currentAfter = item ? (Number(item.qty) || 0) : 0;
+      for (const m of moves) {
+        const ln = entries[m.entryIdx].lines[m.lineIdx];
+        const signedDelta = ln.sign === "+" ? Number(ln.qty) : -Number(ln.qty);
+        ln.afterQty = currentAfter;
+        ln.beforeQty = currentAfter - signedDelta;
+        currentAfter = ln.beforeQty;
+      }
+    }
+
     return entries;
   }, [prodRuns, receipts, allItems]);
 
@@ -1445,7 +1472,7 @@ export default function App() {
       const s = v == null ? "" : String(v);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const header = ["Date", "Type", "TransactionID", "Description", "ItemID", "ItemName", "Direction", "Qty", "Unit", "Lot", "User", "Notes"];
+    const header = ["Date", "Type", "TransactionID", "Description", "ItemID", "ItemName", "Direction", "Qty", "Unit", "BeforeQty", "AfterQty", "Lot", "User", "Notes"];
     const rows = [header.join(",")];
     let lineCount = 0;
     for (const e of inRange) {
@@ -1454,6 +1481,8 @@ export default function App() {
           e.date || "", e.type, e.id || "", e.desc || "",
           ln.itemId || "", ln.itemName || "",
           ln.sign, ln.qty, ln.unit || "",
+          ln.beforeQty == null ? "" : ln.beforeQty,
+          ln.afterQty == null ? "" : ln.afterQty,
           ln.lotNumber || e.lot || "",
           e.user || "", e.notes || "",
         ].map(escape).join(","));
@@ -1497,8 +1526,9 @@ export default function App() {
     let demandRows = [];
     if (mrpSource === "production") {
       const selected = new Set(mrpSelectedRunIds);
+      const allowedLevels = forecastConfig.mrpDemandLevels?.length ? forecastConfig.mrpDemandLevels : [250];
       demandRows = prodRuns
-        .filter(r => (r.status || "Complete") === "Draft" && selected.has(r.id))
+        .filter(r => (r.status || "Complete") === "Draft" && selected.has(r.id) && allowedLevels.includes(getLevel(r.assemblyId)))
         .map(r => ({ item: r.assemblyId, qty: Number(r.qtyProduced) || 0, runId: r.id }));
     } else {
       const oo = orders.filter(o => o.status === "Pending" || o.status === "Confirmed" || o.status === "In Production");
@@ -1537,7 +1567,7 @@ export default function App() {
       critical: rows.filter((r) => r.shortfall > 0).length,
       covered: rows.filter((r) => r.shortfall === 0).length,
     };
-  }, [orders, allItems, mrpSource, mrpSelectedRunIds, prodRuns]);
+  }, [orders, allItems, mrpSource, mrpSelectedRunIds, prodRuns, forecastConfig.mrpDemandLevels]);
 
   // ---- Planning Helpers ----
   const fmtDate = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
@@ -4149,8 +4179,13 @@ export default function App() {
 
       {/* ================== MRP TAB ================== */}
       {tab === "mrp" && (() => {
+        // Which SKU levels count as "demand" for production-mode MRP? Admin-configurable
+        // (Admin → Planning → MRP Demand Levels). Default = [250] (batches only) so we
+        // don't double-count batches AND their fills.
+        const mrpDemandLevels = forecastConfig.mrpDemandLevels?.length ? forecastConfig.mrpDemandLevels : [250];
         const draftRuns = prodRuns
           .filter(r => (r.status || "Complete") === "Draft")
+          .filter(r => mrpDemandLevels.includes(getLevel(r.assemblyId)))
           .sort((a, b) => (a.plannedDate || a.date || "").localeCompare(b.plannedDate || b.date || ""));
         const selectedSet = new Set(mrpSelectedRunIds);
         const allDraftIds = draftRuns.map(r => r.id);
@@ -5935,6 +5970,8 @@ export default function App() {
                                       <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Unit</th>
                                       <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Item ID</th>
                                       <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Item Name</th>
+                                      <th style={{ ...TH, fontSize: 10, padding: "4px 12px", textAlign: "right" }}>Before</th>
+                                      <th style={{ ...TH, fontSize: 10, padding: "4px 12px", textAlign: "right" }}>After</th>
                                       <th style={{ ...TH, fontSize: 10, padding: "4px 12px" }}>Lot #</th>
                                     </tr>
                                   </thead>
@@ -5942,6 +5979,7 @@ export default function App() {
                                     {e.lines.map((ln, li) => {
                                       const lvl = getLevel(ln.itemId);
                                       const sColor = ln.sign === "+" ? "#22c55e" : "#ef4444";
+                                      const fmtQ = (q) => q === undefined || q === null ? "—" : (Math.round(q * 1000) / 1000);
                                       return (
                                         <tr key={li}>
                                           <td style={{ ...TD, padding: "4px 12px", color: sColor, fontWeight: 700, textAlign: "center" }}>{ln.sign}</td>
@@ -5949,6 +5987,8 @@ export default function App() {
                                           <td style={{ ...TD, padding: "4px 12px", color: "#888", fontSize: 11 }}>{ln.unit || "—"}</td>
                                           <td style={{ ...TD, padding: "4px 12px", fontFamily: "monospace", fontSize: 11, color: LEVELS[lvl]?.color || "#888" }}>{ln.itemId}</td>
                                           <td style={{ ...TD, padding: "4px 12px" }}>{ln.itemName}</td>
+                                          <td style={{ ...TD, padding: "4px 12px", textAlign: "right", color: "#888", fontSize: 11 }}>{fmtQ(ln.beforeQty)}</td>
+                                          <td style={{ ...TD, padding: "4px 12px", textAlign: "right", fontWeight: 600, color: "#e0e0e0" }}>{fmtQ(ln.afterQty)}</td>
                                           <td style={{ ...TD, padding: "4px 12px", fontFamily: "monospace", fontSize: 11, color: ln.lotNumber ? "#a78bfa" : "#555" }}>{ln.lotNumber || "—"}</td>
                                         </tr>
                                       );
@@ -6257,6 +6297,29 @@ export default function App() {
                             {d}
                           </label>
                         ))}
+                      </div>
+                    </div>
+                    <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "14px 18px" }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#ccc", marginBottom: 4 }}>MRP Demand Levels</div>
+                      <div style={{ fontSize: 11, color: "#888", marginBottom: 10 }}>
+                        Which SKU levels count as demand on the Purchase Needs tab when planning from scheduled production. Default = 250 (Batches) so you don't double-count batches and their sub-recipes.
+                      </div>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {LEVEL_KEYS.map(lvl => {
+                          const enabled = (forecastConfig.mrpDemandLevels || []).includes(lvl);
+                          return (
+                            <label key={lvl} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: enabled ? "#e0e0e0" : "#666", cursor: "pointer", padding: "4px 10px", borderRadius: 6, border: `1px solid ${enabled ? (LEVELS[lvl]?.color || "#6366f1") : "#2a2a3a"}`, background: enabled ? `${(LEVELS[lvl]?.color || "#6366f1")}11` : "transparent" }}>
+                              <input type="checkbox" checked={enabled} onChange={e => {
+                                setForecastConfig(prev => {
+                                  const cur = prev.mrpDemandLevels || [];
+                                  return { ...prev, mrpDemandLevels: e.target.checked ? [...cur, lvl] : cur.filter(x => x !== lvl) };
+                                });
+                              }} />
+                              <span style={{ color: LEVELS[lvl]?.color || "#888", fontWeight: 600 }}>{lvl}</span>
+                              <span>{LEVELS[lvl]?.cat || ""}</span>
+                            </label>
+                          );
+                        })}
                       </div>
                     </div>
                     <button onClick={async () => {
