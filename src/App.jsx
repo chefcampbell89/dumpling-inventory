@@ -1,4 +1,4 @@
-// APP VERSION: v161
+// APP VERSION: v162
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -4342,22 +4342,34 @@ export default function App() {
                         <button onClick={(e) => { e.stopPropagation(); printPO(po); }} style={{ ...B2, padding: "5px 10px" }}><Printer size={13} /></button>
                         {po.status !== "Received" && po.status !== "Cancelled" && <button onClick={(e) => { e.stopPropagation(); openEditPO(po); }} style={{ ...B2, padding: "5px 10px", borderColor: "#6366f1", color: "#6366f1" }} title="Edit line items"><Edit2 size={13} /></button>}
                         {po.status !== "Received" && po.status !== "Cancelled" && <button onClick={(e) => { e.stopPropagation(); openReceiveFromPO(po.id); }} style={{ ...B2, padding: "5px 10px", borderColor: "#22c55e", color: "#22c55e" }}><PackageCheck size={13} /></button>}
-                        <select value={po.status} onClick={(e) => e.stopPropagation()} onChange={async (e) => {
+                        <select value={po.status} onClick={(e) => e.stopPropagation()}
+                          disabled={po.status === "Received"}
+                          title={po.status === "Received" ? "Received POs are locked. Create an Inventory Adjustment receipt to correct." : ""}
+                          onChange={async (e) => {
                           e.stopPropagation();
                           const ns = e.target.value;
                           // Block setting "Received" via the dropdown — it skips the receive
                           // flow so no receipt is created and no inventory moves. Force user
-                          // through the Receive button instead. This guard fixes the silent
-                          // "marked Received but nothing happened" bug.
+                          // through the Receive button instead.
                           if (ns === "Received" && po.status !== "Received") {
                             show("Use the green Receive button to record items received. Setting status directly would skip inventory updates.", "error");
                             return;
                           }
+                          // Lock once received: silently reverting the status leaves inventory
+                          // already added, which is misleading. Require an inventory adjustment
+                          // to correct over-receipts. (`disabled` above prevents reaching here.)
+                          if (po.status === "Received" && ns !== "Received") {
+                            show("Received POs are locked. Create an Inventory Adjustment receipt to correct over- or under-counts.", "error");
+                            return;
+                          }
                           setPOs((p) => p.map((x) => x.id === po.id ? { ...x, status: ns } : x));
                           try { await updatePOStatus(po.id, ns); } catch (err) { console.warn(err); }
-                        }} style={{ ...IS, width: "auto", minWidth: 90, padding: "4px 8px", fontSize: 12 }}>
+                        }} style={{ ...IS, width: "auto", minWidth: 90, padding: "4px 8px", fontSize: 12, opacity: po.status === "Received" ? 0.7 : 1, cursor: po.status === "Received" ? "not-allowed" : "pointer" }}>
                           {PO_STATUSES.map((s) => <option key={s}>{s}</option>)}
                         </select>
+                        {po.status === "Received" && (
+                          <Lock size={12} style={{ color: "#888" }} title="Status locked — use Inventory Adjustment to correct" />
+                        )}
                         <button onClick={(e) => { e.stopPropagation(); setDelConfirm(po.id); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>
                       </div>
                     </div>
