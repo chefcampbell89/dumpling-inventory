@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v114
+// SUPABASE VERSION: v115
 import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
@@ -347,6 +347,7 @@ export async function fetchReceipts() {
     lines: lines.filter(l => l.receipt_id === r.id).map(l => ({
       partId: l.part_id, name: l.part_name, qtyExpected: Number(l.qty_expected),
       qtyReceived: Number(l.qty_received), unit: l.unit,
+      lotNumber: l.lot_number || "",
     })),
   }))
 }
@@ -362,6 +363,7 @@ export async function createReceipt(receipt) {
       receipt.lines.map(l => ({
         receipt_id: receipt.id, part_id: l.partId, part_name: l.name,
         qty_expected: l.qtyExpected, qty_received: l.qtyReceived, unit: l.unit,
+        lot_number: l.lotNumber || null,
       }))
     )
     if (lErr) throw lErr

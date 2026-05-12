@@ -1,4 +1,4 @@
-// APP VERSION: v157
+// APP VERSION: v158
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -1042,20 +1042,40 @@ export default function App() {
         try { await upsertOrder(updated); } catch (e) { console.warn("Order update failed:", e.message); }
       }
 
-      // 5) Log the shipment to the transaction log (one receipt per order line)
+      // 5) Log the shipment to the transaction log (one receipt per order line).
+      // Receipt lines mirror the lot allocations so each lot consumed shows up as
+      // its own movement in the transaction log drill-down.
       const shippedLines = lineUpdates.filter(u => u.fullyAllocated);
       for (let si = 0; si < shippedLines.length; si += 1) {
         const u = shippedLines[si];
         const it = allItems.find(i => i.id === u.line.item);
         const customer = u.line.customer || "?";
+        // Build receipt lines from the row's allocations so each lot is its own line.
+        const row = fulfillRows.find(r => r.line.id === u.line.id);
+        const allocLines = (row?.allocations || [])
+          .filter(a => a.lotNumber && Number(a.qty) > 0)
+          .map(a => ({
+            partId: u.line.item, name: it?.name || u.line.item,
+            qtyExpected: Number(a.qty), qtyReceived: Number(a.qty),
+            unit: it?.unit || "", lotNumber: a.lotNumber,
+          }));
+        // Fallback for non-lot-tracked items (no allocations) — one summary line.
+        const lines = allocLines.length > 0 ? allocLines : [{
+          partId: u.line.item, name: it?.name || u.line.item,
+          qtyExpected: u.line.qty, qtyReceived: u.line.qty,
+          unit: it?.unit || "", lotNumber: "",
+        }];
+        const lotSummary = allocLines.length > 0
+          ? ` from lot${allocLines.length === 1 ? "" : "s"} ${allocLines.map(l => l.lotNumber).join(", ")}`
+          : "";
         const shipReceipt = {
           id: `SHIP-${Date.now()}-${si}`,
           poId: null,
           type: "Shipment",
           date: new Date().toISOString().slice(0, 10),
-          notes: `Shipped ${u.line.qty} ${it?.name || u.line.item} to ${customer}`,
+          notes: `Shipped ${u.line.qty} ${it?.name || u.line.item} to ${customer}${lotSummary}`,
           createdBy: profile?.email || "",
-          lines: [{ partId: u.line.item, name: it?.name || u.line.item, qtyExpected: u.line.qty, qtyReceived: u.line.qty, unit: it?.unit || "" }],
+          lines,
         };
         setReceipts(prev => [{ ...shipReceipt, createdAt: new Date().toISOString() }, ...prev]);
         try { await createReceipt(shipReceipt); } catch (e) { console.warn("Shipment log failed:", e.message); }
@@ -1108,16 +1128,32 @@ export default function App() {
       const updated = { ...line, status: "In Production" };
       setOrders(prev => prev.map(x => x.id === line.id ? updated : x));
       try { await upsertOrder(updated); } catch (e) { console.warn(e.message); }
-      // Log the reversal
+      // Log the reversal — one receipt line per restored lot so lot tracing
+      // works end-to-end (the transaction log drill-down shows each lot).
       const it = allItems.find(i => i.id === line.item);
+      const allocLines = allocs
+        .filter(a => a.lotNumber && Number(a.qtyAllocated) > 0)
+        .map(a => ({
+          partId: line.item, name: it?.name || line.item,
+          qtyExpected: Number(a.qtyAllocated), qtyReceived: Number(a.qtyAllocated),
+          unit: it?.unit || "", lotNumber: a.lotNumber,
+        }));
+      const revLines = allocLines.length > 0 ? allocLines : [{
+        partId: line.item, name: it?.name || line.item,
+        qtyExpected: line.qty, qtyReceived: line.qty,
+        unit: it?.unit || "", lotNumber: "",
+      }];
+      const lotSummary = allocLines.length > 0
+        ? ` (lot${allocLines.length === 1 ? "" : "s"} ${allocLines.map(l => l.lotNumber).join(", ")} restored)`
+        : "";
       const reversalReceipt = {
         id: `UNSHIP-${Date.now()}`,
         poId: null,
         type: "Shipment Reversal",
         date: new Date().toISOString().slice(0, 10),
-        notes: `Un-fulfilled line for ${line.customer || "?"}`,
+        notes: `Un-fulfilled line for ${line.customer || "?"}${lotSummary}`,
         createdBy: profile?.email || "",
-        lines: [{ partId: line.item, name: it?.name || line.item, qtyExpected: line.qty, qtyReceived: line.qty, unit: it?.unit || "" }],
+        lines: revLines,
       };
       setReceipts(prev => [{ ...reversalReceipt, createdAt: new Date().toISOString() }, ...prev]);
       try { await createReceipt(reversalReceipt); } catch (e) { console.warn("Reversal log failed:", e.message); }
@@ -1365,17 +1401,26 @@ export default function App() {
         // For adjustments, qtyReceived can be negative — reflect that in sign
         const q = Number(l.qtyReceived) || 0;
         const sign = logType === "Adjustment" ? (q >= 0 ? "+" : "-") : direction;
+        const lotPad = l.lotNumber ? padLotNumber(l.lotNumber) : "";
         return {
           sign, qty: Math.abs(q), unit: l.unit || unitOf(l.partId),
-          itemId: l.partId, itemName: l.name, lotNumber: "",
+          itemId: l.partId, itemName: l.name, lotNumber: lotPad,
         };
       });
+      // If every line shares the same lot # (or there's only one), surface it
+      // in the row-level `lot` column for at-a-glance scanning.
+      const uniqueLots = Array.from(new Set(r.lines.map(l => l.lotNumber || "").filter(Boolean)));
+      const headerLot = uniqueLots.length === 1 ? padLotNumber(uniqueLots[0])
+        : uniqueLots.length > 1 ? `${uniqueLots.length} lots` : "";
       entries.push({
         id: r.id,
         date: r.date, time: r.createdAt || r.date, type: logType,
         desc,
-        lot: "", user: r.createdBy || "",
-        detail: r.lines.map(l => `${l.name}: ${l.qtyReceived} ${l.unit}`).join(", "),
+        lot: headerLot, user: r.createdBy || "",
+        detail: r.lines.map(l => {
+          const lotSfx = l.lotNumber ? ` [lot ${padLotNumber(l.lotNumber)}]` : "";
+          return `${l.name}: ${l.qtyReceived} ${l.unit}${lotSfx}`;
+        }).join(", "),
         notes: r.notes || "",
         color,
         lines,
