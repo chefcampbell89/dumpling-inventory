@@ -1,4 +1,4 @@
-// APP VERSION: v156
+// APP VERSION: v157
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -4146,7 +4146,20 @@ export default function App() {
                         <button onClick={(e) => { e.stopPropagation(); printPO(po); }} style={{ ...B2, padding: "5px 10px" }}><Printer size={13} /></button>
                         {po.status !== "Received" && po.status !== "Cancelled" && <button onClick={(e) => { e.stopPropagation(); openEditPO(po); }} style={{ ...B2, padding: "5px 10px", borderColor: "#6366f1", color: "#6366f1" }} title="Edit line items"><Edit2 size={13} /></button>}
                         {po.status !== "Received" && po.status !== "Cancelled" && <button onClick={(e) => { e.stopPropagation(); openReceiveFromPO(po.id); }} style={{ ...B2, padding: "5px 10px", borderColor: "#22c55e", color: "#22c55e" }}><PackageCheck size={13} /></button>}
-                        <select value={po.status} onClick={(e) => e.stopPropagation()} onChange={async (e) => { e.stopPropagation(); const ns = e.target.value; setPOs((p) => p.map((x) => x.id === po.id ? { ...x, status: ns } : x)); try { await updatePOStatus(po.id, ns); } catch (err) { console.warn(err); } }} style={{ ...IS, width: "auto", minWidth: 90, padding: "4px 8px", fontSize: 12 }}>
+                        <select value={po.status} onClick={(e) => e.stopPropagation()} onChange={async (e) => {
+                          e.stopPropagation();
+                          const ns = e.target.value;
+                          // Block setting "Received" via the dropdown — it skips the receive
+                          // flow so no receipt is created and no inventory moves. Force user
+                          // through the Receive button instead. This guard fixes the silent
+                          // "marked Received but nothing happened" bug.
+                          if (ns === "Received" && po.status !== "Received") {
+                            show("Use the green Receive button to record items received. Setting status directly would skip inventory updates.", "error");
+                            return;
+                          }
+                          setPOs((p) => p.map((x) => x.id === po.id ? { ...x, status: ns } : x));
+                          try { await updatePOStatus(po.id, ns); } catch (err) { console.warn(err); }
+                        }} style={{ ...IS, width: "auto", minWidth: 90, padding: "4px 8px", fontSize: 12 }}>
                           {PO_STATUSES.map((s) => <option key={s}>{s}</option>)}
                         </select>
                         <button onClick={(e) => { e.stopPropagation(); setDelConfirm(po.id); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", padding: 3 }}><Trash2 size={14} /></button>
@@ -4180,12 +4193,25 @@ export default function App() {
       )}
 
       {/* ================== RECEIVING TAB ================== */}
-      {tab === "receiving" && (
+      {tab === "receiving" && (() => {
+        // Receipts table also stores Shipment / Shipment Reversal rows for the
+        // transaction log — those belong to outbound flow, not this tab.
+        const inboundReceipts = receipts.filter(r => r.type !== "Shipment" && r.type !== "Shipment Reversal");
+        const searchedReceipts = !search ? inboundReceipts : inboundReceipts.filter(r => {
+          const s = search.toLowerCase();
+          if ((r.id || "").toLowerCase().includes(s)) return true;
+          if ((r.type || "").toLowerCase().includes(s)) return true;
+          if ((r.poId || "").toLowerCase().includes(s)) return true;
+          if ((r.notes || "").toLowerCase().includes(s)) return true;
+          if ((r.createdBy || "").toLowerCase().includes(s)) return true;
+          return (r.lines || []).some(l => (l.name || "").toLowerCase().includes(s) || (l.partId || "").toLowerCase().includes(s));
+        });
+        return (
         <div>
           <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-            <Stat icon={<PackageCheck size={18} />} label="Total Receipts" value={receipts.length} accent="#22c55e" />
-            <Stat icon={<FileText size={18} />} label="From POs" value={receipts.filter(r => r.poId).length} accent="#6366f1" />
-            <Stat icon={<ClipboardList size={18} />} label="Manual" value={receipts.filter(r => !r.poId).length} accent="#f59e0b" />
+            <Stat icon={<PackageCheck size={18} />} label="Total Receipts" value={inboundReceipts.length} accent="#22c55e" />
+            <Stat icon={<FileText size={18} />} label="From POs" value={inboundReceipts.filter(r => r.poId).length} accent="#6366f1" />
+            <Stat icon={<ClipboardList size={18} />} label="Manual" value={inboundReceipts.filter(r => !r.poId).length} accent="#f59e0b" />
           </div>
 
           {/* Quick receive from open POs */}
@@ -4208,11 +4234,14 @@ export default function App() {
 
           {/* Receipt history */}
           <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
-            <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Receipt History</div>
-            {receipts.length === 0 ? (
+            <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>Receipt History</span>
+              {search && <span style={{ fontSize: 11, color: "#888", fontWeight: 400 }}>{searchedReceipts.length} of {inboundReceipts.length} match "{search}"</span>}
+            </div>
+            {searchedReceipts.length === 0 ? (
               <div style={{ padding: 40, textAlign: "center", color: "#555" }}>
                 <PackageCheck size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
-                <p style={{ margin: 0 }}>No receipts yet. Receive against a PO or create a manual receipt.</p>
+                <p style={{ margin: 0 }}>{search ? "No receipts match your search." : "No receipts yet. Receive against a PO or create a manual receipt."}</p>
               </div>
             ) : (
               <div style={{ overflowX: "auto" }}>
@@ -4221,7 +4250,7 @@ export default function App() {
                     {["Receipt ID", "Date", "Type", "PO #", "Items", "Notes", ""].map(h => <th key={h} style={TH}>{h}</th>)}
                   </tr></thead>
                   <tbody>
-                    {receipts.map(r => {
+                    {searchedReceipts.map(r => {
                       const isExp = expanded[`rcv-${r.id}`];
                       return (
                         <React.Fragment key={r.id}>
@@ -4262,7 +4291,8 @@ export default function App() {
             )}
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* ================== PRODUCTION TAB ================== */}
       {tab === "production" && (() => {
