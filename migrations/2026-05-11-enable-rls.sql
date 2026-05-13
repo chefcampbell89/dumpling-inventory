@@ -89,6 +89,18 @@ CREATE POLICY authenticated_all ON wishes                FOR ALL TO authenticate
 CREATE POLICY authenticated_all ON profiles              FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
 -- ─────────────────────────────────────────────────────────────────────────
+-- 3a. Anonymous exception: the signup screen needs to read the invite_code
+--     row from app_settings BEFORE the user logs in (handleSignup calls
+--     getInviteCode() to validate the code typed by the new user). Allow
+--     anon to SELECT only that one row. Nothing else in app_settings is
+--     readable to anon, and nothing is writable.
+-- ─────────────────────────────────────────────────────────────────────────
+DROP POLICY IF EXISTS anon_read_invite_code ON app_settings;
+CREATE POLICY anon_read_invite_code ON app_settings
+  FOR SELECT TO anon
+  USING (key = 'invite_code');
+
+-- ─────────────────────────────────────────────────────────────────────────
 -- 4. Sanity check — confirm every table now has RLS enabled
 -- ─────────────────────────────────────────────────────────────────────────
 SELECT schemaname, tablename, rowsecurity
