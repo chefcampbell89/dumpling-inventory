@@ -1,4 +1,4 @@
-// APP VERSION: v162
+// APP VERSION: v163
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
@@ -16,7 +16,7 @@ import {
   zeroAllInventory, bulkUpdateItemQtys,
   fetchWishes, createWish, countUserWishes, grantWish, ungrantWish, acknowledgeWish, fetchPendingGrantedWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles, deleteProfile as dbDeleteProfile,
-  getInviteCode, setInviteCode, getLocations, getConfig, saveConfig, changePassword, supabase,
+  getInviteCode, setInviteCode, getLocations, getConfig, saveConfig, changePassword, supabase, fetchFullBackup,
   DEFAULT_BASE_INGREDIENTS, digitForProductLine, formatLotNumber, padLotNumber, reserveLotNumbers, dateToMMDDYY,
 } from "./supabase";
 
@@ -670,6 +670,10 @@ export default function App() {
   const [editLotModal, setEditLotModal] = useState(null);   // run object or null
   const [editLotValue, setEditLotValue] = useState("");
   const [editLotSubmitting, setEditLotSubmitting] = useState(false);
+  // Admin-only: full DB backup
+  const [backupRunning, setBackupRunning] = useState(false);
+  const [backupProgress, setBackupProgress] = useState({ table: "", rows: 0, done: 0 });
+  const [lastBackupAt, setLastBackupAt] = useState(null);
   // When editing a draft we re-use the prod* states so the same consumption tree
   // and lot picker UI from the Complete modal can be shown. editingDraftId tracks
   // which draft is being edited; null = not editing.
@@ -774,6 +778,7 @@ export default function App() {
       getConfig("app_name").then(r => { if (r) setAppName(r); }).catch(() => {});
       getConfig("forecast_config").then(r => { if (r) setForecastConfig(prev => ({ ...prev, ...r })); }).catch(() => {});
       getConfig("daily_note").then(r => { if (r) setDailyNote(r); }).catch(() => {});
+      getConfig("last_backup_at").then(r => { if (r) setLastBackupAt(r); }).catch(() => {});
       getConfig("lot_base_ingredients").then(r => { if (Array.isArray(r) && r.length > 0) setBaseIngredients(r); }).catch(() => {});
       getConfig("lot_sequence_counter").then(r => { if (typeof r === "number") setLotCounter(r); }).catch(() => {});
     } catch (err) {
@@ -2514,6 +2519,60 @@ export default function App() {
     } catch (e) { show(e.message, "error"); }
   };
 
+  // Admin-only: download a full DB snapshot as a single JSON file. After a
+  // successful download we record the timestamp in app_settings so the
+  // dashboard can show admins a "last backup N days ago" badge.
+  const downloadFullBackup = async () => {
+    setBackupRunning(true);
+    setBackupProgress({ table: "starting", rows: 0, done: 0 });
+    try {
+      let done = 0;
+      const totalTables = 20;
+      const snapshot = await fetchFullBackup((table, rows) => {
+        done += 1;
+        setBackupProgress({ table, rows, done });
+      });
+      const payload = {
+        _meta: {
+          appVersion: "v163",
+          takenAt: new Date().toISOString(),
+          takenBy: profile?.email || "",
+          totalTables,
+          successfulTables: Object.keys(snapshot).filter(k => k !== "_failed").length,
+          failed: snapshot._failed || [],
+        },
+        ...snapshot,
+      };
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `dumpling-genie-backup-${ts}.json`;
+      a.click();
+      // Record success.
+      const at = new Date().toISOString();
+      setLastBackupAt(at);
+      try { await saveConfig("last_backup_at", at); } catch (e) { console.warn("Failed to record backup timestamp:", e.message); }
+      const rowCount = Object.entries(snapshot).filter(([k]) => k !== "_failed").reduce((s, [, v]) => s + v.length, 0);
+      if (payload._meta.failed.length) {
+        show(`Backup saved (${rowCount} rows) but ${payload._meta.failed.length} table(s) failed — see _meta.failed inside the file`, "error");
+      } else {
+        show(`Backup saved — ${rowCount} rows across ${payload._meta.successfulTables} tables`);
+      }
+    } catch (e) {
+      show(`Backup failed: ${e.message}`, "error");
+    }
+    setBackupRunning(false);
+  };
+
+  // Days since last backup, or null if never backed up. Used for the stale-backup
+  // banner on the Dashboard for admins.
+  const daysSinceBackup = useMemo(() => {
+    if (!lastBackupAt) return null;
+    const ms = Date.now() - new Date(lastBackupAt).getTime();
+    return Math.floor(ms / (1000 * 60 * 60 * 24));
+  }, [lastBackupAt]);
+
   // Admin-only: fix an incorrect lot # on a completed production run.
   // Renames inventory_lots, remaps order_lot_allocations, updates the run.
   const submitEditLot = async () => {
@@ -3532,6 +3591,24 @@ export default function App() {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
               <h2 style={{ margin: 0, fontSize: 17, color: "#e0e0e0" }}>{todayDisplay}</h2>
             </div>
+
+            {/* Stale-backup nudge for admins only */}
+            {isAdmin && (daysSinceBackup === null || daysSinceBackup > 7) && (
+              <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #f59e0b66", padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "#f59e0b" }}>
+                  <AlertTriangle size={14} />
+                  <span>
+                    {daysSinceBackup === null
+                      ? "No database backup has been taken yet. Free plan doesn't include automatic backups."
+                      : `Last database backup was ${daysSinceBackup} days ago. Consider taking a fresh one.`}
+                  </span>
+                </div>
+                <button onClick={() => { setTab("admin"); setCfgSection("backup"); }}
+                  style={{ ...B2, fontSize: 11, padding: "5px 12px", color: "#f59e0b", borderColor: "#f59e0b66" }}>
+                  <Download size={12} /> Take backup
+                </button>
+              </div>
+            )}
 
             {/* Manager's Note */}
             <div style={{ background: "#1e1e2e", borderRadius: 10, border: isStale ? "1px solid #f59e0b33" : "1px solid #2a2a3a", padding: "12px 16px", marginBottom: 14 }}>
@@ -6057,6 +6134,7 @@ export default function App() {
           { id: "lotNumbering", label: "Lot Numbering", icon: <KeyRound size={14} /> },
           { id: "toastLabor", label: "Toast Labor Mapping", icon: <Activity size={14} /> },
           { id: "wishes", label: "Wishes", icon: <Sparkles size={14} /> },
+          { id: "backup", label: "Backup & Restore", icon: <Download size={14} /> },
         ];
 
         return (
@@ -6602,6 +6680,72 @@ export default function App() {
                   </div>
                 );
               })()}
+
+              {/* Backup & Restore */}
+              {cfgSection === "backup" && (
+                <div>
+                  <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Backup &amp; Restore</h3>
+                  <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px", lineHeight: 1.6 }}>
+                    Download a complete snapshot of every table as a single JSON file. Save it somewhere safe — local disk, cloud drive, email to a sysadmin — so you can recover if the database is lost or corrupted. This works on the free Supabase plan, which doesn&apos;t include automatic backups.
+                  </p>
+
+                  {/* Status panel */}
+                  <div style={{ background: "#16161e", borderRadius: 10, border: `1px solid ${daysSinceBackup === null || daysSinceBackup > 7 ? "#f59e0b66" : "#2a2a3a"}`, padding: "14px 18px", marginBottom: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                      {daysSinceBackup === null ? (
+                        <AlertTriangle size={16} style={{ color: "#f59e0b" }} />
+                      ) : daysSinceBackup > 7 ? (
+                        <AlertTriangle size={16} style={{ color: "#f59e0b" }} />
+                      ) : (
+                        <CheckCircle size={16} style={{ color: "#22c55e" }} />
+                      )}
+                      <span style={{ fontSize: 13, fontWeight: 600, color: "#e0e0e0" }}>
+                        {lastBackupAt
+                          ? `Last backup: ${new Date(lastBackupAt).toLocaleString()}`
+                          : "No backup has been taken yet."}
+                      </span>
+                    </div>
+                    {lastBackupAt && (
+                      <div style={{ fontSize: 11, color: daysSinceBackup > 7 ? "#f59e0b" : "#888", marginLeft: 26 }}>
+                        {daysSinceBackup === 0
+                          ? "Taken today."
+                          : daysSinceBackup === 1
+                            ? "Taken yesterday."
+                            : `${daysSinceBackup} days ago.${daysSinceBackup > 7 ? " Consider taking a new one." : ""}`}
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
+                    <button onClick={downloadFullBackup} disabled={backupRunning}
+                      style={{ ...B1, opacity: backupRunning ? 0.5 : 1, cursor: backupRunning ? "wait" : "pointer", background: "#22c55e", color: "#000", fontWeight: 700 }}>
+                      {backupRunning ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Backing up…</> : <><Download size={14} /> Download Full Backup</>}
+                    </button>
+                    <a href={`mailto:?subject=Dumpling Genie backup&body=Attached is the latest Dumpling Genie database backup from ${new Date().toLocaleDateString()}.%0A%0AKeep it somewhere safe — restoring requires this file plus access to the Supabase project.`}
+                      style={{ ...B2, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <FileText size={14} /> Compose email to sysadmin
+                    </a>
+                  </div>
+
+                  {backupRunning && (
+                    <div style={{ background: "#16161e", border: "1px solid #2a2a3a", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#bbb" }}>
+                      Backing up: <span style={{ fontFamily: "monospace", color: "#22c55e" }}>{backupProgress.table}</span> ({backupProgress.rows} rows) — {backupProgress.done} of 20 tables done
+                    </div>
+                  )}
+
+                  <div style={{ background: "#16161e", border: "1px solid #2a2a3a", borderRadius: 8, padding: "14px 18px", fontSize: 12, color: "#bbb", lineHeight: 1.7 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#e0e0e0", marginBottom: 8 }}>How to use this</div>
+                    <ol style={{ margin: 0, paddingLeft: 20 }}>
+                      <li>Click <strong>Download Full Backup</strong>. The file lands in your Downloads folder named <code style={{ color: "#fbbf24" }}>dumpling-genie-backup-YYYY-MM-DD…json</code>.</li>
+                      <li>Email it (or upload it to a shared drive) using the <em>Compose email</em> button — your mail client opens with a draft. Attach the downloaded file and send.</li>
+                      <li>To restore, the recipient needs Supabase access — they can re-import the JSON via a custom script. Restoring is a manual process; reach out to support if needed.</li>
+                    </ol>
+                    <div style={{ marginTop: 12, fontSize: 11, color: "#666" }}>
+                      Recommended cadence: <strong>weekly</strong>, or after any major data import. This panel will show a yellow warning once a backup is more than 7 days old.
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         );

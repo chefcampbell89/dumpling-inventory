@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v116
+// SUPABASE VERSION: v117
 
 // Format a Date as YYYY-MM-DD in local timezone. Avoid .toISOString().slice(0,10)
 // for date stamps — that returns UTC and breaks for users west of UTC after
@@ -733,6 +733,48 @@ export async function saveConfig(key, value) {
 // Backward compat
 export async function getLocations() { return (await getConfig("locations")) || [] }
 export async function saveLocations(locs) { return saveConfig("locations", locs) }
+
+// -- FULL DB SNAPSHOT (admin backup) --
+
+// Tables backed up. Mirror of scripts/backup-supabase.mjs.
+const BACKUP_TABLES = [
+  "items", "bom_lines", "vendors", "item_vendors",
+  "orders", "order_lot_allocations",
+  "purchase_orders", "po_lines",
+  "receipts", "receipt_lines",
+  "production_runs", "production_consumed",
+  "inventory_lots",
+  "labor_hours", "toast_jobs",
+  "forecast_weeks", "forecast_days",
+  "app_settings", "wishes", "profiles",
+]
+
+// Pull every row from every table. Paginates by 1000 to handle tables larger
+// than Supabase's default page limit. Returns { tableName: rows[], _failed: [...] }.
+// `onProgress(table, rows)` is called after each table for UI feedback.
+export async function fetchFullBackup(onProgress) {
+  const result = {}
+  const failed = []
+  for (const t of BACKUP_TABLES) {
+    const rows = []
+    let from = 0
+    const pageSize = 1000
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { data, error } = await supabase.from(t).select("*").range(from, from + pageSize - 1)
+      if (error) { failed.push({ table: t, error: error.message }); break }
+      rows.push(...data)
+      if (data.length < pageSize) break
+      from += pageSize
+    }
+    if (!failed.find(f => f.table === t)) {
+      result[t] = rows
+      if (onProgress) onProgress(t, rows.length)
+    }
+  }
+  if (failed.length) result._failed = failed
+  return result
+}
 
 // -- LOT NUMBER GENERATION --
 
