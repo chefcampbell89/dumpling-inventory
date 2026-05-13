@@ -3,3 +3,7 @@ dist
 .env
 .env.local
 .env.*.local
+
+# Local Supabase backups produced by scripts/backup-supabase.mjs.
+# Contain real customer / order data — never commit.
+backups/
