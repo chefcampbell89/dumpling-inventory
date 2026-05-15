@@ -6,6 +6,10 @@ Full-stack inventory & production management app for a dumpling restaurant/facto
 
 Source repo: `dumpling-inventory/`
 
+## Task List
+
+Open project tasks/tickets live in [TASKS.md](TASKS.md). Read it at the start of any task-planning conversation, and update it (move items between Backlog / In Progress / Done) as work is completed. When the user mentions a new feature request or bug to track, add it to the Backlog.
+
 ## Tech Stack
 
 - **Frontend:** React 19 + Vite 8 (JSX, no TypeScript)
