@@ -1,4 +1,4 @@
-// APP VERSION: v166
+// APP VERSION: v167
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -841,6 +841,20 @@ export default function App() {
       countUserWishes(authUser.id).then(c => setWishesUsed(c)).catch(() => {});
     }
   }, [authUser]);
+
+  // Admins: load all wishes on login so we can show a count badge on the
+  // Admin Config tab when there are ungranted wishes waiting for review.
+  useEffect(() => {
+    if (isAdmin) {
+      fetchWishes().then(w => setAllWishes(w)).catch(() => {});
+    }
+  }, [isAdmin]);
+
+  // Count of wishes still awaiting an admin decision (no grantedAt set).
+  const pendingWishesCount = useMemo(
+    () => allWishes.filter(w => !w.grantedAt).length,
+    [allWishes],
+  );
 
   // Wish-granted celebration: pop up the modal when this user has any granted
   // wishes that haven't been acknowledged. Triggered by:
@@ -3211,7 +3225,7 @@ export default function App() {
     show("Exported");
   };
 
-  const sideBtn = (k, lbl, ico) => {
+  const sideBtn = (k, lbl, ico, badge) => {
     const active = tab === k;
     return (
       <button
@@ -3229,7 +3243,24 @@ export default function App() {
         onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "#23233355"; }}
         onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
       >
-        <span style={{ display: "inline-flex", width: 16, justifyContent: "center" }}>{ico}</span>
+        <span style={{ display: "inline-flex", width: 16, justifyContent: "center", position: "relative" }}>
+          {ico}
+          {badge > 0 && (
+            <span
+              title={`${badge} item${badge === 1 ? "" : "s"} need attention`}
+              style={{
+                position: "absolute", top: -6, right: -10,
+                background: "#ef4444", color: "#fff",
+                fontSize: 9, fontWeight: 700, lineHeight: 1,
+                padding: "2px 5px", borderRadius: 8,
+                minWidth: 14, textAlign: "center",
+                border: "1px solid #12121c",
+              }}
+            >
+              {badge > 9 ? "9+" : badge}
+            </span>
+          )}
+        </span>
         <span>{lbl}</span>
       </button>
     );
@@ -3346,7 +3377,7 @@ export default function App() {
               {sideBtn("performance", "Performance", <BarChart3 size={14} />)}
               {sideBtn("lottracking", "Lot Tracking", <Layers size={14} />)}
               {sideBtn("log", "Transaction Log", <ScrollText size={14} />)}
-              {isAdmin && sideBtn("admin", "Admin Config", <Settings size={14} />)}
+              {isAdmin && sideBtn("admin", "Admin Config", <Settings size={14} />, pendingWishesCount)}
             </nav>
           </aside>
         </>
