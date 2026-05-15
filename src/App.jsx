@@ -1,4 +1,4 @@
-// APP VERSION: v167
+// APP VERSION: v168
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -17,7 +17,7 @@ import {
   fetchWishes, createWish, countUserWishes, grantWish, ungrantWish, acknowledgeWish, fetchPendingGrantedWishes,
   signIn, signUp, signOut, getSession, getProfile, updateProfile, fetchProfiles, deleteProfile as dbDeleteProfile,
   getInviteCode, setInviteCode, getLocations, getConfig, saveConfig, changePassword, supabase, fetchFullBackup,
-  DEFAULT_BASE_INGREDIENTS, digitForProductLine, formatLotNumber, padLotNumber, reserveLotNumbers, dateToMMDDYY,
+  DEFAULT_BASE_INGREDIENTS, digitForProductLine, formatLotNumber, padLotNumber, dateToMMDDYY,
 } from "./supabase";
 
 // Icons — install lucide-react: npm install lucide-react
@@ -561,12 +561,13 @@ export default function App() {
   const [rcvNotes, setRcvNotes] = useState("");
   const [rcvPoAction, setRcvPoAction] = useState("received");
   const [manualPOModal, setManualPOModal] = useState(false);
-  const [manualPOForm, setManualPOForm] = useState({ vendor: "", notes: "" });
+  const [manualPOForm, setManualPOForm] = useState({ vendor: "", notes: "", expectedReceiptDate: "" });
   const [manualPOLines, setManualPOLines] = useState([]);
   // Edit existing (unreceived) PO: add / remove / change line items
   const [editPOModal, setEditPOModal] = useState(null); // PO object or null
   const [editPOLines, setEditPOLines] = useState([]);
   const [editPONotes, setEditPONotes] = useState("");
+  const [editPOExpectedDate, setEditPOExpectedDate] = useState("");
   const [editPOSubmitting, setEditPOSubmitting] = useState(false);
   const [prodRuns, setProdRuns] = useState([]);
   const [prodModal, setProdModal] = useState(false);
@@ -2334,45 +2335,30 @@ export default function App() {
         return { date: d, dayName, isWorkDay: workDays.includes(dayName) };
       }).filter(d => d.isWorkDay);
 
-      // Pre-reserve lot numbers for any 200-level draft (those always create new lots).
-      // Walk in the same order we'll create runs so lot numbers are assigned predictably.
-      const lotPlan = []; // entries: { day, row, item, productLine, needsLot }
+      // Build the list of runs to create. Lot numbers are NOT pre-assigned for
+      // 200-level drafts anymore — a plan made 3 weeks out shouldn't burn lot
+      // numbers that might be edited before production. The lot # gets reserved
+      // at completion time using the then-current counter + completion date,
+      // so the run reflects what was actually produced and when.
+      const lotPlan = []; // entries: { day, row, item }
       for (const day of selectedWeekDays) {
         const rows = planDayRows[day.date] || [];
         for (const row of rows) {
           if (!row.skuId || row.qty <= 0) continue;
           const item = allItems.find(i => i.id === row.skuId);
           if (!item) continue;
-          const lvl = getLevel(item.id);
-          const m = item.id.match(/^\d+-(\w+)/);
-          const productLine = m ? m[1] : "";
-          lotPlan.push({ day, row, item, productLine, needsLot: lvl === 200 });
+          lotPlan.push({ day, row, item });
         }
-      }
-      const needLotCount = lotPlan.filter(p => p.needsLot).length;
-      let reservedLots = [];
-      if (needLotCount > 0) {
-        const lotEntries = lotPlan.filter(p => p.needsLot);
-        reservedLots = await reserveLotNumbers(
-          lotEntries.map(p => p.productLine),
-          baseIngredients,
-          lotEntries.map(p => p.day.date)
-        );
-        // Refresh local counter so admin UI reflects latest
-        const newCounter = (await getConfig("lot_sequence_counter")) || 0;
-        setLotCounter(newCounter);
       }
 
       let counter = 1;
-      let lotIdx = 0;
       const newRuns = [];
       for (const plan of lotPlan) {
         const { day, row, item } = plan;
-        const lotNumber = plan.needsLot ? (reservedLots[lotIdx++] || "") : "";
         const runId = `PROD-${day.date}-${String(counter).padStart(3, "0")}-${Math.random().toString(36).slice(2, 8)}`;
         const run = {
           id: runId, assemblyId: row.skuId, assemblyName: item.name,
-          qtyProduced: row.qty, date: day.date, lotNumber, plannedDate: day.date,
+          qtyProduced: row.qty, date: day.date, lotNumber: "", plannedDate: day.date,
           sourcePlanWeek: planWeekStart, status: "Draft",
           notes: "", createdBy: profile?.email || "", consumed: [],
         };
@@ -2742,7 +2728,7 @@ export default function App() {
   );
 
   const openManualPO = () => {
-    setManualPOForm({ vendor: "", notes: "" });
+    setManualPOForm({ vendor: "", notes: "", expectedReceiptDate: "" });
     setManualPOLines([{ partId: "", name: "", qty: 0, unit: "", unitCost: 0 }]);
     setManualPOModal(true);
   };
@@ -2758,6 +2744,7 @@ export default function App() {
       id: pid, vendor: manualPOForm.vendor, vendorId: vObj?.id || "", date: todayLocal(),
       status: "Draft", total, paymentTerms: vObj?.paymentTerms || "", leadDays: vObj?.leadDays || 0,
       notes: manualPOForm.notes,
+      expectedReceiptDate: manualPOForm.expectedReceiptDate || null,
       lines: validLines.map(l => ({ partId: l.partId, name: l.name, qty: l.qty, unit: l.unit, unitCost: l.unitCost, total: l.qty * l.unitCost })),
     };
     setPOs(prev => [...prev, po]);
@@ -2771,6 +2758,7 @@ export default function App() {
     setEditPOModal(po);
     setEditPOLines(po.lines.map(l => ({ ...l })));
     setEditPONotes(po.notes || "");
+    setEditPOExpectedDate(po.expectedReceiptDate || "");
   };
 
   const submitEditPO = async () => {
@@ -2786,8 +2774,8 @@ export default function App() {
     const total = lines.reduce((s, l) => s + l.total, 0);
     setEditPOSubmitting(true);
     try {
-      await updatePOLines(editPOModal.id, lines, total, editPONotes);
-      setPOs(prev => prev.map(p => p.id === editPOModal.id ? { ...p, lines, total, notes: editPONotes } : p));
+      await updatePOLines(editPOModal.id, lines, total, editPONotes, editPOExpectedDate || null);
+      setPOs(prev => prev.map(p => p.id === editPOModal.id ? { ...p, lines, total, notes: editPONotes, expectedReceiptDate: editPOExpectedDate || null } : p));
       show(`Updated ${editPOModal.id}`);
       setEditPOModal(null);
     } catch (e) {
@@ -4550,7 +4538,14 @@ export default function App() {
                         {exp ? <ChevronDown size={16} style={{ color: "#888" }} /> : <ChevronRight size={16} style={{ color: "#888" }} />}
                         <div>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontFamily: "monospace", fontWeight: 700 }}>{po.id}</span><span style={{ background: sC(po.status) + "22", color: sC(po.status), padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{po.status}</span></div>
-                          <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>{po.vendor} • {po.lines.length} items • {po.date}</div>
+                          <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
+                            {po.vendor} • {po.lines.length} items • {po.date}
+                            {po.expectedReceiptDate && (
+                              <span style={{ marginLeft: 8, color: "#a78bfa" }}>
+                                • Expected {po.expectedReceiptDate}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -4790,7 +4785,21 @@ export default function App() {
                                     <button onClick={() => {
                                       setDraftToComplete(r);
                                       setProdAssembly(r.assemblyId); setProdQty(r.qtyProduced);
-                                      setProdDate(r.plannedDate || r.date); setProdLotNumber(r.lotNumber || ""); setFreshLotNumber("");
+                                      const completionDate = r.plannedDate || r.date;
+                                      setProdDate(completionDate);
+                                      // Drafts no longer carry a pre-reserved lot #. For 200-level assemblies
+                                      // (which need a new lot at completion), suggest one based on the
+                                      // current counter + actual completion date. The user can edit it
+                                      // before submitting. For higher levels, leave blank so the lot
+                                      // source picker can drive selection.
+                                      const lvl = getLevel(r.assemblyId);
+                                      let suggested = r.lotNumber || "";
+                                      if (!suggested && lvl <= 200) {
+                                        const m = r.assemblyId.match(/^\d+-(\w+)/);
+                                        const pl = m ? m[1] : "";
+                                        suggested = formatLotNumber(digitForProductLine(pl, baseIngredients), lotCounter + 1, completionDate);
+                                      }
+                                      setProdLotNumber(suggested); setFreshLotNumber("");
                                       setProdNotes(r.notes || ""); setProdConsume(initConsume(r.assemblyId));
                                       setCompleteDraftModal(true);
                                     }} style={{ ...B2, fontSize: 11, padding: "3px 8px", color: "#22c55e", borderColor: "#22c55e44" }}>
@@ -6892,13 +6901,17 @@ export default function App() {
 
       {/* ================== MANUAL PO MODAL ================== */}
       <Modal open={manualPOModal} onClose={() => setManualPOModal(false)} title="Create Purchase Order" wide>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Vendor *</label>
             <select value={manualPOForm.vendor} onChange={e => setManualPOForm(f => ({ ...f, vendor: e.target.value }))} style={IS}>
               <option value="">Select vendor...</option>
               {vendors.map(v => <option key={v.id} value={v.name}>{v.name}</option>)}
             </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Expected Receipt</label>
+            <input type="date" value={manualPOForm.expectedReceiptDate} onChange={e => setManualPOForm(f => ({ ...f, expectedReceiptDate: e.target.value }))} style={IS} />
           </div>
           <div>
             <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label>
@@ -6973,9 +6986,15 @@ export default function App() {
               {editPOModal.leadDays > 0 && <div><span style={{ color: "#888" }}>Lead:</span> {editPOModal.leadDays} days</div>}
             </div>
 
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label>
-              <input value={editPONotes} onChange={e => setEditPONotes(e.target.value)} placeholder="Optional notes" style={IS} />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 12, marginBottom: 16 }}>
+              <div>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Expected Receipt</label>
+                <input type="date" value={editPOExpectedDate} onChange={e => setEditPOExpectedDate(e.target.value)} style={IS} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 3 }}>Notes</label>
+                <input value={editPONotes} onChange={e => setEditPONotes(e.target.value)} placeholder="Optional notes" style={IS} />
+              </div>
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>

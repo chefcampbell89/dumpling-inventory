@@ -19,6 +19,8 @@ _(none)_
 
 ## Done
 
+- [feature] PO expected receipt date — optional date field on purchase orders, set at creation or via the Edit PO modal. Shown on the PO list next to the PO date. Migration: `migrations/2026-05-14-po-expected-receipt-date.sql`. Shipped v168 / sb v121.
+- [feature] Defer lot # assignment from draft to completion. Plans made weeks in advance no longer burn lot numbers that get edited away. The Complete-draft modal now pre-fills with a suggestion computed from the current counter + actual completion date, which the user can edit. The global counter auto-syncs on submit via the existing `ensureCounterMatchesLot`. Shipped v168.
 - [feature] Wish alert badge on Admin Config tab — red count badge on the sidebar icon when there are ungranted wishes awaiting an admin decision. Loads `allWishes` on admin login and recomputes via `useMemo`.
 - [bug] Lot # on shipment transaction tracing — confirmed fixed.
 - [bug] Soft-delete (Discontinue) for items. Previous hard-delete was silently failing on FK constraints; cascade delete was destructive to historical records. Now flips `items.status` to `Discontinued`, hides from active lists/dropdowns, surfaces a Discontinued panel in Item Master with Restore. Shipped in `cde4b6d`.

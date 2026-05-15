@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v120
+// SUPABASE VERSION: v121
 
 // Format a Date as YYYY-MM-DD in local timezone. Avoid .toISOString().slice(0,10)
 // for date stamps — that returns UTC and breaks for users west of UTC after
@@ -331,6 +331,7 @@ export async function fetchPurchaseOrders() {
     id: po.id, vendor: po.vendor_name, vendorId: po.vendor_id,
     date: po.po_date, status: po.status, total: Number(po.total),
     paymentTerms: po.payment_terms, leadDays: po.lead_days, notes: po.notes,
+    expectedReceiptDate: po.expected_receipt_date || null,
     lines: lineData.filter(l => l.po_id === po.id).map(l => ({
       partId: l.part_id, name: l.name, qty: Number(l.qty),
       unit: l.unit, unitCost: Number(l.unit_cost), total: Number(l.total),
@@ -343,6 +344,7 @@ export async function createPurchaseOrder(po) {
     id: po.id, vendor_id: po.vendorId, vendor_name: po.vendor,
     po_date: po.date, status: po.status, total: po.total,
     payment_terms: po.paymentTerms, lead_days: po.leadDays, notes: po.notes,
+    expected_receipt_date: po.expectedReceiptDate || null,
   })
   if (poErr) throw poErr
   if (po.lines.length > 0) {
@@ -364,7 +366,7 @@ export async function updatePOStatus(id, status) {
 // Replace the line items on an existing PO (used for editing open POs before
 // they've been received). Deletes all po_lines for the PO, inserts the new
 // set, and updates the PO total (and optionally notes).
-export async function updatePOLines(poId, lines, total, notes) {
+export async function updatePOLines(poId, lines, total, notes, expectedReceiptDate) {
   const { error: dErr } = await supabase.from("po_lines").delete().eq("po_id", poId)
   if (dErr) throw dErr
   if (lines.length > 0) {
@@ -378,6 +380,7 @@ export async function updatePOLines(poId, lines, total, notes) {
   }
   const update = { total: Number(total) || 0 }
   if (notes !== undefined) update.notes = notes
+  if (expectedReceiptDate !== undefined) update.expected_receipt_date = expectedReceiptDate || null
   const { error: pErr } = await supabase.from("purchase_orders").update(update).eq("id", poId)
   if (pErr) throw pErr
 }
