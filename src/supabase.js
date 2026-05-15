@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v117
+// SUPABASE VERSION: v118
 
 // Format a Date as YYYY-MM-DD in local timezone. Avoid .toISOString().slice(0,10)
 // for date stamps — that returns UTC and breaks for users west of UTC after
@@ -46,6 +46,40 @@ export async function upsertItem(item) {
 export async function deleteItem(id) {
   const { error } = await supabase.from("items").delete().eq("id", id)
   if (error) throw error
+}
+
+// Check whether an item is referenced anywhere that would block deletion.
+// Returns { hasRefs: bool, refs: [{ kind, count, examples: [...] }] } describing
+// what would prevent the DELETE from succeeding. Used by the UI to block the
+// delete with a clear message rather than letting Postgres reject it silently.
+export async function getItemReferences(id) {
+  const checks = [
+    { kind: "BOM (used as ingredient)",   table: "bom_lines",           col: "component_id", labelCol: "assembly_id" },
+    { kind: "BOM (this is a recipe)",      table: "bom_lines",           col: "assembly_id",  labelCol: "component_id" },
+    { kind: "Purchase order line",         table: "po_lines",            col: "part_id",      labelCol: "po_id" },
+    { kind: "Receipt line",                table: "receipt_lines",       col: "part_id",      labelCol: "receipt_id" },
+    { kind: "Production run (consumed)",   table: "production_consumed", col: "part_id",      labelCol: "run_id" },
+    { kind: "Production run (produced)",   table: "production_runs",     col: "assembly_id",  labelCol: "id" },
+    { kind: "Inventory lot",               table: "inventory_lots",      col: "item_id",      labelCol: "lot_number" },
+    { kind: "Alternate vendor",            table: "item_vendors",        col: "item_id",      labelCol: "vendor_name" },
+  ]
+  const refs = []
+  for (const c of checks) {
+    const { data, error } = await supabase
+      .from(c.table)
+      .select(`${c.labelCol}`, { count: "exact" })
+      .eq(c.col, id)
+      .limit(5)
+    if (error) { console.warn(`Ref check failed on ${c.table}:`, error.message); continue }
+    if (data && data.length > 0) {
+      refs.push({
+        kind: c.kind,
+        count: data.length,
+        examples: data.map(r => r[c.labelCol]).filter(Boolean),
+      })
+    }
+  }
+  return { hasRefs: refs.length > 0, refs }
 }
 
 // -- BOM LINES --

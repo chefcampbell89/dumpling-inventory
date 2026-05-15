@@ -1,7 +1,7 @@
-// APP VERSION: v163
+// APP VERSION: v164
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
-  fetchItems, upsertItem, deleteItem as dbDeleteItem, bulkInsertItems,
+  fetchItems, upsertItem, deleteItem as dbDeleteItem, getItemReferences, bulkInsertItems,
   fetchBomLines, setBomForAssembly,
   fetchVendors, upsertVendor, deleteVendor as dbDeleteVendor,
   fetchItemVendors, setItemVendors,
@@ -556,6 +556,8 @@ export default function App() {
   const [rcvType, setRcvType] = useState("PO Receipt");
   const [rcvNotes, setRcvNotes] = useState("");
   const [rcvPoAction, setRcvPoAction] = useState("received");
+  // Delete-blocked modal: shown when an item can't be deleted because of FK refs
+  const [deleteBlockedModal, setDeleteBlockedModal] = useState(null); // { itemId, itemName, refs: [...] } | null
   const [manualPOModal, setManualPOModal] = useState(false);
   const [manualPOForm, setManualPOForm] = useState({ vendor: "", notes: "" });
   const [manualPOLines, setManualPOLines] = useState([]);
@@ -1873,13 +1875,58 @@ export default function App() {
   };
 
   const del = async (id) => {
-    try { await Promise.allSettled([dbDeleteItem(id), dbDeleteOrder(id), dbDeleteVendor(id), dbDeletePO(id)]); } catch (e) { console.warn("DB delete failed:", e.message); }
-    setParts((p) => p.filter((x) => x.id !== id));
-    setAssemblies((p) => p.filter((x) => x.id !== id));
-    setOrders((p) => p.filter((x) => x.id !== id));
-    setVendors((p) => p.filter((x) => x.id !== id));
-    setPOs((p) => p.filter((x) => x.id !== id));
-    show("Deleted");
+    // Figure out what kind of entity this is so we can route to the right
+    // delete path and surface real errors (Promise.allSettled used to swallow
+    // them, which caused deleted items to silently re-appear after refresh).
+    const matchedItem = parts.find(x => x.id === id) || assemblies.find(x => x.id === id);
+    const matchedOrder = orders.find(x => x.id === id);
+    const matchedVendor = vendors.find(x => x.id === id);
+    const matchedPO = pos.find(x => x.id === id);
+
+    if (matchedItem) {
+      // Pre-flight: check for FK references that would block the DB delete.
+      try {
+        const { hasRefs, refs } = await getItemReferences(id);
+        if (hasRefs) {
+          setDeleteBlockedModal({ itemId: id, itemName: matchedItem.name || id, refs });
+          return;
+        }
+      } catch (e) {
+        console.warn("Reference check failed:", e.message);
+        // Fall through and let the DB delete attempt — it'll throw a real error if blocked.
+      }
+      try {
+        await dbDeleteItem(id);
+      } catch (e) {
+        show(`Delete failed: ${e.message}`, "error");
+        return;
+      }
+      setParts((p) => p.filter((x) => x.id !== id));
+      setAssemblies((p) => p.filter((x) => x.id !== id));
+      show("Deleted");
+      return;
+    }
+
+    if (matchedOrder) {
+      try { await dbDeleteOrder(id); } catch (e) { show(`Delete failed: ${e.message}`, "error"); return; }
+      setOrders((p) => p.filter((x) => x.id !== id));
+      show("Deleted");
+      return;
+    }
+    if (matchedVendor) {
+      try { await dbDeleteVendor(id); } catch (e) { show(`Delete failed: ${e.message}`, "error"); return; }
+      setVendors((p) => p.filter((x) => x.id !== id));
+      show("Deleted");
+      return;
+    }
+    if (matchedPO) {
+      try { await dbDeletePO(id); } catch (e) { show(`Delete failed: ${e.message}`, "error"); return; }
+      setPOs((p) => p.filter((x) => x.id !== id));
+      show("Deleted");
+      return;
+    }
+    // Unknown id — fall back to old behaviour just in case
+    show("Nothing to delete", "error");
   };
 
   const delOrderGroup = async (group) => {
@@ -3709,6 +3756,8 @@ export default function App() {
                     retailCases: t.retailCases + r.retailCases, totalDumplings: t.totalDumplings + r.totalDumplings,
                     onOrder: t.onOrder + r.onOrder, diff: t.diff + r.diff,
                   }), { bins: 0, packs: 0, fsCases: 0, retailCases: 0, totalDumplings: 0, onOrder: 0, diff: 0 });
+                  // Format counts to at most 1 decimal, strip trailing zero, and keep integers integer-looking.
+                  const fmt1 = (n) => (Math.round(n * 10) / 10).toLocaleString(undefined, { maximumFractionDigits: 1 });
                   const stickyTH = { ...TH, position: "sticky", top: 0, background: "#1e1e2e", zIndex: 1 };
                   const totalTD = { ...TD, fontWeight: 700, background: "#16161e", borderTop: "1px solid #2a2a3a", position: "sticky", bottom: 0 };
                   return (
@@ -3730,10 +3779,10 @@ export default function App() {
                           {flavorRows.map(r => (
                             <tr key={r.pl}>
                               <td style={{ ...TD, fontWeight: 700, color: "#a78bfa" }}>{r.pl}</td>
-                              <td style={{ ...TD, textAlign: "center" }}>{r.bins || "—"}</td>
-                              <td style={{ ...TD, textAlign: "center" }}>{r.packs || "—"}</td>
-                              <td style={{ ...TD, textAlign: "center" }}>{r.fsCases || "—"}</td>
-                              <td style={{ ...TD, textAlign: "center" }}>{r.retailCases || "—"}</td>
+                              <td style={{ ...TD, textAlign: "center" }}>{r.bins ? fmt1(r.bins) : "—"}</td>
+                              <td style={{ ...TD, textAlign: "center" }}>{r.packs ? fmt1(r.packs) : "—"}</td>
+                              <td style={{ ...TD, textAlign: "center" }}>{r.fsCases ? fmt1(r.fsCases) : "—"}</td>
+                              <td style={{ ...TD, textAlign: "center" }}>{r.retailCases ? fmt1(r.retailCases) : "—"}</td>
                               <td style={{ ...TD, textAlign: "right", fontWeight: 600, color: "#22c55e" }}>{r.totalDumplings.toLocaleString()}</td>
                               <td style={{ ...TD, textAlign: "right", color: "#f59e0b" }}>{r.onOrder.toLocaleString()}</td>
                               <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: r.diff >= 0 ? "#22c55e" : "#ef4444" }}>
@@ -3745,10 +3794,10 @@ export default function App() {
                         <tfoot>
                           <tr>
                             <td style={{ ...totalTD, color: "#ccc" }}>Total</td>
-                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.bins || "—"}</td>
-                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.packs || "—"}</td>
-                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.fsCases || "—"}</td>
-                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.retailCases || "—"}</td>
+                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.bins ? fmt1(totals.bins) : "—"}</td>
+                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.packs ? fmt1(totals.packs) : "—"}</td>
+                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.fsCases ? fmt1(totals.fsCases) : "—"}</td>
+                            <td style={{ ...totalTD, textAlign: "center" }}>{totals.retailCases ? fmt1(totals.retailCases) : "—"}</td>
                             <td style={{ ...totalTD, textAlign: "right", color: "#22c55e" }}>{totals.totalDumplings.toLocaleString()}</td>
                             <td style={{ ...totalTD, textAlign: "right", color: "#f59e0b" }}>{totals.onOrder.toLocaleString()}</td>
                             <td style={{ ...totalTD, textAlign: "right", color: totals.diff >= 0 ? "#22c55e" : "#ef4444" }}>
@@ -6990,6 +7039,40 @@ export default function App() {
       </Modal>
 
       {/* ================== MODALS ================== */}
+
+      {/* Delete-blocked modal: shown when an item can't be deleted because
+          it's still referenced by BOMs / orders / production / etc. */}
+      <Modal open={!!deleteBlockedModal} onClose={() => setDeleteBlockedModal(null)} title="Can't Delete">
+        {deleteBlockedModal && (<>
+          <div style={{ marginBottom: 14, color: "#e0e0e0", fontSize: 14 }}>
+            <span style={{ color: "#ef4444", fontWeight: 600 }}>{deleteBlockedModal.itemName}</span>
+            <span style={{ color: "#888" }}> ({deleteBlockedModal.itemId})</span>
+          </div>
+          <p style={{ color: "#ccc", fontSize: 13, lineHeight: 1.5, marginBottom: 14 }}>
+            This item can't be deleted because it's still referenced by other records.
+            Remove the references first, then try deleting again.
+          </p>
+          <div style={{ background: "#16161e", border: "1px solid #2a2a3a", borderRadius: 8, padding: 12, marginBottom: 16 }}>
+            {deleteBlockedModal.refs.map((r, i) => (
+              <div key={i} style={{ marginBottom: i < deleteBlockedModal.refs.length - 1 ? 10 : 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#f59e0b", marginBottom: 4 }}>
+                  {r.kind} <span style={{ color: "#888", fontWeight: 400 }}>({r.count}{r.count >= 5 ? "+" : ""})</span>
+                </div>
+                {r.examples.length > 0 && (
+                  <div style={{ fontSize: 11, color: "#888", fontFamily: "monospace", lineHeight: 1.6 }}>
+                    {r.examples.slice(0, 5).map((ex, j) => (
+                      <div key={j}>· {String(ex)}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button onClick={() => setDeleteBlockedModal(null)} style={B1}>Got it</button>
+          </div>
+        </>)}
+      </Modal>
 
       {/* Unified Item Modal */}
       <Modal open={modal === "item"} onClose={() => setModal(null)} title={editItem ? "Edit Item" : "Create Item"} wide>
