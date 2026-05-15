@@ -19,6 +19,7 @@ _(none)_
 
 ## Done
 
+- [feature] Purchase Needs: "On Order" and "Net Need" columns. Shows the quantity of each material already on open POs (Draft/Sent/Confirmed) so users can tell at a glance which shortfalls are pending receipt vs. still need a new PO. Rows are color-coded (sky-blue truck icon = pending receipt, red triangle = still to PO) and `Generate POs` only orders the Net Need so we don't double-order. Shipped v169.
 - [feature] PO expected receipt date — optional date field on purchase orders, set at creation or via the Edit PO modal. Shown on the PO list next to the PO date. Migration: `migrations/2026-05-14-po-expected-receipt-date.sql`. Shipped v168 / sb v121.
 - [feature] Defer lot # assignment from draft to completion. Plans made weeks in advance no longer burn lot numbers that get edited away. The Complete-draft modal now pre-fills with a suggestion computed from the current counter + actual completion date, which the user can edit. The global counter auto-syncs on submit via the existing `ensureCounterMatchesLot`. Shipped v168.
 - [feature] Wish alert badge on Admin Config tab — red count badge on the sidebar icon when there are ungranted wishes awaiting an admin decision. Loads `allWishes` on admin login and recomputes via `useMemo`.

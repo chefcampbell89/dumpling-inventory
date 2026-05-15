@@ -1,4 +1,4 @@
-// APP VERSION: v168
+// APP VERSION: v169
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -25,7 +25,7 @@ import {
   Package, AlertTriangle, Search, Plus, Edit2, Trash2, Download, Upload,
   X, ChevronDown, ChevronRight, DollarSign, CheckCircle, Layers,
   ShoppingCart, ClipboardList, Minus, FileText, Printer, Building2, Loader2, PackageCheck, Hammer, Users, LogOut, Lock, KeyRound,
-  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles, TrendingUp, TrendingDown, ChevronLeft, Calendar, LayoutDashboard, BarChart3, Activity, Minus as MinusIcon, Menu,
+  ArrowUpDown, ArrowUp, ArrowDown, Check, ChevronsUpDown, ScrollText, Settings, Sparkles, TrendingUp, TrendingDown, ChevronLeft, Calendar, LayoutDashboard, BarChart3, Activity, Minus as MinusIcon, Menu, Truck,
 } from "lucide-react";
 
 import { LineChart, Line, ResponsiveContainer, Tooltip as ChartTooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend } from "recharts";
@@ -1585,15 +1585,36 @@ export default function App() {
       if (it.bom) for (const l of it.bom) explode(l.partId, l.qty * mult);
     };
     for (const d of demandRows) explode(d.item, d.qty);
-    const rows = Object.values(needs).map((r) => ({
-      ...r, required: Math.ceil(r.required * 1000) / 1000,
-      shortfall: Math.max(0, Math.ceil((r.required - r.qty) * 1000) / 1000),
-      coverage: r.required > 0 ? Math.min(100, Math.round((r.qty / r.required) * 100)) : 100,
-      purchaseCost: Math.max(0, Math.ceil((r.required - r.qty) * 1000) / 1000) * r.avgCost,
-    })).sort((a, b) => b.shortfall - a.shortfall);
+
+    // Sum quantity on OPEN purchase orders for each part. "Open" = the PO is
+    // expected to arrive (Draft / Sent / Confirmed) but has not yet been
+    // Received or Cancelled. This becomes "On Order" in the table so users
+    // see that a shortfall is already covered by a pending receipt vs. truly
+    // needing a new PO.
+    const openPOStatuses = new Set(["Draft", "Sent", "Confirmed"]);
+    const onOrderByPart = {};
+    for (const po of pos) {
+      if (!openPOStatuses.has(po.status)) continue;
+      for (const l of (po.lines || [])) {
+        onOrderByPart[l.partId] = (onOrderByPart[l.partId] || 0) + (Number(l.qty) || 0);
+      }
+    }
+
+    const rows = Object.values(needs).map((r) => {
+      const required = Math.ceil(r.required * 1000) / 1000;
+      const shortfall = Math.max(0, Math.ceil((required - r.qty) * 1000) / 1000);
+      const onOrder = Math.round((onOrderByPart[r.id] || 0) * 1000) / 1000;
+      // netNeed = what user still has to PO after accounting for what's already on order.
+      const netNeed = Math.max(0, Math.ceil((shortfall - onOrder) * 1000) / 1000);
+      return {
+        ...r, required, shortfall, onOrder, netNeed,
+        coverage: required > 0 ? Math.min(100, Math.round((r.qty / required) * 100)) : 100,
+        purchaseCost: netNeed * r.avgCost,
+      };
+    }).sort((a, b) => b.netNeed - a.netNeed || b.shortfall - a.shortfall);
     const byVendor = {};
     for (const r of rows) {
-      if (r.shortfall <= 0) continue;
+      if (r.netNeed <= 0) continue;
       const vid = r.supplier || "Unassigned";
       if (!byVendor[vid]) byVendor[vid] = { vendor: vid, lines: [], total: 0 };
       byVendor[vid].lines.push(r);
@@ -1607,10 +1628,11 @@ export default function App() {
       rows,
       byVendor: Object.values(byVendor),
       totalCost: rows.reduce((s, r) => s + r.purchaseCost, 0),
-      critical: rows.filter((r) => r.shortfall > 0).length,
+      critical: rows.filter((r) => r.netNeed > 0).length,
       covered: rows.filter((r) => r.shortfall === 0).length,
+      pendingReceipt: rows.filter((r) => r.shortfall > 0 && r.netNeed === 0).length,
     };
-  }, [orders, allItems, mrpSource, mrpSelectedRunIds, prodRuns, forecastConfig.mrpDemandLevels]);
+  }, [orders, allItems, mrpSource, mrpSelectedRunIds, prodRuns, forecastConfig.mrpDemandLevels, pos]);
 
   // ---- Planning Helpers ----
   const fmtDate = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
@@ -2008,8 +2030,10 @@ export default function App() {
   // Open the multi-vendor picker if any needed lines belong to a multi-vendor item.
   // Otherwise generate POs immediately using each item's primary supplier.
   const genPOs = async () => {
-    const allLines = mrp.byVendor.flatMap(vg => vg.lines).filter(l => l.shortfall > 0);
-    if (allLines.length === 0) { show("No shortfalls", "error"); return; }
+    // Use netNeed (shortfall minus already-on-order) so we don't re-PO things
+    // already on an open Draft/Sent/Confirmed PO.
+    const allLines = mrp.byVendor.flatMap(vg => vg.lines).filter(l => l.netNeed > 0);
+    if (allLines.length === 0) { show("Nothing left to PO — all shortfalls are already on order or covered.", "error"); return; }
     const multiItems = allLines.filter(l => hasAlternates(l.id));
     if (multiItems.length > 0) {
       // Default each multi-vendor item to its primary supplier
@@ -2025,8 +2049,9 @@ export default function App() {
   // Build POs grouping each line by either the user's vendor choice (for multi-vendor items)
   // or the item's primary supplier. `choices` is { itemId: vendorName }.
   const generatePOsWithChoices = async (choices) => {
-    const allLines = mrp.byVendor.flatMap(vg => vg.lines).filter(l => l.shortfall > 0);
-    if (allLines.length === 0) { show("No shortfalls", "error"); return; }
+    // Order only what's NOT already on an open PO. netNeed = max(0, shortfall - onOrder).
+    const allLines = mrp.byVendor.flatMap(vg => vg.lines).filter(l => l.netNeed > 0);
+    if (allLines.length === 0) { show("Nothing left to PO — all shortfalls are already on order or covered.", "error"); return; }
 
     // Re-bucket lines by chosen vendor; fall back to line.supplier
     const buckets = {}; // { vendorName: { lines: [], total } }
@@ -2039,9 +2064,10 @@ export default function App() {
         const alt = (itemVendorsByItem.get(l.id) || []).find(a => a.vendorName === chosenVendor);
         if (alt) { unitCost = alt.unitCost || l.avgCost; supplierCode = alt.supplierCode || ""; }
       }
-      const total = Math.max(0, Math.ceil(l.shortfall * 1000) / 1000) * unitCost;
+      const orderQty = Math.max(0, Math.ceil(l.netNeed * 1000) / 1000);
+      const total = orderQty * unitCost;
       if (!buckets[chosenVendor]) buckets[chosenVendor] = { lines: [], total: 0 };
-      buckets[chosenVendor].lines.push({ partId: l.id, name: l.name, qty: l.shortfall, unit: l.unit, unitCost, supplierCode, total });
+      buckets[chosenVendor].lines.push({ partId: l.id, name: l.name, qty: orderQty, unit: l.unit, unitCost, supplierCode, total });
       buckets[chosenVendor].total += total;
     }
 
@@ -4479,7 +4505,8 @@ export default function App() {
 
           <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
             <Stat icon={mrpSource === "production" ? <Hammer size={18} /> : <ShoppingCart size={18} />} label={demandLabel} value={mrp.demandRows.length} accent="#6366f1" />
-            <Stat icon={<AlertTriangle size={18} />} label="Materials Short" value={mrp.critical} accent={mrp.critical > 0 ? "#ef4444" : "#22c55e"} />
+            <Stat icon={<AlertTriangle size={18} />} label="Still to PO" value={mrp.critical} accent={mrp.critical > 0 ? "#ef4444" : "#22c55e"} />
+            <Stat icon={<Truck size={18} />} label="On Order" value={mrp.pendingReceipt} accent="#38bdf8" />
             <Stat icon={<CheckCircle size={18} />} label="Covered" value={mrp.covered} accent="#22c55e" />
             <Stat icon={<DollarSign size={18} />} label="Purchase Needed" value={`$${mrp.totalCost.toFixed(2)}`} accent="#f59e0b" />
           </div>
@@ -4488,29 +4515,45 @@ export default function App() {
             <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
               <div style={{ padding: "12px 14px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc" }}>Raw Material Requirements (exploded from open orders)</div>
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 800 }}>
-                  <thead><tr>{["ProductCode", "Material", "Required", "On Hand", "Shortfall", "Coverage", "Avg Cost", "Purchase $", "Supplier"].map((h) => <th key={h} style={TH}>{h}</th>)}</tr></thead>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
+                  <thead><tr>{["ProductCode", "Material", "Required", "On Hand", "Shortfall", "On Order", "Net Need", "Coverage", "Avg Cost", "Purchase $", "Supplier"].map((h) => <th key={h} style={TH}>{h}</th>)}</tr></thead>
                   <tbody>
-                    {mrp.rows.map((r) => (
-                      <tr key={r.id} style={{ background: r.shortfall > 0 ? "rgba(239,68,68,0.06)" : "transparent" }}>
-                        <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#6366f1" }}>{r.id}</td>
-                        <td style={{ ...TD, fontWeight: 500 }}>{r.name}{r.shortfall > 0 && <AlertTriangle size={13} style={{ color: "#ef4444", verticalAlign: "middle", marginLeft: 4 }} />}</td>
-                        <td style={{ ...TD, fontWeight: 600 }}>{r.required} {r.unit}</td>
-                        <td style={{ ...TD, color: r.qty >= r.required ? "#22c55e" : "#f59e0b" }}>{r.qty}</td>
-                        <td style={{ ...TD, fontWeight: 700, color: r.shortfall > 0 ? "#ef4444" : "#22c55e" }}>{r.shortfall > 0 ? r.shortfall : "—"}</td>
-                        <td style={TD}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <div style={{ width: 50, height: 5, background: "#2a2a3a", borderRadius: 3, overflow: "hidden" }}>
-                              <div style={{ width: `${r.coverage}%`, height: "100%", background: r.coverage >= 100 ? "#22c55e" : r.coverage >= 50 ? "#f59e0b" : "#ef4444", borderRadius: 3 }} />
+                    {mrp.rows.map((r) => {
+                      // Visual states:
+                      //  - netNeed > 0          → still need to PO (red)
+                      //  - shortfall > 0 & netNeed = 0 → pending receipt, fully covered by existing PO (sky blue)
+                      //  - shortfall === 0      → covered by on-hand (green / dim)
+                      const pendingReceipt = r.shortfall > 0 && r.netNeed === 0;
+                      const stillToPO = r.netNeed > 0;
+                      const rowBg = stillToPO ? "rgba(239,68,68,0.06)" : pendingReceipt ? "rgba(56,189,248,0.06)" : "transparent";
+                      const shortfallColor = stillToPO ? "#ef4444" : pendingReceipt ? "#38bdf8" : "#22c55e";
+                      return (
+                        <tr key={r.id} style={{ background: rowBg }}>
+                          <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: "#6366f1" }}>{r.id}</td>
+                          <td style={{ ...TD, fontWeight: 500 }}>
+                            {r.name}
+                            {stillToPO && <AlertTriangle size={13} style={{ color: "#ef4444", verticalAlign: "middle", marginLeft: 4 }} />}
+                            {pendingReceipt && <Truck size={13} style={{ color: "#38bdf8", verticalAlign: "middle", marginLeft: 4 }} title="Covered by an open PO — pending receipt" />}
+                          </td>
+                          <td style={{ ...TD, fontWeight: 600 }}>{r.required} {r.unit}</td>
+                          <td style={{ ...TD, color: r.qty >= r.required ? "#22c55e" : "#f59e0b" }}>{r.qty}</td>
+                          <td style={{ ...TD, fontWeight: 700, color: shortfallColor }}>{r.shortfall > 0 ? r.shortfall : "—"}</td>
+                          <td style={{ ...TD, fontWeight: 600, color: r.onOrder > 0 ? "#38bdf8" : "#555" }}>{r.onOrder > 0 ? r.onOrder : "—"}</td>
+                          <td style={{ ...TD, fontWeight: 700, color: stillToPO ? "#ef4444" : "#555" }}>{stillToPO ? r.netNeed : "—"}</td>
+                          <td style={TD}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <div style={{ width: 50, height: 5, background: "#2a2a3a", borderRadius: 3, overflow: "hidden" }}>
+                                <div style={{ width: `${r.coverage}%`, height: "100%", background: r.coverage >= 100 ? "#22c55e" : r.coverage >= 50 ? "#f59e0b" : "#ef4444", borderRadius: 3 }} />
+                              </div>
+                              <span style={{ fontSize: 11, color: "#888" }}>{r.coverage}%</span>
                             </div>
-                            <span style={{ fontSize: 11, color: "#888" }}>{r.coverage}%</span>
-                          </div>
-                        </td>
-                        <td style={{ ...TD, fontSize: 12 }}>${r.avgCost.toFixed(2)}</td>
-                        <td style={{ ...TD, fontWeight: 600, color: r.purchaseCost > 0 ? "#f59e0b" : "#555" }}>{r.purchaseCost > 0 ? `$${r.purchaseCost.toFixed(2)}` : "—"}</td>
-                        <td style={{ ...TD, fontSize: 12, color: "#888" }}>{r.supplier || "—"}</td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td style={{ ...TD, fontSize: 12 }}>${r.avgCost.toFixed(2)}</td>
+                          <td style={{ ...TD, fontWeight: 600, color: r.purchaseCost > 0 ? "#f59e0b" : "#555" }}>{r.purchaseCost > 0 ? `$${r.purchaseCost.toFixed(2)}` : "—"}</td>
+                          <td style={{ ...TD, fontSize: 12, color: "#888" }}>{r.supplier || "—"}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
