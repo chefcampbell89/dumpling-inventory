@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v118
+// SUPABASE VERSION: v120
 
 // Format a Date as YYYY-MM-DD in local timezone. Avoid .toISOString().slice(0,10)
 // for date stamps — that returns UTC and breaks for users west of UTC after
@@ -48,38 +48,71 @@ export async function deleteItem(id) {
   if (error) throw error
 }
 
-// Check whether an item is referenced anywhere that would block deletion.
-// Returns { hasRefs: bool, refs: [{ kind, count, examples: [...] }] } describing
-// what would prevent the DELETE from succeeding. Used by the UI to block the
-// delete with a clear message rather than letting Postgres reject it silently.
+// Check whether an item has TRULY blocking references that the user must clear
+// before deletion can succeed. Historical references (receipts, completed
+// production runs, empty lots, alt vendors) are NOT returned here — those are
+// auto-cleaned by cascadeDeleteItem(). Returns { hasRefs, refs: [{kind, count, examples}] }.
 export async function getItemReferences(id) {
-  const checks = [
-    { kind: "BOM (used as ingredient)",   table: "bom_lines",           col: "component_id", labelCol: "assembly_id" },
-    { kind: "BOM (this is a recipe)",      table: "bom_lines",           col: "assembly_id",  labelCol: "component_id" },
-    { kind: "Purchase order line",         table: "po_lines",            col: "part_id",      labelCol: "po_id" },
-    { kind: "Receipt line",                table: "receipt_lines",       col: "part_id",      labelCol: "receipt_id" },
-    { kind: "Production run (consumed)",   table: "production_consumed", col: "part_id",      labelCol: "run_id" },
-    { kind: "Production run (produced)",   table: "production_runs",     col: "assembly_id",  labelCol: "id" },
-    { kind: "Inventory lot",               table: "inventory_lots",      col: "item_id",      labelCol: "lot_number" },
-    { kind: "Alternate vendor",            table: "item_vendors",        col: "item_id",      labelCol: "vendor_name" },
-  ]
   const refs = []
-  for (const c of checks) {
-    const { data, error } = await supabase
-      .from(c.table)
-      .select(`${c.labelCol}`, { count: "exact" })
-      .eq(c.col, id)
-      .limit(5)
-    if (error) { console.warn(`Ref check failed on ${c.table}:`, error.message); continue }
-    if (data && data.length > 0) {
-      refs.push({
-        kind: c.kind,
-        count: data.length,
-        examples: data.map(r => r[c.labelCol]).filter(Boolean),
-      })
-    }
+
+  // BOM lines — always blocking. The recipe genuinely needs the ingredient
+  // (component_id) or is itself this item with a BOM definition (assembly_id).
+  {
+    const { data, error } = await supabase.from("bom_lines")
+      .select("assembly_id, component_id").or(`component_id.eq.${id},assembly_id.eq.${id}`).limit(10)
+    if (!error && data && data.length > 0) {
+      const asIngredient = data.filter(r => r.component_id === id).map(r => r.assembly_id)
+      const asRecipe = data.filter(r => r.assembly_id === id).map(r => r.component_id)
+      if (asIngredient.length > 0) refs.push({ kind: "Used as ingredient in recipes", count: asIngredient.length, examples: asIngredient })
+      if (asRecipe.length > 0) refs.push({ kind: "This item is a recipe with ingredients", count: asRecipe.length, examples: asRecipe })
+    } else if (error) console.warn("bom_lines ref check failed:", error.message)
   }
+
+  // Inventory lots with qty > 0 — real stock on hand, can't delete.
+  {
+    const { data, error } = await supabase.from("inventory_lots")
+      .select("lot_number, qty").eq("item_id", id).gt("qty", 0).limit(5)
+    if (!error && data && data.length > 0) {
+      refs.push({ kind: "Has on-hand inventory", count: data.length, examples: data.map(r => `${r.lot_number} (${r.qty})`) })
+    } else if (error) console.warn("inventory_lots ref check failed:", error.message)
+  }
+
+  // PO lines on open POs (Draft / Sent / Confirmed). Closed POs (Received,
+  // Cancelled) are historical and cascade-cleaned.
+  {
+    const { data, error } = await supabase.from("po_lines")
+      .select("po_id, purchase_orders!inner(status)").eq("part_id", id)
+      .in("purchase_orders.status", ["Draft", "Sent", "Confirmed"]).limit(5)
+    if (!error && data && data.length > 0) {
+      refs.push({ kind: "On an open purchase order", count: data.length, examples: data.map(r => r.po_id) })
+    } else if (error) console.warn("po_lines ref check failed:", error.message)
+  }
+
+  // Active orders for this item (Pending, Confirmed, In Production). Note:
+  // orders.item is a string field — may or may not be FK'd.
+  {
+    const { data, error } = await supabase.from("orders")
+      .select("id, customer").eq("item", id).in("status", ["Pending", "Confirmed", "In Production"]).limit(5)
+    if (!error && data && data.length > 0) {
+      refs.push({ kind: "On an active customer order", count: data.length, examples: data.map(r => `${r.id} (${r.customer})`) })
+    } else if (error) console.warn("orders ref check failed:", error.message)
+  }
+
   return { hasRefs: refs.length > 0, refs }
+}
+
+// Soft-delete: mark an item as Discontinued so it disappears from active
+// dropdowns / lists but historical records (BOMs, production runs, receipts,
+// orders) keep referencing a valid row. Reversible via restoreItem().
+export async function discontinueItem(id) {
+  const { error } = await supabase.from("items").update({ status: "Discontinued" }).eq("id", id)
+  if (error) throw error
+}
+
+// Reactivate a previously-discontinued item.
+export async function restoreItem(id) {
+  const { error } = await supabase.from("items").update({ status: "Active" }).eq("id", id)
+  if (error) throw error
 }
 
 // -- BOM LINES --

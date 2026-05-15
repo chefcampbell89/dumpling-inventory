@@ -1,7 +1,7 @@
-// APP VERSION: v164
+// APP VERSION: v166
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
-  fetchItems, upsertItem, deleteItem as dbDeleteItem, getItemReferences, bulkInsertItems,
+  fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
   fetchBomLines, setBomForAssembly,
   fetchVendors, upsertVendor, deleteVendor as dbDeleteVendor,
   fetchItemVendors, setItemVendors,
@@ -544,6 +544,10 @@ export default function App() {
   const [tab, setTab] = useState("dashboard");
   const [parts, setParts] = useState(SEED_PARTS);
   const [assemblies, setAssemblies] = useState(SEED_ASSEMBLIES);
+  // Items with status="Discontinued" — soft-deleted but kept in DB so historical
+  // BOMs, receipts, production runs, etc. still reference a valid row.
+  const [discontinuedItems, setDiscontinuedItems] = useState([]);
+  const [showDiscontinued, setShowDiscontinued] = useState(false);
   const [vendors, setVendors] = useState(SEED_VENDORS);
   const [orders, setOrders] = useState(SEED_ORDERS);
   const [orderLines, setOrderLines] = useState([]);
@@ -556,8 +560,6 @@ export default function App() {
   const [rcvType, setRcvType] = useState("PO Receipt");
   const [rcvNotes, setRcvNotes] = useState("");
   const [rcvPoAction, setRcvPoAction] = useState("received");
-  // Delete-blocked modal: shown when an item can't be deleted because of FK refs
-  const [deleteBlockedModal, setDeleteBlockedModal] = useState(null); // { itemId, itemName, refs: [...] } | null
   const [manualPOModal, setManualPOModal] = useState(false);
   const [manualPOForm, setManualPOForm] = useState({ vendor: "", notes: "" });
   const [manualPOLines, setManualPOLines] = useState([]);
@@ -751,12 +753,19 @@ export default function App() {
         } catch (seedErr) { console.warn("Auto-seed failed:", seedErr.message); }
       } else {
         const assemblyIds = new Set(dbBom.map((b) => b.assemblyId));
-        const rawMats = dbItems.filter((i) => !assemblyIds.has(i.id));
-        const asms = dbItems.filter((i) => assemblyIds.has(i.id)).map((a) => ({
+        // Split discontinued items into a separate bucket so they stay hidden
+        // from active lists/dropdowns. They're still in the DB so historical
+        // records (BOMs, runs, receipts) continue pointing to a valid row.
+        const activeItems = dbItems.filter(i => i.status !== "Discontinued");
+        const discontinued = dbItems.filter(i => i.status === "Discontinued").map(a => assemblyIds.has(a.id) ? {
+          ...a, bom: dbBom.filter(b => b.assemblyId === a.id).map(b => ({ partId: b.partId, qty: b.qty })),
+        } : a);
+        const rawMats = activeItems.filter((i) => !assemblyIds.has(i.id));
+        const asms = activeItems.filter((i) => assemblyIds.has(i.id)).map((a) => ({
           ...a,
           bom: dbBom.filter((b) => b.assemblyId === a.id).map((b) => ({ partId: b.partId, qty: b.qty })),
         }));
-        setParts(rawMats); setAssemblies(asms);
+        setParts(rawMats); setAssemblies(asms); setDiscontinuedItems(discontinued);
         if (dbVendors.length > 0) setVendors(dbVendors);
         if (dbOrders.length > 0) setOrders(dbOrders);
         if (dbPOs.length > 0) setPOs(dbPOs);
@@ -1884,26 +1893,21 @@ export default function App() {
     const matchedPO = pos.find(x => x.id === id);
 
     if (matchedItem) {
-      // Pre-flight: check for FK references that would block the DB delete.
+      // Items aren't hard-deleted — historical records (BOMs, receipts,
+      // production runs, orders) need a valid item to point to. Instead we
+      // mark the item as Discontinued so it disappears from active lists,
+      // dropdowns, and search. Reversible via the Discontinued panel.
       try {
-        const { hasRefs, refs } = await getItemReferences(id);
-        if (hasRefs) {
-          setDeleteBlockedModal({ itemId: id, itemName: matchedItem.name || id, refs });
-          return;
-        }
+        await discontinueItem(id);
       } catch (e) {
-        console.warn("Reference check failed:", e.message);
-        // Fall through and let the DB delete attempt — it'll throw a real error if blocked.
-      }
-      try {
-        await dbDeleteItem(id);
-      } catch (e) {
-        show(`Delete failed: ${e.message}`, "error");
+        show(`Discontinue failed: ${e.message}`, "error");
         return;
       }
+      const discontinued = { ...matchedItem, status: "Discontinued" };
       setParts((p) => p.filter((x) => x.id !== id));
       setAssemblies((p) => p.filter((x) => x.id !== id));
-      show("Deleted");
+      setDiscontinuedItems((p) => [...p.filter(x => x.id !== id), discontinued]);
+      show("Discontinued");
       return;
     }
 
@@ -4088,6 +4092,61 @@ export default function App() {
             <span>{viewItems.length} of {allItems.length} items</span>
             <span>{LEVEL_KEYS.map((k) => <span key={k} style={{ marginLeft: 12, color: LEVELS[k].color }}>{k}: {allItems.filter((i) => getLevel(i.id) === k).length}</span>)}</span>
           </div>
+        </div>
+      )}
+
+      {/* Discontinued items panel (Item Master only) — collapsible list of
+          soft-deleted items with a Restore button per row. */}
+      {tab === "items" && discontinuedItems.length > 0 && (
+        <div style={{ marginTop: 16, background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+          <div onClick={() => setShowDiscontinued(s => !s)} style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {showDiscontinued ? <ChevronDown size={14} style={{ color: "#888" }} /> : <ChevronRight size={14} style={{ color: "#888" }} />}
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#888" }}>Discontinued Items</span>
+            </div>
+            <span style={{ background: "#2a2a3a", color: "#aaa", padding: "2px 10px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{discontinuedItems.length}</span>
+          </div>
+          {showDiscontinued && (
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={TH}>ProductCode</th>
+                <th style={TH}>Name</th>
+                <th style={TH}>Level</th>
+                <th style={TH}>Category</th>
+                <th style={{ ...TH, textAlign: "right" }}>Action</th>
+              </tr></thead>
+              <tbody>
+                {discontinuedItems.map((p) => {
+                  const lvl = getLevel(p.id);
+                  return (
+                    <tr key={p.id} style={{ opacity: 0.75 }}>
+                      <td style={{ ...TD, fontFamily: "monospace", fontSize: 12, color: LEVELS[lvl]?.color || "#888" }}>{p.id}</td>
+                      <td style={{ ...TD, fontWeight: 500 }}>{p.name}</td>
+                      <td style={TD}><LevelBadge level={lvl} levels={LEVELS} /></td>
+                      <td style={{ ...TD, fontSize: 12, color: "#999" }}>{p.category}</td>
+                      <td style={{ ...TD, textAlign: "right" }}>
+                        {isAdmin && (
+                          <button
+                            onClick={async () => {
+                              try { await restoreItem(p.id); } catch (e) { show(`Restore failed: ${e.message}`, "error"); return; }
+                              setDiscontinuedItems(prev => prev.filter(x => x.id !== p.id));
+                              const restored = { ...p, status: "Active" };
+                              if (restored.bom && restored.bom.length > 0) setAssemblies(prev => [...prev, restored]);
+                              else setParts(prev => [...prev, restored]);
+                              show("Restored");
+                            }}
+                            style={{ background: "#22c55e22", color: "#22c55e", border: "1px solid #22c55e44", padding: "4px 12px", borderRadius: 6, fontSize: 12, cursor: "pointer", fontWeight: 600 }}
+                          >
+                            Restore
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 
@@ -7040,40 +7099,6 @@ export default function App() {
 
       {/* ================== MODALS ================== */}
 
-      {/* Delete-blocked modal: shown when an item can't be deleted because
-          it's still referenced by BOMs / orders / production / etc. */}
-      <Modal open={!!deleteBlockedModal} onClose={() => setDeleteBlockedModal(null)} title="Can't Delete">
-        {deleteBlockedModal && (<>
-          <div style={{ marginBottom: 14, color: "#e0e0e0", fontSize: 14 }}>
-            <span style={{ color: "#ef4444", fontWeight: 600 }}>{deleteBlockedModal.itemName}</span>
-            <span style={{ color: "#888" }}> ({deleteBlockedModal.itemId})</span>
-          </div>
-          <p style={{ color: "#ccc", fontSize: 13, lineHeight: 1.5, marginBottom: 14 }}>
-            This item can't be deleted because it's still referenced by other records.
-            Remove the references first, then try deleting again.
-          </p>
-          <div style={{ background: "#16161e", border: "1px solid #2a2a3a", borderRadius: 8, padding: 12, marginBottom: 16 }}>
-            {deleteBlockedModal.refs.map((r, i) => (
-              <div key={i} style={{ marginBottom: i < deleteBlockedModal.refs.length - 1 ? 10 : 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "#f59e0b", marginBottom: 4 }}>
-                  {r.kind} <span style={{ color: "#888", fontWeight: 400 }}>({r.count}{r.count >= 5 ? "+" : ""})</span>
-                </div>
-                {r.examples.length > 0 && (
-                  <div style={{ fontSize: 11, color: "#888", fontFamily: "monospace", lineHeight: 1.6 }}>
-                    {r.examples.slice(0, 5).map((ex, j) => (
-                      <div key={j}>· {String(ex)}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            <button onClick={() => setDeleteBlockedModal(null)} style={B1}>Got it</button>
-          </div>
-        </>)}
-      </Modal>
-
       {/* Unified Item Modal */}
       <Modal open={modal === "item"} onClose={() => setModal(null)} title={editItem ? "Edit Item" : "Create Item"} wide>
         {(() => {
@@ -7523,14 +7548,26 @@ export default function App() {
         )}
       </Modal>
 
-      {/* Delete Confirm */}
-      <Modal open={delConfirm !== null} onClose={() => setDelConfirm(null)} title="Confirm Delete">
-        <p style={{ color: "#ccc", margin: "0 0 20px", fontSize: 14 }}>Are you sure? This cannot be undone.</p>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button onClick={() => setDelConfirm(null)} style={B2}>Cancel</button>
-          <button onClick={() => { del(delConfirm); setDelConfirm(null); }} style={{ ...B1, background: "#dc2626" }}>Delete</button>
-        </div>
-      </Modal>
+      {/* Delete / Discontinue Confirm — items are soft-deleted (Discontinue),
+          orders/vendors/POs are still hard-deleted. */}
+      {(() => {
+        const isItem = delConfirm && (parts.some(x => x.id === delConfirm) || assemblies.some(x => x.id === delConfirm));
+        return (
+          <Modal open={delConfirm !== null} onClose={() => setDelConfirm(null)} title={isItem ? "Discontinue Item" : "Confirm Delete"}>
+            <p style={{ color: "#ccc", margin: "0 0 20px", fontSize: 14 }}>
+              {isItem
+                ? "This item will be marked Discontinued and hidden from active lists, dropdowns, and search. Historical records (BOMs, receipts, production runs, orders) will keep referencing it. You can restore it later from the Discontinued Items panel."
+                : "Are you sure? This cannot be undone."}
+            </p>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button onClick={() => setDelConfirm(null)} style={B2}>Cancel</button>
+              <button onClick={() => { del(delConfirm); setDelConfirm(null); }} style={{ ...B1, background: isItem ? "#f59e0b" : "#dc2626" }}>
+                {isItem ? "Discontinue" : "Delete"}
+              </button>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {/* Delete User Confirm */}
       <Modal open={delUserConfirm !== null} onClose={() => setDelUserConfirm(null)} title="Remove User">
