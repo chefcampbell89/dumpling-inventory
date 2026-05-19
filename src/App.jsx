@@ -1,4 +1,4 @@
-// APP VERSION: v169
+// APP VERSION: v170
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -4760,8 +4760,17 @@ export default function App() {
       {tab === "production" && (() => {
         const draftCount = prodRuns.filter(r => (r.status || "Complete") === "Draft").length;
         const completeCount = prodRuns.filter(r => (r.status || "Complete") === "Complete").length;
-        const filteredRuns = prodStatusFilter === "All" ? prodRuns
+        // Status filter first, then free-text search across run id, assembly id/name,
+        // lot #, notes, and dates so the top search bar actually does something here.
+        const statusFiltered = prodStatusFilter === "All" ? prodRuns
           : prodRuns.filter(r => (r.status || "Complete") === prodStatusFilter);
+        const s = search.trim().toLowerCase();
+        const filteredRuns = !s ? statusFiltered : statusFiltered.filter(r => {
+          return [
+            r.id, r.assemblyId, r.assemblyName, r.lotNumber, r.notes,
+            r.date, r.plannedDate, r.status, r.createdBy,
+          ].some(v => typeof v === "string" && v.toLowerCase().includes(s));
+        });
         const isDraft = (r) => (r.status || "Complete") === "Draft";
 
         return (
@@ -4787,7 +4796,10 @@ export default function App() {
               {filteredRuns.length === 0 ? (
                 <div style={{ padding: 40, textAlign: "center", color: "#555" }}>
                   <Hammer size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
-                  <p style={{ margin: 0 }}>No {prodStatusFilter !== "All" ? prodStatusFilter.toLowerCase() + " " : ""}production runs found.</p>
+                  <p style={{ margin: 0 }}>
+                    No {prodStatusFilter !== "All" ? prodStatusFilter.toLowerCase() + " " : ""}production runs
+                    {search ? <> matching <strong style={{ color: "#888" }}>"{search}"</strong></> : null}.
+                  </p>
                 </div>
               ) : (
                 <div style={{ overflowX: "auto" }}>
