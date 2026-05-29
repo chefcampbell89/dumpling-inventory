@@ -1,4 +1,4 @@
-// APP VERSION: v171
+// APP VERSION: v172
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -986,14 +986,12 @@ export default function App() {
           need -= take;
         }
       }
-      // How much of this line can't be covered by existing lots — that's what
-      // a backfill production would need to make up. (Non-lot-tracked items
-      // never need backfill.)
-      const allocatedAfterFIFO = allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
-      const shortfall = isLotTracked ? Math.max(0, remaining - allocatedAfterFIFO) : 0;
-      // Pre-compute a backfill chain for the shortfall qty; null if no path
-      // through existing lots exists (or if not lot-tracked / no shortage).
-      const backfillChain = (isLotTracked && shortfall > 0) ? findBackfillChain(line.item, shortfall) : null;
+      // Pre-compute a backfill chain for the FULL remaining qty on this fulfill
+      // session (not just the shortfall after FIFO). This way the option stays
+      // available even when existing lots could cover the line — the user
+      // might know those lots have been physically used in another shipment
+      // not yet recorded, and want to record a fresh production instead.
+      const backfillChain = isLotTracked ? findBackfillChain(line.item, remaining) : null;
       return {
         line,
         item,
@@ -1064,7 +1062,20 @@ export default function App() {
       for (let rowIdx = 0; rowIdx < rowsForUpdate.length; rowIdx += 1) {
         const row = rowsForUpdate[rowIdx];
         if (!row.backfill?.enabled || !row.backfillChain || !row.backfill.sourceLot) continue;
-        const chain = row.backfillChain;
+        // Compute actual shortfall NOW (may be less than what the chain was
+        // sized for if the user kept some FIFO allocations). Scale the chain
+        // proportionally. shortfall = 0 → skip backfill entirely.
+        const allocatedSoFar = row.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
+        const shortfall = Math.max(0, row.remaining - allocatedSoFar);
+        if (shortfall === 0) continue;
+        const baseChain = row.backfillChain;
+        const baseTop = baseChain[baseChain.length - 1];
+        const scale = baseTop.producedQty > 0 ? shortfall / baseTop.producedQty : 0;
+        const chain = baseChain.map(step => ({
+          ...step,
+          producedQty: step.producedQty * scale,
+          consumedQty: step.consumedQty * scale,
+        }));
         const inheritedLot = row.backfill.sourceLot;
         const runDate = row.backfill.date || todayLocal();
         // Validate deepest source has enough on hand
@@ -1131,10 +1142,9 @@ export default function App() {
           try { await createProductionRun(run); } catch (e) { console.warn("Prod save failed:", e.message); }
         }
         // After the chain finishes, the produced top-level item has a fresh lot
-        // entry in updLots. Add an allocation for the row's shortfall so Phase B
-        // sees it as a regular pre-allocated line.
-        const allocatedSoFar = row.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
-        const shortfall = Math.max(0, row.remaining - allocatedSoFar);
+        // entry in updLots. Add an allocation for the shortfall (computed above
+        // before scaling the chain) so Phase B sees it as a regular pre-
+        // allocated line.
         rowsForUpdate[rowIdx] = {
           ...row,
           allocations: [
@@ -7969,9 +7979,11 @@ export default function App() {
                           </button>
                         </div>
                       )}
-                      {/* Backfill production — shown if there's a viable chain
-                          through pre-existing lots and the row still has a
-                          shortfall after existing allocations. */}
+                      {/* Backfill production — always shown if a viable chain
+                          through pre-existing lots exists, even when current
+                          allocations could fulfill the line. The user may know
+                          existing on-hand has been physically used and want to
+                          record fresh production. */}
                       {row.isLotTracked && row.backfillChain && (() => {
                         const allocatedSoFar = row.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
                         const shortfall = Math.max(0, row.remaining - allocatedSoFar);
@@ -7980,16 +7992,34 @@ export default function App() {
                         const chain = row.backfillChain;
                         const deepest = chain[0];
                         const eligibleLots = deepest.eligibleLots || [];
-                        // Recompute shortfall-relative consumed qtys for the chain summary
-                        const scale = shortfall / row.backfillChain[row.backfillChain.length - 1].producedQty;
+                        // Scale chain numbers to actual shortfall for the preview.
+                        // (Chain was computed for row.remaining; if user has allocations
+                        // already, the actual production will be smaller.)
+                        const chainTop = chain[chain.length - 1];
+                        const scale = chainTop.producedQty > 0 ? shortfall / chainTop.producedQty : 0;
+                        const noShortfall = shortfall === 0;
                         return (
                           <div style={{ marginTop: 10, padding: "10px 12px", background: "#16161e", border: `1px solid ${bf.enabled ? "#6366f1aa" : "#2a2a3a"}`, borderRadius: 8 }}>
-                            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: bf.enabled ? "#a78bfa" : "#888", fontWeight: 600 }}>
-                              <input type="checkbox" checked={bf.enabled}
-                                onChange={(e) => updateFulfillBackfill(rowIdx, { enabled: e.target.checked })} />
-                              <Hammer size={13} /> Backfill production for shortfall of {shortfall} {row.item?.unit || ""}
-                              {shortfall <= 0 && <span style={{ color: "#666", fontWeight: 400, marginLeft: 4 }}>(no shortfall — fully covered by existing lots)</span>}
-                            </label>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: bf.enabled ? "#a78bfa" : "#888", fontWeight: 600 }}>
+                                <input type="checkbox" checked={bf.enabled}
+                                  onChange={(e) => updateFulfillBackfill(rowIdx, { enabled: e.target.checked })} />
+                                <Hammer size={13} /> Backfill production
+                                {bf.enabled && shortfall > 0 && <span style={{ color: "#888", fontWeight: 400, marginLeft: 4 }}>· will produce {shortfall} {row.item?.unit || ""}</span>}
+                                {bf.enabled && noShortfall && <span style={{ color: "#f59e0b", fontWeight: 400, marginLeft: 4 }}>· {`reduce other allocations above to produce > 0`}</span>}
+                              </label>
+                              {bf.enabled && allocatedSoFar > 0 && (
+                                <button onClick={() => {
+                                  // One-click switch from FIFO to backfill: clear existing
+                                  // allocations so the full row.remaining becomes shortfall
+                                  // and the backfill produces all of it.
+                                  setFulfillRows(prev => prev.map((r, i) => i === rowIdx ? { ...r, allocations: [] } : r));
+                                }} style={{ ...B2, fontSize: 10, padding: "3px 8px", color: "#f59e0b", borderColor: "#f59e0b44" }}
+                                  title="Clear FIFO allocations so the full line qty comes from a fresh backfill production">
+                                  Replace existing allocations
+                                </button>
+                              )}
+                            </div>
                             {bf.enabled && (
                               <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                                 <div>
@@ -8009,7 +8039,7 @@ export default function App() {
                                 </div>
                               </div>
                             )}
-                            {bf.enabled && (
+                            {bf.enabled && shortfall > 0 && (
                               <div style={{ marginTop: 10, padding: 10, background: "#1a1a2a", borderRadius: 6, fontSize: 11, color: "#a78bfa", fontFamily: "monospace" }}>
                                 <div style={{ fontSize: 10, color: "#666", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: "system-ui" }}>Production steps (deepest first)</div>
                                 {chain.map((step, si) => {
