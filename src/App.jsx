@@ -1,4 +1,4 @@
-// APP VERSION: v170
+// APP VERSION: v171
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -986,16 +986,38 @@ export default function App() {
           need -= take;
         }
       }
+      // How much of this line can't be covered by existing lots — that's what
+      // a backfill production would need to make up. (Non-lot-tracked items
+      // never need backfill.)
+      const allocatedAfterFIFO = allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
+      const shortfall = isLotTracked ? Math.max(0, remaining - allocatedAfterFIFO) : 0;
+      // Pre-compute a backfill chain for the shortfall qty; null if no path
+      // through existing lots exists (or if not lot-tracked / no shortage).
+      const backfillChain = (isLotTracked && shortfall > 0) ? findBackfillChain(line.item, shortfall) : null;
       return {
         line,
         item,
         isLotTracked,
         remaining,
         allocations,
+        backfillChain,
+        backfill: backfillChain ? {
+          enabled: false,
+          sourceLot: "",
+          date: line.shipDate || todayLocal(),
+        } : null,
       };
     });
     setFulfillRows(rows);
     setFulfillModal({ orderId: lines[0]?.id, lines: unshipped });
+  };
+
+  // Toggle / update the backfill subsection on a fulfill row.
+  const updateFulfillBackfill = (rowIdx, patch) => {
+    setFulfillRows(prev => prev.map((r, i) => {
+      if (i !== rowIdx || !r.backfill) return r;
+      return { ...r, backfill: { ...r.backfill, ...patch } };
+    }));
   };
 
   const updateFulfillAllocation = (rowIdx, allocIdx, patch) => {
@@ -1022,12 +1044,111 @@ export default function App() {
   // Save allocations + decrement lot inventory + decrement item.qty + mark
   // lines fulfilled. Lines that weren't fully allocated stay open (the order
   // group will read as "Partially Fulfilled" via computeGroupStatus).
+  //
+  // Backfill-at-ship: if a row has row.backfill.enabled, we first execute the
+  // backfill production chain (deepest-first) using the user-picked source lot
+  // and inheriting that lot # all the way up. Then we add a new allocation to
+  // the row pointing at the just-produced lot. Phase B (existing allocation
+  // logic) then runs against the post-backfill local mirrors.
   const confirmFulfillment = async () => {
     setFulfillSubmitting(true);
     try {
+      // Local mirrors. Everything mutates these; setState at the very end.
+      let updParts = [...parts];
+      let updAsm = [...assemblies];
+      const updLots = lots.map(l => ({ ...l }));
+      const newProdRuns = [];
+      let rowsForUpdate = [...fulfillRows];
+
+      // ==== PHASE A — Backfill production ====
+      for (let rowIdx = 0; rowIdx < rowsForUpdate.length; rowIdx += 1) {
+        const row = rowsForUpdate[rowIdx];
+        if (!row.backfill?.enabled || !row.backfillChain || !row.backfill.sourceLot) continue;
+        const chain = row.backfillChain;
+        const inheritedLot = row.backfill.sourceLot;
+        const runDate = row.backfill.date || todayLocal();
+        // Validate deepest source has enough on hand
+        const deepest = chain[0];
+        const srcLot = updLots.find(l => l.itemId === deepest.consumedId && l.lotNumber === inheritedLot);
+        if (!srcLot || srcLot.qty < deepest.consumedQty) {
+          throw new Error(`Backfill failed for ${row.item?.name || row.line.item}: lot ${inheritedLot} of ${deepest.consumedId} has ${srcLot?.qty || 0} on hand, need ${deepest.consumedQty}.`);
+        }
+        // Execute each step deepest-first. Each step produces `step.producedQty`
+        // of `step.producedId`, consuming its full BOM. The same-flavor primary
+        // is deducted specifically from `inheritedLot`; other lot-tracked
+        // components fall back to FIFO.
+        for (const step of chain) {
+          const stepItem = allItems.find(i => i.id === step.producedId);
+          if (!stepItem) throw new Error(`Backfill: assembly ${step.producedId} not found.`);
+          const consumed = [];
+          for (const bom of (stepItem.bom || [])) {
+            const cQty = bom.qty * step.producedQty;
+            const bomItem = allItems.find(i => i.id === bom.partId);
+            consumed.push({ partId: bom.partId, name: bomItem?.name || bom.partId, qty: cQty, unit: bomItem?.unit || "" });
+            // Deduct part / asm qty
+            const pi = updParts.findIndex(p => p.id === bom.partId);
+            if (pi >= 0) { updParts[pi] = { ...updParts[pi], qty: updParts[pi].qty - cQty }; try { await updateItemQty(bom.partId, updParts[pi].qty); } catch (e) { console.warn(e.message); } }
+            const ai = updAsm.findIndex(a => a.id === bom.partId);
+            if (ai >= 0) { updAsm[ai] = { ...updAsm[ai], qty: updAsm[ai].qty - cQty }; try { await updateItemQty(bom.partId, updAsm[ai].qty); } catch (e) { console.warn(e.message); } }
+            // Deduct lot
+            if (flavorOfId(bom.partId) === flavorOfId(step.producedId)) {
+              const lotRow = updLots.find(l => l.itemId === bom.partId && l.lotNumber === inheritedLot);
+              if (lotRow) {
+                lotRow.qty = Math.max(0, lotRow.qty - cQty);
+                try { await adjustLotQty(bom.partId, inheritedLot, -cQty, null, null); } catch (e) { console.warn("Lot deduct failed:", e.message); }
+              }
+            } else if (bomItem?.lotTracking) {
+              const candidates = updLots.filter(l => l.itemId === bom.partId && l.qty > 0).sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+              let remain = cQty;
+              for (const lot of candidates) {
+                if (remain <= 0) break;
+                const take = Math.min(lot.qty, remain);
+                lot.qty -= take;
+                remain -= take;
+                try { await adjustLotQty(bom.partId, lot.lotNumber, -take, null, null); } catch (e) { console.warn("Lot deduct failed:", e.message); }
+              }
+            }
+          }
+          // Add produced item to qty + lot
+          const prodAi = updAsm.findIndex(a => a.id === step.producedId);
+          if (prodAi >= 0) {
+            updAsm[prodAi] = { ...updAsm[prodAi], qty: updAsm[prodAi].qty + step.producedQty };
+            try { await updateItemQty(step.producedId, updAsm[prodAi].qty); } catch (e) { console.warn(e.message); }
+          }
+          const existingLot = updLots.find(l => l.itemId === step.producedId && l.lotNumber === inheritedLot);
+          if (existingLot) existingLot.qty += step.producedQty;
+          else updLots.push({ id: Date.now() + Math.random(), itemId: step.producedId, lotNumber: inheritedLot, qty: step.producedQty, productionDate: runDate, sourceRunId: null });
+          try { await adjustLotQty(step.producedId, inheritedLot, step.producedQty, runDate, null); } catch (e) { console.warn("Lot add failed:", e.message); }
+          // Create production_run record
+          const runId = `PROD-${runDate}-${String(prodRuns.length + newProdRuns.length + 1).padStart(3, "0")}`;
+          const run = {
+            id: runId, assemblyId: step.producedId, assemblyName: stepItem.name,
+            qtyProduced: step.producedQty, date: runDate, lotNumber: inheritedLot,
+            notes: `Backfill at ship time for order line ${row.line.id}`,
+            createdBy: profile?.email || "", consumed, status: "Complete",
+          };
+          newProdRuns.push({ ...run, createdAt: new Date().toISOString() });
+          try { await createProductionRun(run); } catch (e) { console.warn("Prod save failed:", e.message); }
+        }
+        // After the chain finishes, the produced top-level item has a fresh lot
+        // entry in updLots. Add an allocation for the row's shortfall so Phase B
+        // sees it as a regular pre-allocated line.
+        const allocatedSoFar = row.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
+        const shortfall = Math.max(0, row.remaining - allocatedSoFar);
+        rowsForUpdate[rowIdx] = {
+          ...row,
+          allocations: [
+            ...row.allocations,
+            { lotNumber: inheritedLot, qty: shortfall, productionDate: runDate, availableInLot: shortfall },
+          ],
+        };
+      }
+      if (newProdRuns.length > 0) setProdRuns(prev => [...newProdRuns, ...prev]);
+
+      // ==== PHASE B — Allocations + ship (existing logic, now reading from rowsForUpdate + updLots) ====
       const allocRowsToInsert = [];
       const lineUpdates = []; // { line, fullyAllocated }
-      for (const row of fulfillRows) {
+      for (const row of rowsForUpdate) {
         const totalAllocated = row.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
         const isFullyAllocated = totalAllocated >= row.line.qty;
         for (const alloc of row.allocations) {
@@ -1053,8 +1174,7 @@ export default function App() {
         setOrderLotAllocations(prev => [...prev, ...inserted]);
       }
 
-      // 2) Decrement inventory_lots qty
-      const updLots = [...lots];
+      // 2) Decrement inventory_lots qty (mutate updLots in place)
       for (const a of allocRowsToInsert) {
         const lot = updLots.find(l => l.itemId === a.itemId && l.lotNumber === a.lotNumber);
         if (lot) {
@@ -1065,17 +1185,20 @@ export default function App() {
       }
       setLots(updLots.filter(l => l.qty > 0));
 
-      // 3) Decrement item.qty for fully-allocated lines (matches old ship behavior)
+      // 3) Decrement item.qty for fully-allocated lines (matches old ship behavior).
+      //    Apply against the post-backfill local mirrors so we don't lose the
+      //    backfill's qty changes when setState fires.
       for (const u of lineUpdates) {
         if (!u.fullyAllocated) continue;
         const it = allItems.find(i => i.id === u.line.item);
         if (!it) continue;
-        const newQty = it.qty - u.line.qty;
-        const isPart = parts.some(p => p.id === it.id);
-        if (isPart) setParts(prev => prev.map(p => p.id === it.id ? { ...p, qty: newQty } : p));
-        else setAssemblies(prev => prev.map(a => a.id === it.id ? { ...a, qty: newQty } : a));
-        try { await updateItemQty(it.id, newQty); } catch (e) { console.warn("Qty update failed:", e.message); }
+        const pi = updParts.findIndex(p => p.id === it.id);
+        if (pi >= 0) { updParts[pi] = { ...updParts[pi], qty: updParts[pi].qty - u.line.qty }; try { await updateItemQty(it.id, updParts[pi].qty); } catch (e) { console.warn(e.message); } }
+        const ai = updAsm.findIndex(a => a.id === it.id);
+        if (ai >= 0) { updAsm[ai] = { ...updAsm[ai], qty: updAsm[ai].qty - u.line.qty }; try { await updateItemQty(it.id, updAsm[ai].qty); } catch (e) { console.warn(e.message); } }
       }
+      setParts(updParts);
+      setAssemblies(updAsm);
 
       // 4) Mark fully-allocated lines as Fulfilled
       for (const u of lineUpdates) {
@@ -1093,8 +1216,10 @@ export default function App() {
         const u = shippedLines[si];
         const it = allItems.find(i => i.id === u.line.item);
         const customer = u.line.customer || "?";
-        // Build receipt lines from the row's allocations so each lot is its own line.
-        const row = fulfillRows.find(r => r.line.id === u.line.id);
+        // Build receipt lines from the row's allocations so each lot is its own
+        // line. Use rowsForUpdate (post-backfill) so a backfill-produced lot
+        // shows up in the receipt's lot trace.
+        const row = rowsForUpdate.find(r => r.line.id === u.line.id);
         const allocLines = (row?.allocations || [])
           .filter(a => a.lotNumber && Number(a.qty) > 0)
           .map(a => ({
@@ -1238,6 +1363,54 @@ export default function App() {
     }
     return map;
   }, [lots]);
+
+  // ---- Backfill-production-at-ship-time helper ----
+  // Walks down the BOM from `itemId` looking for a chain of "produce X from Y"
+  // steps where the deepest source has an existing lot # with enough on-hand to
+  // cover production. Returns the chain (deepest-first) or null if no path
+  // through pre-existing lots exists.
+  //
+  // The "primary" BOM line at each level is the upstream component that shares
+  // the produced item's flavor prefix (e.g. 400-LG Pack → 300-LG Bin). This is
+  // the only path that preserves lot # identity. Non-flavor BOM lines (wrappers,
+  // labels, raw materials) are consumed normally during the run but don't carry
+  // a lot.
+  const flavorOfId = useCallback((id) => (id?.match(/^\d+-(\w+)/)?.[1] || ""), []);
+  const findBackfillChain = useCallback((itemId, qty) => {
+    const item = allItems.find(i => i.id === itemId);
+    if (!item || !item.bom || item.bom.length === 0) return null;
+    const flavor = flavorOfId(itemId);
+    if (!flavor) return null;
+    // Find the same-flavor BOM line (the "primary" lot-bearing upstream).
+    const primary = item.bom.find(b => flavorOfId(b.partId) === flavor);
+    if (!primary) return null;
+    const needed = primary.qty * qty;
+    // Are any existing lots of the primary big enough to supply this step?
+    const direct = (lotsByItem[primary.partId] || [])
+      .filter(l => l.qty >= needed)
+      .sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+    if (direct.length > 0) {
+      // Base case — deepest source. User picks one of these lots.
+      return [{
+        producedId: itemId, producedQty: qty,
+        consumedId: primary.partId, consumedQty: needed,
+        eligibleLots: direct,         // user-selectable at the deepest step only
+        inherited: false,
+      }];
+    }
+    // Recurse: try chasing further down through this primary.
+    const child = findBackfillChain(primary.partId, needed);
+    if (!child) return null;
+    return [
+      ...child,
+      {
+        producedId: itemId, producedQty: qty,
+        consumedId: primary.partId, consumedQty: needed,
+        eligibleLots: null,           // inherits from deepest step
+        inherited: true,
+      },
+    ];
+  }, [allItems, lotsByItem, flavorOfId]);
 
   // Allocations indexed by orderId for fast per-line/per-group lookups.
   const allocationsByOrder = useMemo(() => {
@@ -7702,7 +7875,16 @@ export default function App() {
           }).length;
           const noneCount = fulfillRows.filter(r => r.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0) === 0).length;
           const anyOverallocated = fulfillRows.some(r => r.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0) > r.line.qty);
-          const anyAllocated = fulfillRows.some(r => r.allocations.some(a => a.lotNumber && a.qty > 0));
+          // "Any allocated" enables the confirm button. A row that has the
+          // backfill subsection enabled + a source lot picked counts as
+          // allocated for this purpose — its allocation gets added inside
+          // confirmFulfillment Phase A.
+          const anyAllocated = fulfillRows.some(r =>
+            r.allocations.some(a => a.lotNumber && a.qty > 0) ||
+            (r.backfill?.enabled && r.backfill?.sourceLot)
+          );
+          // Also block submit if a backfill row is enabled without a source lot picked.
+          const backfillMissingSource = fulfillRows.some(r => r.backfill?.enabled && !r.backfill?.sourceLot);
           // Detect double-allocation: same lot used multiple times in same modal (legal but requires totals to fit lot avail)
           const lotUsage = new Map();
           for (const r of fulfillRows) {
@@ -7787,6 +7969,65 @@ export default function App() {
                           </button>
                         </div>
                       )}
+                      {/* Backfill production — shown if there's a viable chain
+                          through pre-existing lots and the row still has a
+                          shortfall after existing allocations. */}
+                      {row.isLotTracked && row.backfillChain && (() => {
+                        const allocatedSoFar = row.allocations.reduce((s, a) => s + (Number(a.qty) || 0), 0);
+                        const shortfall = Math.max(0, row.remaining - allocatedSoFar);
+                        const bf = row.backfill;
+                        if (!bf) return null;
+                        const chain = row.backfillChain;
+                        const deepest = chain[0];
+                        const eligibleLots = deepest.eligibleLots || [];
+                        // Recompute shortfall-relative consumed qtys for the chain summary
+                        const scale = shortfall / row.backfillChain[row.backfillChain.length - 1].producedQty;
+                        return (
+                          <div style={{ marginTop: 10, padding: "10px 12px", background: "#16161e", border: `1px solid ${bf.enabled ? "#6366f1aa" : "#2a2a3a"}`, borderRadius: 8 }}>
+                            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: bf.enabled ? "#a78bfa" : "#888", fontWeight: 600 }}>
+                              <input type="checkbox" checked={bf.enabled}
+                                onChange={(e) => updateFulfillBackfill(rowIdx, { enabled: e.target.checked })} />
+                              <Hammer size={13} /> Backfill production for shortfall of {shortfall} {row.item?.unit || ""}
+                              {shortfall <= 0 && <span style={{ color: "#666", fontWeight: 400, marginLeft: 4 }}>(no shortfall — fully covered by existing lots)</span>}
+                            </label>
+                            {bf.enabled && (
+                              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                <div>
+                                  <div style={{ fontSize: 10, color: "#888", marginBottom: 3, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Source Lot * (existing only)</div>
+                                  <select value={bf.sourceLot} onChange={(e) => updateFulfillBackfill(rowIdx, { sourceLot: e.target.value })} style={{ ...IS, fontSize: 12, width: "100%" }}>
+                                    <option value="">Select existing lot…</option>
+                                    {eligibleLots.map(l => (
+                                      <option key={l.lotNumber} value={l.lotNumber}>
+                                        Lot {padLotNumber(l.lotNumber)} — {l.qty} of {deepest.consumedId}{l.productionDate ? ` (made ${l.productionDate})` : ""}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <div style={{ fontSize: 10, color: "#888", marginBottom: 3, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Production Date</div>
+                                  <input type="date" value={bf.date} onChange={(e) => updateFulfillBackfill(rowIdx, { date: e.target.value })} style={{ ...IS, fontSize: 12, width: "100%" }} />
+                                </div>
+                              </div>
+                            )}
+                            {bf.enabled && (
+                              <div style={{ marginTop: 10, padding: 10, background: "#1a1a2a", borderRadius: 6, fontSize: 11, color: "#a78bfa", fontFamily: "monospace" }}>
+                                <div style={{ fontSize: 10, color: "#666", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: "system-ui" }}>Production steps (deepest first)</div>
+                                {chain.map((step, si) => {
+                                  const scaledProduced = Math.ceil(step.producedQty * scale * 1000) / 1000;
+                                  const scaledConsumed = Math.ceil(step.consumedQty * scale * 1000) / 1000;
+                                  return (
+                                    <div key={si} style={{ marginBottom: 2 }}>
+                                      {si + 1}. Produce <span style={{ color: "#22c55e" }}>{scaledProduced}</span> {step.producedId}
+                                      {" ← consume "}<span style={{ color: "#ef4444" }}>{scaledConsumed}</span> {step.consumedId}
+                                      {bf.sourceLot && <span style={{ color: "#fbbf24" }}> (lot {padLotNumber(bf.sourceLot)})</span>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })}
@@ -7801,8 +8042,9 @@ export default function App() {
               )}
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
                 <button onClick={() => { setFulfillModal(null); setFulfillRows([]); }} style={B2}>Cancel</button>
-                <button onClick={confirmFulfillment} disabled={fulfillSubmitting || !anyAllocated || anyOverallocated || overdrawnLots.length > 0}
-                  style={{ ...B1, background: fullyCount === fulfillRows.length ? "#22c55e" : "#f59e0b", color: "#000", opacity: (fulfillSubmitting || !anyAllocated || anyOverallocated || overdrawnLots.length > 0) ? 0.4 : 1 }}>
+                <button onClick={confirmFulfillment} disabled={fulfillSubmitting || !anyAllocated || anyOverallocated || overdrawnLots.length > 0 || backfillMissingSource}
+                  title={backfillMissingSource ? "Pick a source lot for each enabled backfill" : ""}
+                  style={{ ...B1, background: fullyCount === fulfillRows.length ? "#22c55e" : "#f59e0b", color: "#000", opacity: (fulfillSubmitting || !anyAllocated || anyOverallocated || overdrawnLots.length > 0 || backfillMissingSource) ? 0.4 : 1 }}>
                   {fulfillSubmitting ? <Loader2 size={14} className="spin" /> : <PackageCheck size={14} />}
                   {fullyCount === fulfillRows.length ? " Confirm & Mark Fulfilled" : " Confirm Partial Fulfillment"}
                 </button>
