@@ -1,4 +1,4 @@
-// APP VERSION: v172
+// APP VERSION: v173
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -1970,7 +1970,11 @@ export default function App() {
 
   const addLinesToOrder = (group) => {
     setEditItem(null);
-    setForm({ customer: group.customer, date: group.date, status: group.lines[0]?.status || "Pending", notes: "", orderType: group.orderType || group.lines[0]?.orderType || "" });
+    // Inherit the order's existing ship date so lines added after a ship date
+    // was set don't end up with shipDate=null (which would hide them from the
+    // dashboard's Outgoing Orders panel).
+    const groupShip = group.lines.find(l => l.shipDate)?.shipDate || null;
+    setForm({ customer: group.customer, date: group.date, status: group.lines[0]?.status || "Pending", notes: "", orderType: group.orderType || group.lines[0]?.orderType || "", shipDate: groupShip });
     setOrderLines([{ item: "", qty: 0, notes: "" }]);
     setModal("order");
   };
@@ -2084,7 +2088,9 @@ export default function App() {
           item: l.item,
           qty: Number(l.qty),
           notes: l.notes || "",
-          shipDate: null,
+          // Inherit the order group's ship date when adding to an existing order
+          // (form.shipDate is set by addLinesToOrder); null for a brand-new order.
+          shipDate: form.shipDate || null,
           orderType: form.orderType || null,
         }));
         for (const o of newOrders) {
@@ -3769,10 +3775,23 @@ export default function App() {
         const weekEndDate = addDays(planWeekMonday, 6); // Sunday
         const lineDollars = (o) => (o.qty || 0) * getUnitPrice(o.orderType, o.item);
         const isDone = (o) => o.status === "Fulfilled";
-        const weekOrders = orders.filter(o =>
-          o.status !== "Cancelled" &&
-          o.shipDate && o.shipDate >= planWeekMonday && o.shipDate <= weekEndDate
-        );
+        // Ship date may be set on only SOME lines of an order — e.g. it was set,
+        // then more lines were added later (those get shipDate=null). Resolve an
+        // effective ship date per order group (customer|||date) so every sibling
+        // line shares it; otherwise null-dated lines silently drop off this panel
+        // even though they belong to an order shipping this week.
+        const groupShipDate = {};
+        for (const o of orders) {
+          if (!o.shipDate) continue;
+          const key = `${o.customer}|||${o.date}`;
+          if (!groupShipDate[key] || o.shipDate < groupShipDate[key]) groupShipDate[key] = o.shipDate;
+        }
+        const effShipDate = (o) => o.shipDate || groupShipDate[`${o.customer}|||${o.date}`] || null;
+        const weekOrders = orders.filter(o => {
+          if (o.status === "Cancelled") return false;
+          const sd = effShipDate(o);
+          return sd && sd >= planWeekMonday && sd <= weekEndDate;
+        });
         const ordersByType = {};
         const typeTotals = {};
         for (const t of ORDER_TYPES) { ordersByType[t] = {}; typeTotals[t] = 0; }
