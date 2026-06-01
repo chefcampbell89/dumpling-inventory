@@ -1,4 +1,4 @@
-// APP VERSION: v173
+// APP VERSION: v174
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -649,6 +649,12 @@ export default function App() {
   const [grantedIdx, setGrantedIdx] = useState(0);
   const [allWishes, setAllWishes] = useState([]);
   const MAX_WISHES = 3;
+  // Per-user wish "baseline": the lifetime wish count at the moment an admin
+  // last refilled that user. Available wishes = MAX_WISHES - (lifetimeCount -
+  // baseline), clamped to [0, MAX_WISHES]. Refilling sets baseline = current
+  // lifetime count, giving a fresh 3 without ever exceeding 3 available.
+  // Stored in app_settings under "wish_baselines" as { [userId]: count }.
+  const [wishBaselines, setWishBaselines] = useState({});
 
   // ---- Planning / Forecast State ----
   const [forecastConfig, setForecastConfig] = useState({ horizonWeeks: 4, lookbackWeeks: 8, workDays: ["Mon","Tue","Wed","Thu","Fri"], mrpDemandLevels: [250] });
@@ -840,8 +846,13 @@ export default function App() {
   useEffect(() => {
     if (authUser) {
       countUserWishes(authUser.id).then(c => setWishesUsed(c)).catch(() => {});
+      getConfig("wish_baselines").then(r => { if (r) setWishBaselines(r); }).catch(() => {});
     }
   }, [authUser]);
+
+  // Wishes available to the CURRENT user, accounting for any admin refill.
+  const myWishBaseline = wishBaselines[authUser?.id] || 0;
+  const wishesRemaining = Math.max(0, Math.min(MAX_WISHES, MAX_WISHES - (wishesUsed - myWishBaseline)));
 
   // Admins: load all wishes on login so we can show a count badge on the
   // Admin Config tab when there are ungranted wishes waiting for review.
@@ -1528,28 +1539,68 @@ export default function App() {
     return d;
   }, [tab, parts, assemblies, search, levelFilter, stockFilter, sortCol, sortDir, bomCost, itemVendorsByItem]);
 
-  const viewOrders = useMemo(() => {
-    // Group orders by customer+date (orders from Google Forms share a group ID prefix)
-    if (!search) return orders;
-    const s = search.toLowerCase();
-    return orders.filter((o) => o.customer.toLowerCase().includes(s) || o.id.toLowerCase().includes(s) || o.status.toLowerCase().includes(s));
-  }, [orders, search]);
-
-  // Group orders by customer+date for display
+  // Group orders by customer+date for display. Search is GROUP-AWARE: if any
+  // line in an order matches, the whole order is shown (so you never see a
+  // partial order). Matches across customer, order id, status, type, order
+  // date, ship date, item SKU, resolved item name, qty, and notes.
   const groupedOrders = useMemo(() => {
-    const src = viewOrders;
     const groups = {};
-    for (const o of src) {
-      // Group by customer + date
+    for (const o of orders) {
       const key = `${o.customer}|||${o.date}`;
       if (!groups[key]) groups[key] = { customer: o.customer, date: o.date, lines: [], ids: [], orderType: o.orderType || null };
       groups[key].lines.push(o);
       groups[key].ids.push(o.id);
       if (o.orderType && !groups[key].orderType) groups[key].orderType = o.orderType;
     }
-    return Object.values(groups).sort((a, b) => b.date.localeCompare(a.date));
-  }, [viewOrders]);
-  const viewVendors = useMemo(() => { if (!search) return vendors; const s = search.toLowerCase(); return vendors.filter((v) => v.name.toLowerCase().includes(s)); }, [vendors, search]);
+    let arr = Object.values(groups);
+    if (search) {
+      const s = search.toLowerCase();
+      const lineMatches = (o) => {
+        const it = gi(o.item);
+        return (
+          (o.customer || "").toLowerCase().includes(s) ||
+          (o.id || "").toLowerCase().includes(s) ||
+          (o.status || "").toLowerCase().includes(s) ||
+          (o.orderType || "").toLowerCase().includes(s) ||
+          (o.date || "").toLowerCase().includes(s) ||
+          (o.shipDate || "").toLowerCase().includes(s) ||
+          (o.item || "").toLowerCase().includes(s) ||
+          (it?.name || "").toLowerCase().includes(s) ||
+          (o.notes || "").toLowerCase().includes(s) ||
+          String(o.qty ?? "").includes(s)
+        );
+      };
+      arr = arr.filter(g => (g.orderType || "").toLowerCase().includes(s) || g.lines.some(lineMatches));
+    }
+    return arr.sort((a, b) => b.date.localeCompare(a.date));
+  }, [orders, search, gi]);
+  const viewVendors = useMemo(() => {
+    if (!search) return vendors;
+    const s = search.toLowerCase();
+    return vendors.filter((v) =>
+      (v.name || "").toLowerCase().includes(s) ||
+      (v.contact || "").toLowerCase().includes(s) ||
+      (v.email || "").toLowerCase().includes(s) ||
+      (v.phone || "").toLowerCase().includes(s) ||
+      (v.paymentTerms || "").toLowerCase().includes(s) ||
+      (v.notes || "").toLowerCase().includes(s) ||
+      (v.id || "").toLowerCase().includes(s)
+    );
+  }, [vendors, search]);
+
+  // Group-aware PO search: id, vendor, status, dates, and line part id/name.
+  const viewPOs = useMemo(() => {
+    if (!search) return pos;
+    const s = search.toLowerCase();
+    return pos.filter((p) =>
+      (p.id || "").toLowerCase().includes(s) ||
+      (p.vendor || "").toLowerCase().includes(s) ||
+      (p.status || "").toLowerCase().includes(s) ||
+      (p.date || "").toLowerCase().includes(s) ||
+      (p.expectedDate || "").toLowerCase().includes(s) ||
+      (p.lines || []).some(l => (l.partId || "").toLowerCase().includes(s) || (l.name || "").toLowerCase().includes(s))
+    );
+  }, [pos, search]);
 
   // Order stats by group (not line items)
   const orderStats = useMemo(() => {
@@ -2206,7 +2257,7 @@ export default function App() {
 
   const submitWish = async () => {
     if (!wishText.trim()) { show("Tell the Genie your wish!", "error"); return; }
-    if (wishesUsed >= MAX_WISHES) { show("You have used all your wishes!", "error"); return; }
+    if (wishesRemaining <= 0) { show("You have used all your wishes! Ask an admin to grant you more.", "error"); return; }
     try {
       await createWish({ userId: authUser.id, userEmail: profile?.email || authUser.email, wish: wishText.trim() });
       setWishesUsed(prev => prev + 1);
@@ -3610,9 +3661,9 @@ export default function App() {
           {/* Golden Lamps */}
           <div style={{ display: "flex", gap: 2, alignItems: "center", marginRight: 4 }}>
             {[0, 1, 2].map(i => (
-              <GoldenLamp key={i} active={i >= wishesUsed} onClick={() => { setWishText(""); setWishModal(true); }} size={26} />
+              <GoldenLamp key={i} active={i < wishesRemaining} onClick={() => { setWishText(""); setWishModal(true); }} size={26} />
             ))}
-            <span style={{ fontSize: 10, color: "#b8860b", marginLeft: 4 }}>{Math.max(0, MAX_WISHES - wishesUsed)} wish{MAX_WISHES - wishesUsed !== 1 ? "es" : ""}</span>
+            <span style={{ fontSize: 10, color: "#b8860b", marginLeft: 4 }}>{wishesRemaining} wish{wishesRemaining !== 1 ? "es" : ""}</span>
           </div>
           <div style={{ height: 20, width: 1, background: "#333", margin: "0 4px" }} />
           <button onClick={() => { setImportOpen(true); setImportTab("items"); clearImportData(); setImportMode("update_add"); }} style={B2}><Upload size={14} /> Import Data</button>
@@ -4773,8 +4824,9 @@ export default function App() {
       {tab === "pos" && (
         <div>
           {pos.length === 0 ? <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: 40, textAlign: "center", color: "#555" }}><FileText size={32} style={{ marginBottom: 12, opacity: 0.4 }} /><p>No POs yet. Generate from Purchase Needs tab.</p></div> :
+           viewPOs.length === 0 ? <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: 40, textAlign: "center", color: "#555" }}><Search size={32} style={{ marginBottom: 12, opacity: 0.4 }} /><p>No POs match "{search}".</p></div> :
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {pos.map((po) => {
+              {viewPOs.map((po) => {
                 const exp = expanded[`po-${po.id}`];
                 return (
                   <div key={po.id} style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
@@ -7016,12 +7068,68 @@ export default function App() {
               {/* Wishes */}
               {cfgSection === "wishes" && (() => {
                 if (allWishes.length === 0) { fetchWishes().then(w => setAllWishes(w)).catch(() => {}); }
+                // Per-user wish usage for the allowance panel: count lifetime wishes
+                // per user, subtract their baseline, derive remaining (capped at 3).
+                const userWishStats = (() => {
+                  const byUser = {};
+                  for (const w of allWishes) {
+                    const uid = w.userId || "unknown";
+                    if (!byUser[uid]) byUser[uid] = { userId: uid, email: w.userEmail || uid, lifetime: 0 };
+                    byUser[uid].lifetime += 1;
+                    if (w.userEmail) byUser[uid].email = w.userEmail;
+                  }
+                  return Object.values(byUser).map(u => {
+                    const baseline = wishBaselines[u.userId] || 0;
+                    const used = Math.max(0, u.lifetime - baseline);
+                    const remaining = Math.max(0, Math.min(MAX_WISHES, MAX_WISHES - used));
+                    return { ...u, baseline, used, remaining };
+                  }).sort((a, b) => a.email.localeCompare(b.email));
+                })();
+                // Admin refill: set this user's baseline to their current lifetime
+                // count, so remaining resets to MAX_WISHES (never exceeds 3).
+                const refillWishes = async (userId) => {
+                  const stat = userWishStats.find(u => u.userId === userId);
+                  if (!stat) return;
+                  if (!window.confirm(`Grant ${stat.email} a fresh set of ${MAX_WISHES} wishes?`)) return;
+                  const next = { ...wishBaselines, [userId]: stat.lifetime };
+                  setWishBaselines(next);
+                  try { await saveConfig("wish_baselines", next); show(`${stat.email} now has ${MAX_WISHES} wishes`); }
+                  catch (e) { show(e.message, "error"); }
+                };
                 return (
                   <div>
                     <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>
                       <span style={{ marginRight: 8 }}>🧞</span>User Wishes
                     </h3>
-                    <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Feature requests from your team. Each user gets {MAX_WISHES} wishes.</p>
+                    <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Feature requests from your team. Each user gets {MAX_WISHES} wishes. Use “Grant {MAX_WISHES} more” to refill a user once their wishes have been built — they can never have more than {MAX_WISHES} available at once.</p>
+
+                    {/* Wish allowances by user */}
+                    {userWishStats.length > 0 && (
+                      <div style={{ background: "#16161e", borderRadius: 10, border: "1px solid #2a2a3a", padding: "12px 14px", marginBottom: 16 }}>
+                        <div style={{ fontSize: 11, color: "#888", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>Wish Allowances</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {userWishStats.map(u => (
+                            <div key={u.userId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "6px 0", borderBottom: "1px solid #1f1f2e" }}>
+                              <div style={{ fontSize: 13, color: "#e0e0e0" }}>{u.email}</div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                                <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+                                  {[0, 1, 2].map(i => (
+                                    <span key={i} style={{ fontSize: 14, opacity: i < u.remaining ? 1 : 0.25 }}>🪔</span>
+                                  ))}
+                                  <span style={{ fontSize: 11, color: "#888", marginLeft: 4 }}>{u.remaining} of {MAX_WISHES} left</span>
+                                </div>
+                                <button onClick={() => refillWishes(u.userId)}
+                                  disabled={u.remaining >= MAX_WISHES}
+                                  title={u.remaining >= MAX_WISHES ? "User already has the maximum available" : `Reset ${u.email} to ${MAX_WISHES} wishes`}
+                                  style={{ ...B2, fontSize: 11, padding: "4px 10px", opacity: u.remaining >= MAX_WISHES ? 0.4 : 1, color: "#fbbf24", borderColor: "#fbbf2444" }}>
+                                  Grant {MAX_WISHES} more
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     {allWishes.length === 0 ? (
                       <div style={{ padding: 40, textAlign: "center", color: "#555", background: "#16161e", borderRadius: 10 }}>
                         <div style={{ fontSize: 32, marginBottom: 8 }}>🧞</div>
@@ -8182,7 +8290,7 @@ export default function App() {
           <div style={{ fontSize: 48, marginBottom: 8 }}>🧞</div>
           <h2 style={{ margin: "0 0 4px", fontSize: 20, background: "linear-gradient(135deg, #fbbf24, #f59e0b)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>What do you wish for?</h2>
           <p style={{ color: "#888", fontSize: 12, margin: "0 0 20px" }}>
-            You have {MAX_WISHES - wishesUsed} wish{MAX_WISHES - wishesUsed !== 1 ? "es" : ""} remaining. Describe a feature or capability you would love to see.
+            You have {wishesRemaining} wish{wishesRemaining !== 1 ? "es" : ""} remaining. Describe a feature or capability you would love to see.
           </p>
           <textarea value={wishText} onChange={e => setWishText(e.target.value)} placeholder="I wish for..." rows={4} style={{ ...IS, resize: "vertical", fontSize: 14, lineHeight: 1.5, textAlign: "left" }} />
           <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 16 }}>
