@@ -23,6 +23,8 @@ Open project tasks/tickets live in [TASKS.md](TASKS.md). Read it at the start of
 - `src/App.jsx` — Main component with all UI & state (~3300 lines, v109)
 - `src/supabase.js` — Supabase client & all DB API functions (~460 lines, v100)
 - `src/main.jsx` — React entry point
+- `src/helpContent.js` — Knowledge base for the in-app Help Genie (pure data, no DB/network). **Edit this whenever app behavior changes** — see "Help Genie" below.
+- `src/GenieHelp.jsx` — Floating 🧞 help chat UI + client-side search engine (read-only, free)
 
 ## Commands
 
@@ -53,6 +55,18 @@ Required in `.env` or `.env.local` (never commit these):
 - Modal pattern for dialogs
 - Toast notifications for user feedback
 - No external UI component library — all custom
+
+### Help Genie (keep in sync)
+The in-app Help Genie (`src/helpContent.js` + `src/GenieHelp.jsx`) is a **free, static, read-only** help bot — a floating 🧞 in the lower-left. It does keyword/fuzzy retrieval over authored topics; it does **not** call an LLM or touch the database, and it cannot change anything. (A future Phase 2 will add a Claude Haiku conversational fallback; a separate use-case #2 admin "make-the-change" bot is still backlog — see [TASKS.md](TASKS.md).)
+
+**Because it's authored content, it goes stale unless maintained. Whenever you add, change, or remove a feature, tab, column, alert/badge, button, or workflow, update `src/helpContent.js` in the same change** so the genie stays accurate. Specifically:
+- **New tab/area:** add it to `CATEGORIES` and add topic(s) for it.
+- **Renamed/removed column, button, status, alert, or workflow:** update the affected topic's `answer`/`steps` text and `keywords`.
+- **Behavior change (e.g. what turns a row red, a new filter):** fix the relevant topic so the explanation matches reality.
+- Keep `keywords` rich with the words a user would actually type (synonyms included) — that drives search matching.
+- `answer` may be a string or a `(ctx) => string` function; `ctx` carries live state (`appName`, `isAdmin`, `lowStockCount`). Use the function form to inject real numbers or branch on admin.
+- Bump the `// HELP CONTENT VERSION` / `// GENIE HELP VERSION` comment when you edit those files, same as the App.jsx/supabase.js convention.
+- The genie must stay read-only: never give `GenieHelp` props or imports that mutate state or hit Supabase.
 
 ### Linting
 - ESLint 9 with react-hooks and react-refresh plugins

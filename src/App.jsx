@@ -1,4 +1,4 @@
-// APP VERSION: v176
+// APP VERSION: v177
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -29,6 +29,8 @@ import {
 } from "lucide-react";
 
 import { LineChart, Line, ResponsiveContainer, Tooltip as ChartTooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend } from "recharts";
+
+import GenieHelp from "./GenieHelp";
 
 // ============================================================
 // CONSTANTS
@@ -8352,6 +8354,9 @@ export default function App() {
           <button onClick={handleChangePassword} style={B1}>Update Password</button>
         </div>
       </Modal>
+
+      {/* Floating help genie (free, read-only) — visible on every tab once signed in */}
+      <GenieHelp ctx={{ appName, isAdmin, lowStockCount: stats.low }} />
 
       </div>
       </div>)}
