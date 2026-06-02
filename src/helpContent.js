@@ -1,4 +1,4 @@
-// HELP CONTENT VERSION: v1
+// HELP CONTENT VERSION: v2
 // ============================================================
 // Ops Genie — Static Help Knowledge Base
 // ============================================================
@@ -99,15 +99,15 @@ export const TOPICS = [
       "Weekly Outgoing Orders — orders shipping this week, grouped by customer and type, with estimated revenue.",
       "Demand Chart — a 13-week stacked bar chart of fulfilled dumpling orders by flavor.",
     ],
-    related: ["dashboard-week", "inventory-overview"],
+    related: ["dashboard-period", "revenue", "inventory-overview"],
   },
   {
-    id: "dashboard-week",
+    id: "dashboard-period",
     category: "dashboard",
-    title: "How do I change the week shown on the Dashboard?",
-    keywords: ["dashboard week", "change week", "week navigator", "previous week", "next week", "today button", "navigate weeks"],
-    answer: "Use the week navigator at the top of the weekly-orders section: the arrows move to the previous or next week, and the Today button jumps back to the current week. The production plan grid always shows a rolling 3-week view.",
-    related: ["dashboard-overview"],
+    title: "What time period does the Dashboard show?",
+    keywords: ["dashboard week", "change week", "which week", "time period", "this week", "rolling", "previous week", "next week", "navigate dashboard", "date range dashboard"],
+    answer: "The Dashboard is fixed to the current period — there's no week selector on it. The Production Plan shows a rolling 3-week view (this week plus the next two), and the Inventory-by-Flavor, POs Awaiting, and Weekly Outgoing Orders sections reflect the current week and live data. The demand chart covers the last 13 weeks. If you want to pick a specific week to plan, use the Planning tab, which does have a week navigator (‹ ›, Today).",
+    related: ["dashboard-overview", "planning-overview"],
   },
   {
     id: "dashboard-colors",
@@ -595,6 +595,19 @@ export const TOPICS = [
     keywords: ["csv", "export", "download", "spreadsheet", "export inventory", "excel"],
     answer: "Two places export CSV: the Inventory tab has an Export CSV button for the full item list (codes, names, costs, quantities, etc.), and the Transaction Log exports movements for a chosen date range. Files download straight to your computer.",
     related: ["log-export", "inventory-overview"],
+  },
+  {
+    id: "revenue",
+    category: "general",
+    title: "Where do I see sales / revenue?",
+    keywords: ["revenue", "sales", "money", "income", "how much did i sell", "sales last week", "total revenue", "earnings", "dollars", "sales figures", "weekly revenue"],
+    answer: "I can point you to where revenue lives, but I can't pull the figure itself — open one of these to read the actual number. Revenue is calculated as fulfilled order quantity × unit price, so prices must be set in the Admin Pricing Matrix for it to show. The three places to look:",
+    steps: [
+      "Performance tab — the weekly productivity table has a Revenue column showing revenue from orders fulfilled each week over the last 13 weeks. This is the best place to see a specific week like last week.",
+      "Dashboard — the Weekly Outgoing Orders section shows estimated revenue for orders shipping the current week.",
+      "Orders tab — the header tiles show Total Revenue across your orders.",
+    ],
+    related: ["performance-overview", "dashboard-overview", "admin-pricing"],
   },
   {
     id: "colors-general",
