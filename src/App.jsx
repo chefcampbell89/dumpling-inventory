@@ -1,4 +1,4 @@
-// APP VERSION: v175
+// APP VERSION: v176
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -5900,12 +5900,21 @@ export default function App() {
         for (const lh of laborHours) {
           laborByWeek[lh.weekStart] = { mfg: lh.manufacturingHours, allIn: lh.allInHours };
         }
+        // ---------- Revenue by ship-date week (fulfilled orders) ----------
+        const revenueByWeek = Array(weeks.length).fill(0);
+        for (const o of orders) {
+          if ((o.status || "").toLowerCase() !== "fulfilled") continue;
+          const wi = weekIndexFor(o.shipDate || o.date);
+          if (wi < 0) continue;
+          revenueByWeek[wi] += (Number(o.qty) || 0) * getUnitPrice(o.orderType, o.item);
+        }
         const productivityRows = weeks.map((w, i) => {
           const lh = laborByWeek[w.weekStart] || { mfg: 0, allIn: 0 };
           const dumplings = binProductionByWeek[i];
           return {
             ...w,
             dumplings,
+            revenue: revenueByWeek[i],
             mfgHours: lh.mfg || 0,
             allInHours: lh.allIn || 0,
             mfgRate: lh.mfg > 0 ? Math.round(dumplings / lh.mfg) : null,
@@ -6051,6 +6060,7 @@ export default function App() {
                     <tr style={{ background: "#16161e", color: "#888", fontSize: 10, textTransform: "uppercase" }}>
                       <th style={{ padding: "8px 10px", textAlign: "left" }}>Week</th>
                       <th style={{ padding: "8px 10px", textAlign: "right" }}>Dumplings Made</th>
+                      <th style={{ padding: "8px 10px", textAlign: "right", color: "#22c55e" }} title="Revenue from fulfilled orders shipped this week (qty × unit price)">Revenue</th>
                       <th style={{ padding: "8px 10px", textAlign: "right" }} title="Manufacturing hours: people making fill, batches, folding">Mfg Hrs</th>
                       <th style={{ padding: "8px 10px", textAlign: "right" }} title="All-in hours: manufacturing + packing, deliveries, etc.">All-In Hrs</th>
                       <th style={{ padding: "8px 10px", textAlign: "right", color: "#22c55e" }}>D/Hr Mfg</th>
@@ -6063,6 +6073,7 @@ export default function App() {
                       <tr key={row.weekStart} style={{ borderTop: "1px solid #2a2a3a" }}>
                         <td style={{ padding: "10px", color: "#e0e0e0" }}>{row.label} <span style={{ color: "#555", fontSize: 10 }}>({row.weekStart})</span></td>
                         <td style={{ padding: "10px", textAlign: "right", color: row.dumplings > 0 ? "#fbbf24" : "#555", fontWeight: 500 }}>{row.dumplings.toLocaleString()}</td>
+                        <td style={{ padding: "10px", textAlign: "right", color: row.revenue > 0 ? "#22c55e" : "#555", fontWeight: 500 }}>{row.revenue > 0 ? `$${Math.round(row.revenue).toLocaleString()}` : "—"}</td>
                         <td style={{ padding: "10px", textAlign: "right", color: row.mfgHours > 0 ? "#e0e0e0" : "#555" }}>{row.mfgHours || "—"}</td>
                         <td style={{ padding: "10px", textAlign: "right", color: row.allInHours > 0 ? "#e0e0e0" : "#555" }}>{row.allInHours || "—"}</td>
                         <td style={{ padding: "10px", textAlign: "right", color: row.mfgRate ? "#22c55e" : "#555", fontWeight: 600 }}>{row.mfgRate ? row.mfgRate.toLocaleString() : "—"}</td>
