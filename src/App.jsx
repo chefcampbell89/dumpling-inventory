@@ -1,4 +1,4 @@
-// APP VERSION: v174
+// APP VERSION: v175
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -2390,13 +2390,37 @@ export default function App() {
     } catch (e) { console.warn("Counter bump failed:", e.message); }
   }, [lotCounter]);
 
+  // Walk the consumption tree (respecting which sub-assemblies the user has
+  // unchecked) and return the shallowest lot-tracked item ACTUALLY being
+  // consumed. The produced item's lot # should inherit from what you really
+  // consume — e.g. if you uncheck "400 Pack" and consume "300 Bin" directly,
+  // the lot comes from the Bin, not the Pack.
+  const findConsumedLotSource = useCallback((bom) => {
+    if (!bom) return null;
+    for (const line of bom) {
+      const item = allItems.find(i => i.id === line.partId);
+      if (!item) continue;
+      if (prodConsume[item.id]) {
+        // Consumed as a whole unit — if it carries a lot, it's the source.
+        if (item.lotTracking || item.lotSource) return item;
+      } else if (item.bom && item.bom.length > 0) {
+        // Unchecked sub-assembly — descend into the components being consumed.
+        const found = findConsumedLotSource(item.bom);
+        if (found) return found;
+      }
+    }
+    return null;
+  }, [allItems, prodConsume]);
+
   const lotSourceItem = useMemo(() => {
     if (!prodAssemblyItem) return null;
     if (prodAssemblyItem.lotSource) return null; // Lot source items get manual entry
     const lvl = getLevel(prodAssemblyItem.id);
     if (lvl <= 200) return null; // 200-level = manual entry
-    return findLotSourceInBom(prodAssemblyItem.id, allItems);
-  }, [prodAssemblyItem, allItems]);
+    // Prefer the actual consumption selection; fall back to the static BOM walk
+    // (e.g. before prodConsume is initialized for this assembly).
+    return findConsumedLotSource(prodAssemblyItem.bom) || findLotSourceInBom(prodAssemblyItem.id, allItems);
+  }, [prodAssemblyItem, allItems, findConsumedLotSource]);
 
   // Get available lots from the lot source item only.
   // Includes both real inventory lots AND planned (Draft) production runs that
@@ -2439,6 +2463,10 @@ export default function App() {
   // When checking a sub-assembly, uncheck all its descendants
   // When unchecking a sub-assembly, check all its direct children
   const toggleConsume = (itemId) => {
+    // Changing what's consumed can change which item the lot # inherits from,
+    // so clear the lot selection to force a fresh pick from the correct source.
+    setProdLotNumber("");
+    setFreshLotNumber("");
     setProdConsume(prev => {
       const next = { ...prev };
       const wasChecked = !!prev[itemId];
