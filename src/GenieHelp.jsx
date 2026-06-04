@@ -1,21 +1,27 @@
-// GENIE HELP VERSION: v1
+// GENIE HELP VERSION: v2
 // ============================================================
-// Ops Genie — In-App Help Genie (free / static)
+// Ops Genie — In-App Help Genie (hybrid: free static + Haiku fallback)
 // ============================================================
 //
 // A floating genie chat in the lower-left that answers "how do I…"
 // and "why is this showing…" questions about the app.
 //
+// TWO LAYERS:
+//  1. Free static retrieval (this file + helpContent.js) answers
+//     confident keyword/fuzzy matches instantly, with no network call.
+//  2. When static search finds no good match, the question is sent to
+//     the /api/genie serverless endpoint, which asks Claude Haiku
+//     (cheap) using the same knowledge base as context.
+//
 // IMPORTANT — READ-ONLY BY DESIGN:
-//  This component only READS from helpContent.js and renders text.
-//  It has no Supabase access, no props that mutate app state, and
-//  no write path of any kind. It is structurally incapable of
-//  changing data, logic, or configuration. The paid "make changes"
+//  This component can only READ help content and DISPLAY text answers.
+//  It has no Supabase access and no props that mutate app state. The
+//  /api/genie endpoint it calls has no tools and no write path either —
+//  it can only return explanatory text. The paid "make changes"
 //  assistant is a separate, future, admin-only system.
 //
-// Matching is keyword/fuzzy retrieval over authored topics — not an
-// LLM. Live app state (low-stock count, admin flag, app name) is
-// passed in via `ctx` so authored answers can include real numbers.
+// Live app state (low-stock count, admin flag, app name) is passed in
+// via `ctx` so authored answers and the Haiku prompt reflect reality.
 // ============================================================
 
 import React, { useState, useMemo, useRef, useEffect } from "react";
@@ -165,6 +171,12 @@ export default function GenieHelp({ ctx }) {
   const [browseCat, setBrowseCat] = useState(null); // category id when browsing
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
+  const msgIdRef = useRef(0);
+  const nextId = () => (msgIdRef.current += 1);
+  // Mirror of messages so the async Haiku call can read current history
+  // without stale-closure issues.
+  const messagesRef = useRef([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   const liveMatches = useMemo(() => (query.trim() ? searchTopics(query).slice(0, 5) : []), [query]);
 
@@ -187,27 +199,66 @@ export default function GenieHelp({ ctx }) {
   );
 
   function pushTopic(topic) {
-    setMessages((m) => [...m, { from: "genie", kind: "topic", topicId: topic.id }]);
+    setMessages((m) => [...m, { id: nextId(), from: "genie", kind: "topic", topicId: topic.id }]);
     setBrowseCat(null);
   }
 
-  function submitQuery(text) {
+  // Build a short text-only history (user turns + prior AI answers) to give
+  // the Haiku endpoint conversational context for follow-ups.
+  function recentHistory() {
+    return messagesRef.current
+      .filter((m) => (m.from === "user" && m.kind === "text") || (m.from === "genie" && m.kind === "ai"))
+      .slice(-6)
+      .map((m) => ({ role: m.from === "user" ? "user" : "assistant", content: m.text }));
+  }
+
+  async function askGenie(question, history) {
+    const res = await fetch("/api/genie", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        history,
+        context: { appName: ctx.appName, isAdmin: !!ctx.isAdmin, lowStockCount: ctx.lowStockCount },
+      }),
+    });
+    if (!res.ok) throw new Error("genie http " + res.status);
+    const data = await res.json();
+    if (!data || !data.answer) throw new Error("genie no answer");
+    return data.answer;
+  }
+
+  async function submitQuery(text) {
     const q = (text != null ? text : query).trim();
     if (!q) return;
-    setMessages((m) => [...m, { from: "user", kind: "text", text: q }]);
+    setMessages((m) => [...m, { id: nextId(), from: "user", kind: "text", text: q }]);
     const results = searchTopics(q);
     setQuery("");
     setBrowseCat(null);
 
-    if (results.length === 0 || results[0].score < 3) {
-      setMessages((m) => [...m, { from: "genie", kind: "nomatch", suggestions: results.slice(0, 3).map((r) => r.topic.id) }]);
+    // Confident static match → free authored answer, no network call.
+    if (results.length > 0 && results[0].score >= 3) {
+      setMessages((m) => [
+        ...m,
+        { id: nextId(), from: "genie", kind: "topic", topicId: results[0].topic.id, alsoSee: results.slice(1, 4).map((r) => r.topic.id) },
+      ]);
       return;
     }
-    // Lead with the best match; offer the next couple as follow-ups.
-    setMessages((m) => [
-      ...m,
-      { from: "genie", kind: "topic", topicId: results[0].topic.id, alsoSee: results.slice(1, 4).map((r) => r.topic.id) },
-    ]);
+
+    // No good static match → ask Haiku. Show a thinking bubble, then replace it.
+    const history = recentHistory();
+    const loadingId = nextId();
+    setMessages((m) => [...m, { id: loadingId, from: "genie", kind: "loading" }]);
+    try {
+      const answer = await askGenie(q, history);
+      setMessages((m) => m.map((x) => (x.id === loadingId ? { ...x, kind: "ai", text: answer } : x)));
+    } catch {
+      // Endpoint unavailable (e.g. local `npm run dev` has no /api, or a network
+      // error) → fall back to the static closest-topics suggestion.
+      setMessages((m) =>
+        m.map((x) => (x.id === loadingId ? { ...x, kind: "nomatch", suggestions: results.slice(0, 3).map((r) => r.topic.id) } : x))
+      );
+    }
   }
 
   const categoryTopics = browseCat ? TOPICS.filter((t) => t.category === browseCat) : [];
@@ -251,7 +302,7 @@ export default function GenieHelp({ ctx }) {
               <div style={{ fontSize: 14, fontWeight: 700, background: "linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
                 {genieName}
               </div>
-              <div style={{ fontSize: 10, color: "#777" }}>Help &amp; how-to · free</div>
+              <div style={{ fontSize: 10, color: "#777" }}>Help &amp; how-to</div>
             </div>
             <button onClick={() => setOpen(false)} aria-label="Close" style={{ background: "none", border: "none", color: "#888", cursor: "pointer", padding: 4 }}>
               <X size={18} />
@@ -296,11 +347,33 @@ export default function GenieHelp({ ctx }) {
 
             {/* Conversation */}
             {messages.map((msg, i) => {
+              const key = msg.id ?? i;
               if (msg.from === "user") {
                 return (
-                  <div key={i} style={{ alignSelf: "flex-end", maxWidth: "85%", background: "#6366f1", color: "#fff", padding: "8px 12px", borderRadius: "14px 14px 4px 14px", fontSize: 13, lineHeight: 1.45 }}>
+                  <div key={key} style={{ alignSelf: "flex-end", maxWidth: "85%", background: "#6366f1", color: "#fff", padding: "8px 12px", borderRadius: "14px 14px 4px 14px", fontSize: 13, lineHeight: 1.45 }}>
                     {msg.text}
                   </div>
+                );
+              }
+              if (msg.kind === "loading") {
+                return (
+                  <GenieBubble key={key}>
+                    <span style={{ fontSize: 13, color: "#999" }}>
+                      Thinking<TypingDots />
+                    </span>
+                  </GenieBubble>
+                );
+              }
+              if (msg.kind === "ai") {
+                return (
+                  <GenieBubble key={key}>
+                    {String(msg.text).split("\n").filter((p) => p.trim() !== "").map((p, j) => (
+                      <p key={j} style={{ margin: j === 0 ? "0 0 8px" : "0 0 8px", fontSize: 13, lineHeight: 1.55, color: "#d8d8e0" }}>{p}</p>
+                    ))}
+                    <div style={{ marginTop: 2, fontSize: 10, color: "#666", display: "flex", alignItems: "center", gap: 4 }}>
+                      <Sparkles size={10} style={{ color: "#fbbf24" }} /> AI answer · double-check before acting
+                    </div>
+                  </GenieBubble>
                 );
               }
               if (msg.kind === "topic") {
@@ -308,7 +381,7 @@ export default function GenieHelp({ ctx }) {
                 if (!topic) return null;
                 const alsoSee = (msg.alsoSee || []).map(topicById).filter(Boolean);
                 return (
-                  <GenieBubble key={i}>
+                  <GenieBubble key={key}>
                     <AnswerBlock topic={topic} ctx={ctx} onPick={pushTopic} />
                     {alsoSee.length > 0 && (
                       <div style={{ marginTop: 8 }}>
@@ -326,9 +399,9 @@ export default function GenieHelp({ ctx }) {
               if (msg.kind === "nomatch") {
                 const sugg = (msg.suggestions || []).map(topicById).filter(Boolean);
                 return (
-                  <GenieBubble key={i}>
+                  <GenieBubble key={key}>
                     <p style={{ margin: "0 0 6px", fontSize: 13, lineHeight: 1.55, color: "#d8d8e0" }}>
-                      I don't have a saved answer for that one. Try rewording it, browse by area, or — for a brand-new capability — send it in as a wish (Sparkles menu) so the team can build it.
+                      I couldn't reach the assistant just now. Try rewording your question, browse by area below, or — for a brand-new capability — send it in as a wish (Sparkles menu) so the team can build it.
                     </p>
                     {sugg.length > 0 && (
                       <div style={{ marginTop: 6 }}>
@@ -389,6 +462,17 @@ export default function GenieHelp({ ctx }) {
         </div>
       )}
     </>
+  );
+}
+
+function TypingDots() {
+  return (
+    <span aria-hidden="true">
+      <style>{`@keyframes genieDot { 0%, 60%, 100% { opacity: 0.2; } 30% { opacity: 1; } }`}</style>
+      {[0, 1, 2].map((n) => (
+        <span key={n} style={{ animation: `genieDot 1.2s ${n * 0.2}s infinite` }}>.</span>
+      ))}
+    </span>
   );
 }
 
