@@ -28,6 +28,12 @@ import React, { useState, useMemo, useRef, useEffect } from "react";
 import { Sparkles, X, Search, ArrowLeft, Send } from "lucide-react";
 import { TOPICS, CATEGORIES } from "./helpContent";
 
+// Temporary: route every typed question to Haiku (skip the static-answer
+// short-circuit) so we can see the live model's answers. Flip back to true
+// to restore the free static-first behavior. Browse-by-area chips still use
+// the authored content.
+const STATIC_FIRST = false;
+
 // Words too common to be useful for matching.
 const STOP_WORDS = new Set([
   "the", "a", "an", "is", "are", "do", "does", "how", "what", "why", "i", "my",
@@ -222,9 +228,13 @@ export default function GenieHelp({ ctx }) {
         context: { appName: ctx.appName, isAdmin: !!ctx.isAdmin, lowStockCount: ctx.lowStockCount },
       }),
     });
-    if (!res.ok) throw new Error("genie http " + res.status);
+    if (!res.ok) {
+      let detail = "";
+      try { const e = await res.json(); detail = e?.error || ""; } catch { /* non-JSON body */ }
+      throw new Error(`HTTP ${res.status}${detail ? " — " + detail : ""}`);
+    }
     const data = await res.json();
-    if (!data || !data.answer) throw new Error("genie no answer");
+    if (!data || !data.answer) throw new Error("empty response");
     return data.answer;
   }
 
@@ -237,7 +247,8 @@ export default function GenieHelp({ ctx }) {
     setBrowseCat(null);
 
     // Confident static match → free authored answer, no network call.
-    if (results.length > 0 && results[0].score >= 3) {
+    // (Disabled while STATIC_FIRST is false so every question reaches Haiku.)
+    if (STATIC_FIRST && results.length > 0 && results[0].score >= 3) {
       setMessages((m) => [
         ...m,
         { id: nextId(), from: "genie", kind: "topic", topicId: results[0].topic.id, alsoSee: results.slice(1, 4).map((r) => r.topic.id) },
@@ -245,18 +256,18 @@ export default function GenieHelp({ ctx }) {
       return;
     }
 
-    // No good static match → ask Haiku. Show a thinking bubble, then replace it.
+    // Ask Haiku. Show a thinking bubble, then replace it.
     const history = recentHistory();
     const loadingId = nextId();
     setMessages((m) => [...m, { id: loadingId, from: "genie", kind: "loading" }]);
     try {
       const answer = await askGenie(q, history);
       setMessages((m) => m.map((x) => (x.id === loadingId ? { ...x, kind: "ai", text: answer } : x)));
-    } catch {
+    } catch (err) {
       // Endpoint unavailable (e.g. local `npm run dev` has no /api, or a network
-      // error) → fall back to the static closest-topics suggestion.
+      // error) → show the reason + the static closest-topics suggestion.
       setMessages((m) =>
-        m.map((x) => (x.id === loadingId ? { ...x, kind: "nomatch", suggestions: results.slice(0, 3).map((r) => r.topic.id) } : x))
+        m.map((x) => (x.id === loadingId ? { ...x, kind: "nomatch", detail: String(err?.message || err), suggestions: results.slice(0, 3).map((r) => r.topic.id) } : x))
       );
     }
   }
@@ -403,6 +414,11 @@ export default function GenieHelp({ ctx }) {
                     <p style={{ margin: "0 0 6px", fontSize: 13, lineHeight: 1.55, color: "#d8d8e0" }}>
                       I couldn't reach the assistant just now. Try rewording your question, browse by area below, or — for a brand-new capability — send it in as a wish (Sparkles menu) so the team can build it.
                     </p>
+                    {msg.detail && (
+                      <p style={{ margin: "0 0 6px", fontSize: 11, lineHeight: 1.4, color: "#ef9a9a", fontFamily: "monospace" }}>
+                        {msg.detail}
+                      </p>
+                    )}
                     {sugg.length > 0 && (
                       <div style={{ marginTop: 6 }}>
                         <div style={{ fontSize: 10, color: "#777", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 5 }}>Closest topics</div>
