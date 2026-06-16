@@ -1,4 +1,4 @@
-// APP VERSION: v177
+// APP VERSION: v179
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -4481,12 +4481,175 @@ export default function App() {
       {/* ================== ORDERS TABLE ================== */}
       {tab === "orders" && (
         <div>
-          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-            <Stat icon={<ShoppingCart size={18} />} label="Total Orders" value={orderStats.total} accent="#6366f1" />
-            <Stat icon={<ClipboardList size={18} />} label="Pending" value={orderStats.pending} accent="#f59e0b" />
-            <Stat icon={<PackageCheck size={18} />} label="Fulfilled" value={orderStats.fulfilled} accent="#22c55e" />
-            {orderStats.totalRevenue > 0 && <Stat icon={<DollarSign size={18} />} label="Total Revenue" value={`$${orderStats.totalRevenue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} accent="#22c55e" />}
-          </div>
+          {(() => {
+            // ===== On-Order Snapshot: finished-good type (rows) x flavor (cols) =====
+            // "On order" = any UNSHIPPED order: every status except Fulfilled and
+            // Cancelled (Pending, Confirmed, In Production, Partially Fulfilled, plus
+            // any custom intermediate status). Broader than the app-wide Pending/
+            // Confirmed "open" metric, so types stuck mid-fulfillment still appear.
+            const dpCache = {};
+            const dumplingsPer = (itemId) => {
+              if (dpCache[itemId] !== undefined) return dpCache[itemId];
+              const it = gi(itemId);
+              if (!it) return (dpCache[itemId] = 0);
+              if (it.piecesPerUnit > 0) return (dpCache[itemId] = it.piecesPerUnit);
+              if (!it.bom || it.bom.length === 0) return (dpCache[itemId] = 0);
+              let total = 0;
+              for (const b of it.bom) total += b.qty * dumplingsPer(b.partId);
+              return (dpCache[itemId] = total);
+            };
+            const flavorOf = (id) => { const m = (id || "").match(/^\d+-(\w+)/); return m ? m[1] : null; };
+            // Finished-good "type" = the item id with its "<level>-<flavor> " prefix
+            // stripped (e.g. 400-CB Food Service Case -> "Food Service Case").
+            const typeOf = (id) => {
+              const m = (id || "").match(/^\d+-\w+\s+(.+)$/);
+              return m ? m[1].trim() : (gi(id)?.name || id || "—");
+            };
+            const isOpen = (o) => o.status !== "Fulfilled" && o.status !== "Cancelled";
+            const openLines = orders.filter(isOpen);
+            const openOrderCount = new Set(openLines.map(o => `${o.customer}|||${o.date}`)).size;
+
+            const flavorSet = new Set();
+            const typeSet = new Set();
+            const cells = {}; // `${type}|||${flavor}` -> units on order
+            for (const o of openLines) {
+              const fl = flavorOf(o.item);
+              if (!fl) continue;
+              const ty = typeOf(o.item);
+              flavorSet.add(fl); typeSet.add(ty);
+              const k = `${ty}|||${fl}`;
+              cells[k] = (cells[k] || 0) + (Number(o.qty) || 0);
+            }
+            const flavorCols = [...flavorSet].sort();
+            const typeRows = [...typeSet].sort();
+
+            // Dumpling-level demand (on order) and in-stock supply, per flavor.
+            const onOrderDump = {};
+            for (const o of openLines) {
+              const fl = flavorOf(o.item);
+              if (!fl) continue;
+              onOrderDump[fl] = (onOrderDump[fl] || 0) + (Number(o.qty) || 0) * dumplingsPer(o.item);
+            }
+            const inStockDump = {};
+            for (const it of allItems) {
+              const fl = flavorOf(it.id);
+              if (!fl) continue;
+              const dp = dumplingsPer(it.id);
+              if (dp <= 0 || !(it.qty > 0)) continue;
+              inStockDump[fl] = (inStockDump[fl] || 0) + it.qty * dp;
+            }
+            // red = can't cover; yellow = covered but within 5%; green = >5% buffer.
+            const riskOf = (fl) => {
+              const need = Math.round(onOrderDump[fl] || 0);
+              const have = Math.round(inStockDump[fl] || 0);
+              if (need <= 0) return { lvl: "none", need, have };
+              if (have < need) return { lvl: "red", need, have };
+              if (have <= need * 1.05) return { lvl: "yellow", need, have };
+              return { lvl: "green", need, have };
+            };
+            const RISK = {
+              red:    { bg: "#2a1a1a", bd: "#ef444455", fg: "#ef4444", label: "Short" },
+              yellow: { bg: "#2a2a1a", bd: "#f59e0b55", fg: "#f59e0b", label: "Tight" },
+              green:  { bg: "#1a2a1a", bd: "#22c55e44", fg: "#22c55e", label: "OK" },
+              none:   { bg: "#16161e", bd: "#333",      fg: "#888",    label: "—" },
+            };
+
+            const totalOnOrderDump = Math.round(flavorCols.reduce((s, fl) => s + (onOrderDump[fl] || 0), 0));
+            const atRisk = flavorCols.filter(fl => { const l = riskOf(fl).lvl; return l === "red" || l === "yellow"; });
+            const redCount = flavorCols.filter(fl => riskOf(fl).lvl === "red").length;
+
+            const rowTotal = (ty) => flavorCols.reduce((s, fl) => s + (cells[`${ty}|||${fl}`] || 0), 0);
+            const colTotal = (fl) => typeRows.reduce((s, ty) => s + (cells[`${ty}|||${fl}`] || 0), 0);
+            const grandUnits = typeRows.reduce((s, ty) => s + rowTotal(ty), 0);
+
+            const stickyTH = { ...TH, position: "sticky", top: 0, background: "#1e1e2e", zIndex: 1 };
+            const footTD = { ...TD, background: "#16161e", borderTop: "1px solid #2a2a3a" };
+
+            return (
+              <div style={{ marginBottom: 16 }}>
+                {/* Summary cards */}
+                <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+                  <Stat icon={<ShoppingCart size={18} />} label="Open Orders" value={openOrderCount} accent="#ec4899" />
+                  <Stat icon={<span style={{ fontSize: 18 }}>&#129791;</span>} label="Dumplings On Order" value={totalOnOrderDump.toLocaleString()} accent="#f59e0b" />
+                  <Stat icon={<AlertTriangle size={18} />} label="Flavors At Risk" value={atRisk.length} accent={redCount > 0 ? "#ef4444" : atRisk.length > 0 ? "#f59e0b" : "#22c55e"} />
+                </div>
+
+                {/* Per-flavor risk chips */}
+                {flavorCols.length > 0 && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+                    {flavorCols.map(fl => {
+                      const r = riskOf(fl); const c = RISK[r.lvl];
+                      return (
+                        <div key={fl} title={`${fl}: ${r.need.toLocaleString()} dumplings on order vs ${r.have.toLocaleString()} in stock`}
+                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderRadius: 8, background: c.bg, border: `1px solid ${c.bd}` }}>
+                          <span style={{ fontWeight: 700, color: c.fg, fontSize: 13 }}>{fl}</span>
+                          <span style={{ fontSize: 11, color: "#aaa" }}>
+                            need <b style={{ color: "#ddd" }}>{r.need.toLocaleString()}</b> · have <b style={{ color: c.fg }}>{r.have.toLocaleString()}</b>
+                          </span>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: c.fg, textTransform: "uppercase", letterSpacing: "0.04em" }}>{c.label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Snapshot grid */}
+                <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", overflow: "hidden" }}>
+                  <div style={{ padding: "12px 16px", borderBottom: "1px solid #2a2a3a", fontSize: 13, fontWeight: 600, color: "#ccc", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>On Order — finished good × flavor</span>
+                    <span style={{ fontSize: 11, color: "#666", fontWeight: 400 }}>Unshipped orders · units</span>
+                  </div>
+                  {typeRows.length === 0 ? (
+                    <div style={{ padding: 28, textAlign: "center", color: "#555", fontSize: 13 }}>Nothing on order right now.</div>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                        <thead>
+                          <tr>
+                            <th style={{ ...stickyTH, textAlign: "left" }}>Finished Good</th>
+                            {flavorCols.map(fl => {
+                              const c = RISK[riskOf(fl).lvl];
+                              return <th key={fl} style={{ ...stickyTH, textAlign: "center", color: c.fg }}>{fl}</th>;
+                            })}
+                            <th style={{ ...stickyTH, textAlign: "right" }}>Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {typeRows.map(ty => (
+                            <tr key={ty}>
+                              <td style={{ ...TD, fontWeight: 600, color: "#e0e0e0" }}>{ty}</td>
+                              {flavorCols.map(fl => {
+                                const v = cells[`${ty}|||${fl}`] || 0;
+                                return <td key={fl} style={{ ...TD, textAlign: "center", color: v ? "#d0d0d0" : "#444" }}>{v ? v.toLocaleString() : "—"}</td>;
+                              })}
+                              <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: "#a78bfa" }}>{rowTotal(ty).toLocaleString()}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr>
+                            <td style={{ ...footTD, fontWeight: 700, color: "#ccc" }}>Total units</td>
+                            {flavorCols.map(fl => (
+                              <td key={fl} style={{ ...footTD, textAlign: "center", fontWeight: 700, color: "#ccc" }}>{colTotal(fl) ? colTotal(fl).toLocaleString() : "—"}</td>
+                            ))}
+                            <td style={{ ...footTD, textAlign: "right", fontWeight: 700, color: "#a78bfa" }}>{grandUnits.toLocaleString()}</td>
+                          </tr>
+                          <tr>
+                            <td style={{ ...footTD, borderTop: "none", fontWeight: 600, color: "#888" }}>Dumplings on order</td>
+                            {flavorCols.map(fl => {
+                              const c = RISK[riskOf(fl).lvl];
+                              return <td key={fl} style={{ ...footTD, borderTop: "none", textAlign: "center", fontWeight: 600, color: c.fg }}>{Math.round(onOrderDump[fl] || 0).toLocaleString()}</td>;
+                            })}
+                            <td style={{ ...footTD, borderTop: "none", textAlign: "right", fontWeight: 700, color: "#f59e0b" }}>{totalOnOrderDump.toLocaleString()}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {groupedOrders.length === 0 ? (
             <div style={{ background: "#1e1e2e", borderRadius: 10, border: "1px solid #2a2a3a", padding: 40, textAlign: "center", color: "#555" }}>

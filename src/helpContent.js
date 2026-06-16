@@ -1,4 +1,4 @@
-// HELP CONTENT VERSION: v2
+// HELP CONTENT VERSION: v4
 // ============================================================
 // Ops Genie — Static Help Knowledge Base
 // ============================================================
@@ -218,8 +218,16 @@ export const TOPICS = [
     category: "orders",
     title: "How do customer orders work?",
     keywords: ["orders", "customer order", "sales order", "create order", "order tab", "outgoing"],
-    answer: "The Orders tab tracks what customers want and how it's fulfilled. Orders are grouped into cards; each card has a customer, date, type (e.g. Wholesale / Retail / Food Service), status, and ship date, plus line items. The header tiles summarize total orders, pending, fulfilled, and total revenue.",
-    related: ["orders-add", "orders-fulfill", "orders-shipall"],
+    answer: "The Orders tab tracks what customers want and how it's fulfilled. Orders are grouped into cards; each card has a customer, date, type (e.g. Wholesale / Retail / Food Service), status, and ship date, plus line items. The top of the tab shows an On-Order Snapshot — see the \"On-Order Snapshot\" topic — instead of plain count tiles.",
+    related: ["orders-snapshot", "orders-add", "orders-fulfill", "orders-shipall"],
+  },
+  {
+    id: "orders-snapshot",
+    category: "orders",
+    title: "On-Order Snapshot (top of the Orders tab)",
+    keywords: ["on order", "on-order", "snapshot", "at risk", "short", "shortfall", "dumplings on order", "flavors at risk", "by flavor", "finished good", "open orders", "grid", "matrix", "tight"],
+    answer: "The top of the Orders tab shows a live snapshot of open demand — every unshipped order, i.e. any status except Fulfilled and Cancelled (Pending, Confirmed, In Production, Partially Fulfilled). Three cards summarize it: Open Orders, Dumplings On Order, and Flavors At Risk. Below them, per-flavor chips and a grid break it down — finished-good type (Pack, Food Service Case, Retail Case, Catering Tray, …) down the rows and dumpling flavor across the columns, with each cell showing the units on order. A footer row totals the units and the dumplings on order per flavor.\n\nRisk colors compare dumplings on order against what's in stock for that flavor: red = not enough inventory to cover the orders, yellow/Tight = covered but with less than a 5% cushion, green/OK = comfortable. (Stock is counted in dumplings by walking each item's recipe, so it matches the Dashboard's Dumplings-by-Flavor panel.)",
+    related: ["orders-overview", "dashboard-overview", "dashboard-colors"],
   },
   {
     id: "orders-add",
