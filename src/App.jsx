@@ -1,4 +1,4 @@
-// APP VERSION: v179
+// APP VERSION: v181
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -621,6 +621,7 @@ export default function App() {
   const [txExportTo, setTxExportTo] = useState("");
   const [delConfirm, setDelConfirm] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [importTab, setImportTab] = useState("items");
   const [importData, setImportData] = useState(null);
   const [importMapping, setImportMapping] = useState({});
@@ -3501,11 +3502,37 @@ export default function App() {
     setImportOpen(false); clearImportData();
   };
 
-  const exportCSV = () => {
-    const h = ["ProductCode", "Name", "Category", "Type", "CostingMethod", "DefaultLocation", "Supplier", "SupplierProductCode", "AverageCost", "DefaultUnitOfMeasure", "MinStock", "Qty", "Status"];
-    const rows = allItems.map((p) => [p.id, p.name, p.category, p.type, p.costing, p.location, p.supplier, p.supplierCode || "", p.avgCost, p.unit, p.minStock, p.qty, p.status || "Active"].map((v) => `"${v}"`).join(","));
-    const blob = new Blob([[h.join(","), ...rows].join("\n")], { type: "text/csv" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "inventory_export.csv"; a.click();
+  // Inventory CSV export in two shapes the user picks from the Export dropdown:
+  //   byLot=false -> one row per SKU (item totals; original format).
+  //   byLot=true  -> one row per lot for lot-tracked items, adding LotNumber, LotQty,
+  //                  ProductionDate and LotLocation columns. Items with no lots still
+  //                  export as a single blank-lot row; zero-qty lots are skipped.
+  // The item-level Qty column is present in both; in by-lot mode a SKU's LotQty values
+  // sum to its Qty.
+  const exportCSV = (byLot = false) => {
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const cols = ["ProductCode", "Name", "Category", "Type", "CostingMethod", "DefaultLocation", "Supplier", "SupplierProductCode", "AverageCost", "DefaultUnitOfMeasure", "MinStock", "Qty"];
+    const itemBase = (p) => [p.id, p.name, p.category, p.type, p.costing, p.location, p.supplier, p.supplierCode || "", p.avgCost, p.unit, p.minStock, p.qty];
+    const rows = [];
+    let header, filename;
+    if (byLot) {
+      header = [...cols, "LotNumber", "LotQty", "ProductionDate", "LotLocation", "Status"];
+      filename = "inventory_by_lot_export.csv";
+      for (const p of allItems) {
+        const base = itemBase(p);
+        const status = p.status || "Active";
+        const itemLots = (lotsByItem[p.id] || []).filter((l) => Number(l.qty) > 0);
+        if (itemLots.length === 0) rows.push([...base, "", "", "", "", status]);
+        else for (const lot of itemLots) rows.push([...base, lot.lotNumber || "", lot.qty, lot.productionDate || "", lot.location || "", status]);
+      }
+    } else {
+      header = [...cols, "Status"];
+      filename = "inventory_export.csv";
+      for (const p of allItems) rows.push([...itemBase(p), p.status || "Active"]);
+    }
+    const csv = [header, ...rows].map((r) => r.map(esc).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
     show("Exported");
   };
 
@@ -3697,7 +3724,31 @@ export default function App() {
           </div>
           <div style={{ height: 20, width: 1, background: "#333", margin: "0 4px" }} />
           <button onClick={() => { setImportOpen(true); setImportTab("items"); clearImportData(); setImportMode("update_add"); }} style={B2}><Upload size={14} /> Import Data</button>
-          <button onClick={exportCSV} style={B2}><Download size={14} /> Export</button>
+          <div style={{ position: "relative" }}>
+            <button onClick={() => setExportMenuOpen(o => !o)} style={B2} title="Export inventory to CSV"><Download size={14} /> Export <ChevronDown size={13} style={{ opacity: 0.6 }} /></button>
+            {exportMenuOpen && (
+              <>
+                <div style={{ position: "fixed", inset: 0, zIndex: 900 }} onClick={() => setExportMenuOpen(false)} />
+                <div style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, background: "#1e1e2e", border: "1px solid #333", borderRadius: 8, zIndex: 901, padding: 4, boxShadow: "0 8px 24px rgba(0,0,0,0.5)", minWidth: 230 }}>
+                  {[
+                    { byLot: false, title: "By SKU", sub: "One row per item (totals)" },
+                    { byLot: true, title: "By SKU + Lot #", sub: "One row per lot, adds lot columns" },
+                  ].map((opt) => (
+                    <button
+                      key={opt.title}
+                      onClick={() => { setExportMenuOpen(false); exportCSV(opt.byLot); }}
+                      style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 10px", background: "none", border: "none", borderRadius: 4, cursor: "pointer", color: "#ddd" }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "#2a2a3a")}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                    >
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{opt.title}</div>
+                      <div style={{ fontSize: 11, color: "#888", marginTop: 1 }}>{opt.sub}</div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           <div style={{ height: 20, width: 1, background: "#333", margin: "0 4px" }} />
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ fontSize: 12, color: "#888", textAlign: "right" }}>
