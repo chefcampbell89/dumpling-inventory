@@ -1,4 +1,4 @@
-// HELP CONTENT VERSION: v6
+// HELP CONTENT VERSION: v7
 // ============================================================
 // Ops Genie — Static Help Knowledge Base
 // ============================================================
@@ -601,7 +601,7 @@ export const TOPICS = [
     category: "general",
     title: "How do I export data to CSV?",
     keywords: ["csv", "export", "download", "spreadsheet", "export inventory", "excel", "lot", "lot number", "lot column", "per lot", "lot rows"],
-    answer: "Two places export CSV: the Inventory tab's Export button and the Transaction Log's date-range export. The Inventory Export button opens a small menu with two choices — 'By SKU' gives one row per item (the plain list: codes, names, costs, quantities), and 'By SKU + Lot #' breaks lot-tracked items out to one row per lot, adding LotNumber, LotQty, ProductionDate, and LotLocation columns (items with no lots still export as a single row, and each SKU's LotQty values sum to its Qty). The Transaction Log exports inventory movements for a chosen date range. Files download straight to your computer.",
+    answer: "Two places export CSV: the Inventory tab's Export button and the Transaction Log's date-range export. The Inventory Export button opens a small menu with two choices — 'By SKU' gives one row per item where Qty is the item total (the plain list: codes, names, costs, quantities), and 'By SKU + Lot #' breaks lot-tracked items out to one row per lot where the Qty column shows that lot's own quantity, plus LotNumber, ProductionDate, and LotLocation columns identifying the lot (items with no lots export as a single row with the item Qty). The Transaction Log exports inventory movements for a chosen date range. Files download straight to your computer.",
     related: ["log-export", "inventory-overview"],
   },
   {

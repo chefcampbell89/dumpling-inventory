@@ -1,4 +1,4 @@
-// APP VERSION: v181
+// APP VERSION: v182
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -3503,32 +3503,33 @@ export default function App() {
   };
 
   // Inventory CSV export in two shapes the user picks from the Export dropdown:
-  //   byLot=false -> one row per SKU (item totals; original format).
-  //   byLot=true  -> one row per lot for lot-tracked items, adding LotNumber, LotQty,
-  //                  ProductionDate and LotLocation columns. Items with no lots still
-  //                  export as a single blank-lot row; zero-qty lots are skipped.
-  // The item-level Qty column is present in both; in by-lot mode a SKU's LotQty values
-  // sum to its Qty.
+  //   byLot=false -> one row per SKU; Qty = item total (original format).
+  //   byLot=true  -> one row per lot for lot-tracked items; the Qty column holds THAT
+  //                  lot's quantity (not the SKU total), plus LotNumber, ProductionDate
+  //                  and LotLocation columns. Items with no lots export as one row with
+  //                  the item Qty and blank lot fields; zero-qty lots are skipped.
   const exportCSV = (byLot = false) => {
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const cols = ["ProductCode", "Name", "Category", "Type", "CostingMethod", "DefaultLocation", "Supplier", "SupplierProductCode", "AverageCost", "DefaultUnitOfMeasure", "MinStock", "Qty"];
-    const itemBase = (p) => [p.id, p.name, p.category, p.type, p.costing, p.location, p.supplier, p.supplierCode || "", p.avgCost, p.unit, p.minStock, p.qty];
+    // Columns through MinStock; Qty is appended per row so it can hold either the item
+    // total (By SKU / no-lot rows) or the individual lot qty (by-lot rows).
+    const cols = ["ProductCode", "Name", "Category", "Type", "CostingMethod", "DefaultLocation", "Supplier", "SupplierProductCode", "AverageCost", "DefaultUnitOfMeasure", "MinStock"];
+    const itemHead = (p) => [p.id, p.name, p.category, p.type, p.costing, p.location, p.supplier, p.supplierCode || "", p.avgCost, p.unit, p.minStock];
     const rows = [];
     let header, filename;
     if (byLot) {
-      header = [...cols, "LotNumber", "LotQty", "ProductionDate", "LotLocation", "Status"];
+      header = [...cols, "Qty", "LotNumber", "ProductionDate", "LotLocation", "Status"];
       filename = "inventory_by_lot_export.csv";
       for (const p of allItems) {
-        const base = itemBase(p);
+        const head = itemHead(p);
         const status = p.status || "Active";
         const itemLots = (lotsByItem[p.id] || []).filter((l) => Number(l.qty) > 0);
-        if (itemLots.length === 0) rows.push([...base, "", "", "", "", status]);
-        else for (const lot of itemLots) rows.push([...base, lot.lotNumber || "", lot.qty, lot.productionDate || "", lot.location || "", status]);
+        if (itemLots.length === 0) rows.push([...head, p.qty, "", "", "", status]);
+        else for (const lot of itemLots) rows.push([...head, lot.qty, lot.lotNumber || "", lot.productionDate || "", lot.location || "", status]);
       }
     } else {
-      header = [...cols, "Status"];
+      header = [...cols, "Qty", "Status"];
       filename = "inventory_export.csv";
-      for (const p of allItems) rows.push([...itemBase(p), p.status || "Active"]);
+      for (const p of allItems) rows.push([...itemHead(p), p.qty, p.status || "Active"]);
     }
     const csv = [header, ...rows].map((r) => r.map(esc).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
