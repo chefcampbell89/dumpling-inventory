@@ -1,4 +1,4 @@
-// HELP CONTENT VERSION: v7
+// HELP CONTENT VERSION: v8
 // ============================================================
 // Ops Genie — Static Help Knowledge Base
 // ============================================================
@@ -241,8 +241,8 @@ export const TOPICS = [
     id: "orders-fulfill",
     category: "orders",
     title: "How do I fulfill / ship an order?",
-    keywords: ["fulfill order", "ship order", "mark fulfilled", "allocate lots", "complete order", "shipped", "lot allocation"],
-    answer: "Change a line's status to Fulfilled (or use Ship All on the card to do every open line at once). For lot-tracked items this opens a lot-allocation step where you pick which lots the shipment draws from — that's what makes recall traceability possible. A partly shipped order shows an amber \"Partial (X/Y)\" indicator.",
+    keywords: ["fulfill order", "ship order", "mark fulfilled", "allocate lots", "complete order", "shipped", "lot allocation", "multiple lots", "split lot", "two lots", "make from bin", "produce at shipment"],
+    answer: "Change a line's status to Fulfilled (or use Ship All on the card to do every open line at once). For lot-tracked items this opens a lot-allocation step. For each line you pick the exact lot(s) that ship — click \"Add lot\" to split one line across several lots. Each lot dropdown offers both existing finished-good lots (\"in stock\") and the flavor's source/bin lots to produce from at ship time (\"make from …\"); nothing is pre-filled, so you always confirm what actually went out. Pulling a bit more than a lot's recorded (approximate) count shows a warning but still lets you ship. This lot-to-order record is what makes recall traceability possible. A partly shipped order shows an amber \"Partial (X/Y)\" indicator.",
     related: ["orders-shipall", "lot-what", "lottracking-overview"],
   },
   {
