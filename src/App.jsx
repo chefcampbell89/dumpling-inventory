@@ -1,4 +1,4 @@
-// APP VERSION: v183
+// APP VERSION: v184
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -676,6 +676,9 @@ export default function App() {
   const [planLoading, setPlanLoading] = useState(false);
   // Production tab: status filter + draft modals
   const [prodStatusFilter, setProdStatusFilter] = useState("All");
+  // Production Log column sort (independent of the inventory table's sortCol).
+  const [prodSortCol, setProdSortCol] = useState("date");
+  const [prodSortDir, setProdSortDir] = useState("desc");
   const [completeDraftModal, setCompleteDraftModal] = useState(false);
   const [draftToComplete, setDraftToComplete] = useState(null);
   const [editDraftModal, setEditDraftModal] = useState(false);
@@ -3767,7 +3770,15 @@ export default function App() {
         {tab === "vendors" && <button onClick={() => openAdd("vendor")} style={B1}><Plus size={14} /> Vendor</button>}
         {tab === "receiving" && <button onClick={openReceiveManual} style={B1}><Plus size={14} /> Manual Receipt</button>}
         {tab === "pos" && <button onClick={openManualPO} style={B1}><Plus size={14} /> Create PO</button>}
-        {tab === "production" && <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setFreshLotNumber(""); setProdDate(fmtDate(new Date())); setProdModal(true); }} style={B1}><Hammer size={14} /> Manual Production Entry</button>}
+        {tab === "production" && <>
+          <MultiSelectDropdown
+            placeholder="All Levels"
+            options={[200, 250, 300, 400, 500].map(k => ({ value: k, label: LEVELS[k]?.label || String(k), color: LEVELS[k]?.color }))}
+            selected={levelFilter}
+            onChange={setLevelFilter}
+          />
+          <button onClick={() => { setProdAssembly(""); setProdQty(1); setProdNotes(""); setProdConsume({}); setProdLotNumber(""); setFreshLotNumber(""); setProdDate(fmtDate(new Date())); setProdModal(true); }} style={B1}><Hammer size={14} /> Manual Production Entry</button>
+        </>}
       </div>}
 
       {/* ================== DASHBOARD ================== */}
@@ -5224,17 +5235,42 @@ export default function App() {
       {tab === "production" && (() => {
         const draftCount = prodRuns.filter(r => (r.status || "Complete") === "Draft").length;
         const completeCount = prodRuns.filter(r => (r.status || "Complete") === "Complete").length;
-        // Status filter first, then free-text search across run id, assembly id/name,
-        // lot #, notes, and dates so the top search bar actually does something here.
+        // Status filter → SKU-level filter → free-text search → column sort.
         const statusFiltered = prodStatusFilter === "All" ? prodRuns
           : prodRuns.filter(r => (r.status || "Complete") === prodStatusFilter);
+        const levelFiltered = levelFilter.length === 0 ? statusFiltered
+          : statusFiltered.filter(r => levelFilter.includes(getLevel(r.assemblyId)));
         const s = search.trim().toLowerCase();
-        const filteredRuns = !s ? statusFiltered : statusFiltered.filter(r => {
+        const searchedRuns = !s ? levelFiltered : levelFiltered.filter(r => {
           return [
             r.id, r.assemblyId, r.assemblyName, r.lotNumber, r.notes,
             r.date, r.plannedDate, r.status, r.createdBy,
           ].some(v => typeof v === "string" && v.toLowerCase().includes(s));
         });
+        // Sort. Numeric for qty; string localeCompare otherwise. Falls back to
+        // run date so ties are stable-ish.
+        const prodSortVal = (r) => {
+          switch (prodSortCol) {
+            case "id": return r.id || "";
+            case "status": return (r.status || "Complete");
+            case "planned": return r.plannedDate || "";
+            case "date": return r.date || "";
+            case "assembly": return r.assemblyName || r.assemblyId || "";
+            case "lot": return padLotNumber(r.lotNumber || "");
+            case "qty": return Number(r.qtyProduced) || 0;
+            default: return r.date || "";
+          }
+        };
+        const filteredRuns = [...searchedRuns].sort((a, b) => {
+          const av = prodSortVal(a), bv = prodSortVal(b);
+          const dir = prodSortDir === "asc" ? 1 : -1;
+          if (typeof av === "number" && typeof bv === "number") return dir * (av - bv);
+          return dir * String(av).localeCompare(String(bv));
+        });
+        const toggleProdSort = (col) => {
+          if (prodSortCol === col) setProdSortDir(d => d === "asc" ? "desc" : "asc");
+          else { setProdSortCol(col); setProdSortDir(col === "qty" ? "desc" : "asc"); }
+        };
         const isDraft = (r) => (r.status || "Complete") === "Draft";
 
         return (
@@ -5269,7 +5305,21 @@ export default function App() {
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 800 }}>
                     <thead><tr>
-                      {["Run ID", "Status", "Planned", "Date", "Assembly", "Lot #", "Qty", "Consumed", "Actions"].map(h => <th key={h} style={TH}>{h}</th>)}
+                      {[
+                        { l: "Run ID", k: "id" }, { l: "Status", k: "status" }, { l: "Planned", k: "planned" },
+                        { l: "Date", k: "date" }, { l: "Assembly", k: "assembly" }, { l: "Lot #", k: "lot" },
+                        { l: "Qty", k: "qty" }, { l: "Consumed", k: null }, { l: "Actions", k: null },
+                      ].map(h => (
+                        <th key={h.l} style={{ ...TH, cursor: h.k ? "pointer" : "default", userSelect: "none" }}
+                          onClick={() => { if (h.k) toggleProdSort(h.k); }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            {h.l}
+                            {h.k && (prodSortCol === h.k
+                              ? (prodSortDir === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />)
+                              : <ArrowUpDown size={12} style={{ opacity: 0.3 }} />)}
+                          </div>
+                        </th>
+                      ))}
                     </tr></thead>
                     <tbody>
                       {filteredRuns.map(r => {
