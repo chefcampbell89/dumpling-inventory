@@ -1,4 +1,4 @@
-// APP VERSION: v185
+// APP VERSION: v184
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -61,22 +61,6 @@ const DEFAULT_COSTING = ["FIFO", "FEFO - Batch"];
 const DEFAULT_PO_STATUSES = ["Draft", "Sent", "Confirmed", "Received", "Cancelled"];
 const DEFAULT_ORD_STATUSES = ["Pending", "Confirmed", "In Production", "Partially Fulfilled", "Fulfilled", "Cancelled"];
 const DEFAULT_ORDER_TYPES = ["Wholesale", "Retail", "Food Service"];
-
-// --- Auto-tag orders by ID prefix ---
-// Orders pulled in from a Google Form get an ID prefixed with a per-form code by
-// that form's Apps Script (e.g. "NYR-2026-07-20-3"). Manually-created orders are
-// "ORD-001" etc., so the prefixes never collide. Admins map a prefix to an order
-// type in Admin → Order Types; any order whose ID starts with that prefix is
-// auto-assigned the type. Pure app-side — no DB column, no script changes.
-function orderTypeFromId(orderId, prefixMap) {
-  if (!orderId || !prefixMap) return "";
-  const id = String(orderId).toUpperCase();
-  for (const type of Object.keys(prefixMap)) {
-    const prefix = String(prefixMap[type] || "").trim().toUpperCase();
-    if (prefix && id.startsWith(prefix)) return type;
-  }
-  return "";
-}
 const DEFAULT_RECEIPT_TYPES = ["PO Receipt", "Vendor delivery (no PO)", "Inventory adjustment", "Return from production", "Found/count correction"];
 const DEFAULT_LOCATIONS = ["Dumpling Factory", "Dumpling Factory: Walk-in Freezer", "Dumpling Factory: Dry Storage"];
 
@@ -653,9 +637,6 @@ export default function App() {
   const [cfgLevels, setCfgLevels] = useState(DEFAULT_LEVELS);
   const [cfgOrdStatuses, setCfgOrdStatuses] = useState(DEFAULT_ORD_STATUSES);
   const [cfgOrderTypes, setCfgOrderTypes] = useState(DEFAULT_ORDER_TYPES);
-  // Map of { orderType: orderIdPrefix } — lets admins auto-tag orders whose ID
-  // starts with a given prefix (e.g. form orders "NYR-…"). See orderTypeFromId.
-  const [cfgOrderTypePrefixes, setCfgOrderTypePrefixes] = useState({});
   const [cfgPriceMatrix, setCfgPriceMatrix] = useState({});
   const [cfgPoStatuses, setCfgPoStatuses] = useState(DEFAULT_PO_STATUSES);
   const [cfgReceiptTypes, setCfgReceiptTypes] = useState(DEFAULT_RECEIPT_TYPES);
@@ -752,17 +733,6 @@ export default function App() {
         fetchItems(), fetchBomLines(), fetchVendors(), fetchOrders(), fetchPurchaseOrders(),
       ]);
 
-      // Load the prefix→order-type mapping up front so orders can be auto-tagged
-      // as they load: any order whose ID starts with a prefix configured in
-      // Admin → Order Types inherits that order type. Resolved at read time, so
-      // changing a mapping re-tags past + future orders on the next load.
-      const prefixMap = (await getConfig("order_type_prefixes").catch(() => null)) || {};
-      setCfgOrderTypePrefixes(prefixMap);
-      const tagOrders = (list) => list.map(o => {
-        const mapped = orderTypeFromId(o.id, prefixMap);
-        return mapped ? { ...o, orderType: mapped } : o;
-      });
-
       // If DB is empty, seed it with all starter data
       if (dbItems.length === 0) {
         console.log("DB empty — seeding items, BOM, and vendors...");
@@ -791,7 +761,7 @@ export default function App() {
             ...a, bom: freshBom.filter(b => b.assemblyId === a.id).map(b => ({ partId: b.partId, qty: b.qty })),
           })));
           if (freshVendors.length > 0) setVendors(freshVendors);
-          if (freshOrders.length > 0) setOrders(tagOrders(freshOrders));
+          if (freshOrders.length > 0) setOrders(freshOrders);
           if (freshPOs.length > 0) setPOs(freshPOs);
         } catch (seedErr) { console.warn("Auto-seed failed:", seedErr.message); }
       } else {
@@ -810,7 +780,7 @@ export default function App() {
         }));
         setParts(rawMats); setAssemblies(asms); setDiscontinuedItems(discontinued);
         if (dbVendors.length > 0) setVendors(dbVendors);
-        if (dbOrders.length > 0) setOrders(tagOrders(dbOrders));
+        if (dbOrders.length > 0) setOrders(dbOrders);
         if (dbPOs.length > 0) setPOs(dbPOs);
       }
       fetchReceipts().then(r => setReceipts(r)).catch(() => {});
@@ -7018,47 +6988,6 @@ export default function App() {
                   <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Order Types</h3>
                   <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px" }}>Types of orders (e.g. Wholesale, Retail). Used to determine pricing.</p>
                   <ListEditor items={cfgOrderTypes} setItems={setCfgOrderTypes} configKey="order_types" label="Order Type" />
-
-                  {/* Auto-tag orders by ID prefix */}
-                  <div style={{ marginTop: 28, paddingTop: 20, borderTop: "1px solid #2a2a3a" }}>
-                    <h3 style={{ margin: "0 0 4px", fontSize: 16, color: "#e0e0e0" }}>Auto-tag orders by ID prefix</h3>
-                    <p style={{ fontSize: 12, color: "#888", margin: "0 0 16px", lineHeight: 1.5 }}>
-                      Orders that come in from a Google Form have an ID that starts with a short code (e.g. NY Route orders look like <code style={{ color: "#a0a0c0" }}>NYR-2026-07-20-3</code>). Type that code next to an order type and every order whose ID starts with it is automatically set to that type. Leave blank for types not fed by a form. Applies to past and future orders on the next load. (Manually-added orders start with <code style={{ color: "#a0a0c0" }}>ORD-</code> and are never affected.)
-                    </p>
-                    {cfgOrderTypes.length === 0 ? (
-                      <p style={{ color: "#f59e0b", fontSize: 13 }}>Add order types above first.</p>
-                    ) : (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        {cfgOrderTypes.map((t) => {
-                          const pfx = String(cfgOrderTypePrefixes[t] || "").trim().toUpperCase();
-                          const matchCount = pfx ? orders.filter(o => o.id && String(o.id).toUpperCase().startsWith(pfx)).length : 0;
-                          return (
-                            <div key={t} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                              <span style={{ fontSize: 13, color: "#e0e0e0", minWidth: 130, flexShrink: 0 }}>{t}</span>
-                              <input
-                                type="text"
-                                value={cfgOrderTypePrefixes[t] || ""}
-                                placeholder="ID prefix, e.g. NYR  (optional)"
-                                onChange={(e) => setCfgOrderTypePrefixes(prev => ({ ...prev, [t]: e.target.value }))}
-                                onBlur={async () => {
-                                  const next = { ...cfgOrderTypePrefixes };
-                                  if (!next[t] || !next[t].trim()) delete next[t]; else next[t] = next[t].trim();
-                                  setCfgOrderTypePrefixes(next);
-                                  try { await saveConfig("order_type_prefixes", next); } catch (err) { console.warn(err); }
-                                }}
-                                style={{ ...IS, width: 220, fontSize: 13, fontFamily: "monospace" }}
-                              />
-                              {pfx ? (
-                                <span style={{ fontSize: 11, color: matchCount > 0 ? "#22c55e" : "#f59e0b", whiteSpace: "nowrap" }}>
-                                  {matchCount > 0 ? `✓ ${matchCount} order${matchCount === 1 ? "" : "s"} match` : "no orders match yet"}
-                                </span>
-                              ) : null}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
                 </div>
               )}
 
