@@ -1,4 +1,4 @@
-// HELP CONTENT VERSION: v8
+// HELP CONTENT VERSION: v10
 // ============================================================
 // Ops Genie — Static Help Knowledge Base
 // ============================================================
@@ -524,6 +524,17 @@ export const TOPICS = [
         ? "In Admin Config → Pricing Matrix you get a grid of SKU × Order Type. Type a unit price into any cell and it auto-saves when you click away. This is what drives the revenue estimates on orders and the dashboard."
         : "Pricing is configured by admins in the Admin Config → Pricing Matrix.",
     related: ["admin-overview", "orders-overview"],
+  },
+  {
+    id: "admin-form-autotag",
+    category: "admin",
+    title: "How are orders from a Google Form tagged with an order type?",
+    keywords: ["google form", "form", "order type", "auto tag", "autotag", "pipeline", "prefix", "id prefix", "ny route", "nyr", "wholesale form", "form order", "import orders"],
+    answer: (ctx) =>
+      ctx.isAdmin
+        ? "Orders that flow in from a Google Form get an ID that starts with a short code (e.g. NY Route orders look like NYR-2026-07-20-3). In Admin Config → Order Types, use the 'Auto-tag orders by ID prefix' box: type that code (e.g. NYR) next to the order type it should map to. A green '✓ N orders match' confirms it's working. Every order whose ID starts with that prefix is then set to that order type — resolved on load, so changing a prefix re-tags past and future orders the next time the app loads. Manually-added orders start with ORD- and are never affected."
+        : "Orders that come in from a Google Form are automatically labeled with an order type. Which form maps to which type is set by an admin in Admin Config → Order Types.",
+    related: ["admin-overview", "admin-pricing", "orders-overview", "orders-add"],
   },
   {
     id: "admin-backup",
