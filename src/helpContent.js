@@ -1,4 +1,4 @@
-// HELP CONTENT VERSION: v8
+// HELP CONTENT VERSION: v10
 // ============================================================
 // Ops Genie — Static Help Knowledge Base
 // ============================================================
@@ -36,6 +36,7 @@ export const CATEGORIES = [
   { id: "production", label: "Production" },
   { id: "planning", label: "Planning" },
   { id: "performance", label: "Performance" },
+  { id: "square", label: "Square Sales" },
   { id: "lottracking", label: "Lot Tracking" },
   { id: "log", label: "Transaction Log" },
   { id: "admin", label: "Admin Config" },
@@ -79,7 +80,7 @@ export const TOPICS = [
     title: "How do I get around the app?",
     keywords: ["navigation", "navigate", "sidebar", "menu", "tabs", "where is", "find a page", "move around", "switch tabs"],
     answer: (ctx) =>
-      `Everything lives in the left sidebar. Click any item to switch areas: Dashboard, Inventory, Item Master, Orders, Vendors, Purchase Needs, Purchase Orders, Receiving, Production, Planning, Performance, Lot Tracking, and Transaction Log.${ctx.isAdmin ? " As an admin you also see Admin Config at the bottom." : " (Admin Config is only visible to admins.)"}\n\nOn a narrow screen the sidebar collapses — tap the menu (☰) button to open it. Most tabs also have a search bar at the top to filter what you're looking at.`,
+      `Everything lives in the left sidebar. Click any item to switch areas: Dashboard, Inventory, Item Master, Orders, Vendors, Purchase Needs, Purchase Orders, Receiving, Production, Planning, Performance, Square Sales, Lot Tracking, and Transaction Log.${ctx.isAdmin ? " As an admin you also see Admin Config at the bottom." : " (Admin Config is only visible to admins.)"}\n\nOn a narrow screen the sidebar collapses — tap the menu (☰) button to open it. Most tabs also have a search bar at the top to filter what you're looking at.`,
     related: ["search", "what-is-this"],
   },
 
@@ -444,8 +445,8 @@ export const TOPICS = [
     id: "performance-overview",
     category: "performance",
     title: "What's on the Performance tab?",
-    keywords: ["performance", "kpi", "productivity", "dumplings per hour", "trends", "sales trends", "metrics", "labor efficiency"],
-    answer: "Performance shows 13-week rolling trends. The top tiles track Dumplings/hr (Manufacturing), Dumplings/hr (All-In, including packing/delivery), and total 13-week production. Below are a sales-trend chart by flavor, a flavor comparison of recent vs prior 4 weeks, and a weekly productivity table (dumplings, revenue, hours, and rates).",
+    keywords: ["performance", "kpi", "productivity", "dumplings per hour", "trends", "sales trends", "metrics", "labor efficiency", "total", "average", "avg per week", "summary row", "totals"],
+    answer: "Performance shows 13-week rolling trends. The top tiles track Dumplings/hr (Manufacturing), Dumplings/hr (All-In, including packing/delivery), and total 13-week production. Below are a sales-trend chart by flavor, a flavor comparison of recent vs prior 4 weeks, and a weekly productivity table (dumplings, revenue, hours, and rates). That table starts with two summary rows: Total (every column added up across the weeks that have data) and Avg / week. The two rate columns on the Total row are total dumplings divided by total hours — weighted by output, not an average of the weekly rates, which is why the Avg / week row leaves them blank. Dumpling counts are whole numbers: bin runs can be logged in fractions of a bin, but the piece counts they produce are rounded.",
     related: ["performance-rate", "dashboard-overview"],
   },
   {
@@ -455,6 +456,41 @@ export const TOPICS = [
     keywords: ["dumplings per hour", "rate", "mfg rate", "all-in rate", "labor", "efficiency metric"],
     answer: "It's a labor-efficiency measure: dumplings produced divided by hours worked. The Manufacturing rate uses only manufacturing hours; the All-In rate also includes packing and delivery hours, so it's lower. Labor hours come from your Toast job mapping configured in Admin.",
     related: ["performance-overview", "admin-overview"],
+  },
+
+  // ---------------------------------------------------------
+  // SQUARE SALES
+  // ---------------------------------------------------------
+  {
+    id: "square-overview",
+    category: "square",
+    title: "What's on the Square Sales tab?",
+    keywords: ["square", "square sales", "farmers market", "market sales", "pop-up", "pos sales", "sales by flavor", "flavor sales", "location", "locations", "market", "net sales", "custom amount"],
+    answer: "Square Sales shows sales rung up in Square (farmers markets, pop-ups and other Square locations), rolled up by dumpling flavor. Pick a date range (7d / 30d / 90d / YTD / 1y, or custom dates) and any number of Square locations from the Locations dropdown. You get Net Sales (after discounts, before tax), dumpling units, order count, and a Sales by Flavor table with each flavor's units, dollars and share. It's read-only and pulls live from Square each time and shows packs, hot-food servings and total dumplings per flavor — nothing is saved in the app, and it doesn't change inventory.",
+    related: ["square-locations", "square-mapping"],
+  },
+  {
+    id: "square-locations",
+    category: "square",
+    title: "How do I pick which markets/locations to include?",
+    keywords: ["square location", "select location", "choose market", "multiple locations", "filter markets", "location filter", "inactive location", "which markets"],
+    steps: [
+      "Open the Square Sales tab.",
+      "Click the Locations button to open the picker.",
+      "Tick as many locations as you want; type in the search box to narrow the list.",
+      "Use Select shown / Clear shown to tick or untick everything matching your search.",
+      "Tick Show inactive to include old or closed Square locations.",
+    ],
+    answer: "Each farmers market or event is its own Square location, so you can combine any set of them. Your selection is remembered on this browser. The first time, every active location is selected.",
+    related: ["square-overview"],
+  },
+  {
+    id: "square-mapping",
+    category: "square",
+    title: "How are Square sales counted — flavors, packs, hot food, \"Other / unmapped\"?",
+    keywords: ["unmapped", "other", "custom amount", "flavor mapping", "wrong flavor", "missing flavor", "square item", "variation", "units", "packs", "hot food", "4pc", "pieces", "dumplings sold", "pack size", "x?"],
+    answer: "Each Square line item is matched to a flavor by words in its item or variation name (e.g. \"lemongrass\" → LG, \"ginger\" → GC, \"cheddar\" → CH, \"5 spice\" or \"tofu\" → TM). Every item counts as one retail pack of dumplings, unless its name says something like \"4pc\" or \"6 pcs\" — then it's a hot-food serving of that many dumplings. Dumplings Sold = packs × the flavor's pack size (from the item master's 400-… Pack) + hot-food pieces. A pack shown as ×? has no known pack size, so it isn't in the dumpling total. Sauces, merch and drinks count as \"not a dumpling\"; those, items that don't match any flavor, and \"custom amount\" sales keyed in without an item land in Other / unmapped. Expand the Square items section to see exactly how each item was counted. If Custom Amounts is large, ring sales up with items at the stand so they can be credited to a flavor.",
+    related: ["square-overview"],
   },
 
   // ---------------------------------------------------------

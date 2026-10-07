@@ -1,4 +1,4 @@
-// APP VERSION: v184
+// APP VERSION: v187
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -31,6 +31,7 @@ import {
 import { LineChart, Line, ResponsiveContainer, Tooltip as ChartTooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend } from "recharts";
 
 import GenieHelp from "./GenieHelp";
+import SquareSales from "./SquareSales";
 
 // ============================================================
 // CONSTANTS
@@ -1852,6 +1853,23 @@ export default function App() {
     return lines.sort();
   }, [assemblies]);
 
+  // Dumplings in one retail pack (400-{pl} Pack), per flavor. Passed to the
+  // read-only Square Sales tab to turn Square pack counts into dumplings.
+  // Same rule as the Dashboard: piecesPerUnit if set, else walk the BOM.
+  const squarePackSizes = useMemo(() => {
+    const per = (id, path) => {
+      const it = allItems.find(i => i.id === id);
+      if (!it || path.has(id)) return 0;
+      if (it.piecesPerUnit > 0) return it.piecesPerUnit;
+      if (!it.bom || it.bom.length === 0) return 0;
+      const next = new Set(path).add(id);
+      return it.bom.reduce((s, b) => s + b.qty * per(b.partId, next), 0);
+    };
+    const out = {};
+    for (const pl of productLines) out[pl] = per(`400-${pl} Pack`, new Set());
+    return out;
+  }, [allItems, productLines]);
+
   // Configurable plan item per product line (defaults to 250-{pl} Batch)
   const planItems = useMemo(() => {
     const map = {};
@@ -3655,6 +3673,7 @@ export default function App() {
               {sideBtn("production", "Production", <Hammer size={14} />)}
               {sideBtn("planning", "Planning", <TrendingUp size={14} />)}
               {sideBtn("performance", "Performance", <BarChart3 size={14} />)}
+              {sideBtn("square", "Square Sales", <DollarSign size={14} />)}
               {sideBtn("lottracking", "Lot Tracking", <Layers size={14} />)}
               {sideBtn("log", "Transaction Log", <ScrollText size={14} />)}
               {isAdmin && sideBtn("admin", "Admin Config", <Settings size={14} />, pendingWishesCount)}
@@ -3738,8 +3757,8 @@ export default function App() {
         <Stat icon={<ShoppingCart size={18} />} label="Open Orders" value={orderStats.pending} accent="#ec4899" />
       </div>}
 
-      {/* Filters (hidden on dashboard / performance / lottracking) */}
-      {tab !== "dashboard" && tab !== "performance" && tab !== "lottracking" && <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+      {/* Filters (hidden on dashboard / performance / lottracking / square) */}
+      {tab !== "dashboard" && tab !== "performance" && tab !== "lottracking" && tab !== "square" && <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
         <div style={{ position: "relative", flex: "1 1 200px", minWidth: 180 }}>
           <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#555" }} />
           <input placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...IS, paddingLeft: 32 }} />
@@ -6128,6 +6147,14 @@ export default function App() {
           if (ppu <= 0) continue;
           binProductionByWeek[wi] += (Number(r.qtyProduced) || 0) * ppu;
         }
+        // Bin runs are recorded in fractional bins (e.g. 31.2 or 28.1666 bins),
+        // so qty x piecesPerUnit yields a fractional dumpling count plus float
+        // noise on top — that's where "76,190.371" came from. A fraction of a
+        // dumpling isn't a thing. Round once here so every figure derived from
+        // this array (weekly rows, the 13-week total, the rates) is clean.
+        for (let i = 0; i < binProductionByWeek.length; i++) {
+          binProductionByWeek[i] = Math.round(binProductionByWeek[i]);
+        }
         const laborByWeek = {}; // weekStart -> { mfg, allIn }
         for (const lh of laborHours) {
           laborByWeek[lh.weekStart] = { mfg: lh.manufacturingHours, allIn: lh.allInHours };
@@ -6153,6 +6180,20 @@ export default function App() {
             allInRate: lh.allIn > 0 ? Math.round(dumplings / lh.allIn) : null,
           };
         });
+        // Summary line for the productivity table. The two rate columns are
+        // computed from the column TOTALS (a weighted average), not by
+        // averaging the weekly rates — an unweighted mean of rates lets a
+        // low-output week with very few hours swing the number wildly.
+        const prodWeeksWithData = productivityRows.filter(r => r.dumplings > 0 || r.mfgHours > 0 || r.allInHours > 0).length;
+        const prodTotals = productivityRows.reduce((a, r) => ({
+          dumplings: a.dumplings + r.dumplings,
+          revenue: a.revenue + r.revenue,
+          mfgHours: a.mfgHours + r.mfgHours,
+          allInHours: a.allInHours + r.allInHours,
+        }), { dumplings: 0, revenue: 0, mfgHours: 0, allInHours: 0 });
+        prodTotals.mfgRate = prodTotals.mfgHours > 0 ? Math.round(prodTotals.dumplings / prodTotals.mfgHours) : null;
+        prodTotals.allInRate = prodTotals.allInHours > 0 ? Math.round(prodTotals.dumplings / prodTotals.allInHours) : null;
+
         const currentWeekRow = productivityRows[productivityRows.length - 1];
         const totalDumplings13 = binProductionByWeek.reduce((s, v) => s + v, 0);
         const flavorChartData = weeks.map((w, i) => {
@@ -6301,6 +6342,30 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
+                    {/* Summary: column totals, then a per-week average. Pinned
+                        above the weekly rows so the headline numbers read first. */}
+                    <tr style={{ background: "#16161e", borderTop: "1px solid #2a2a3a" }}>
+                      <td style={{ padding: "10px", color: "#e0e0e0", fontWeight: 700 }}>
+                        Total <span style={{ color: "#555", fontSize: 10 }}>({prodWeeksWithData} wk{prodWeeksWithData === 1 ? "" : "s"})</span>
+                      </td>
+                      <td style={{ padding: "10px", textAlign: "right", color: "#fbbf24", fontWeight: 700 }}>{prodTotals.dumplings.toLocaleString()}</td>
+                      <td style={{ padding: "10px", textAlign: "right", color: "#22c55e", fontWeight: 700 }}>{prodTotals.revenue > 0 ? `$${Math.round(prodTotals.revenue).toLocaleString()}` : "—"}</td>
+                      <td style={{ padding: "10px", textAlign: "right", color: "#e0e0e0", fontWeight: 700 }}>{prodTotals.mfgHours > 0 ? prodTotals.mfgHours.toFixed(1) : "—"}</td>
+                      <td style={{ padding: "10px", textAlign: "right", color: "#e0e0e0", fontWeight: 700 }}>{prodTotals.allInHours > 0 ? prodTotals.allInHours.toFixed(1) : "—"}</td>
+                      <td style={{ padding: "10px", textAlign: "right", color: "#22c55e", fontWeight: 700 }} title="Total dumplings ÷ total mfg hours. Weighted by output — not the average of the weekly rates.">{prodTotals.mfgRate ? prodTotals.mfgRate.toLocaleString() : "—"}</td>
+                      <td style={{ padding: "10px", textAlign: "right", color: "#a78bfa", fontWeight: 700 }} title="Total dumplings ÷ total all-in hours. Weighted by output — not the average of the weekly rates.">{prodTotals.allInRate ? prodTotals.allInRate.toLocaleString() : "—"}</td>
+                      {isAdmin && <td />}
+                    </tr>
+                    <tr style={{ background: "#16161e", borderBottom: "2px solid #2a2a3a" }}>
+                      <td style={{ padding: "6px 10px 10px", color: "#888", fontSize: 11 }}>Avg / week</td>
+                      <td style={{ padding: "6px 10px 10px", textAlign: "right", color: "#888", fontSize: 11 }}>{prodWeeksWithData ? Math.round(prodTotals.dumplings / prodWeeksWithData).toLocaleString() : "—"}</td>
+                      <td style={{ padding: "6px 10px 10px", textAlign: "right", color: "#888", fontSize: 11 }}>{prodWeeksWithData && prodTotals.revenue > 0 ? `$${Math.round(prodTotals.revenue / prodWeeksWithData).toLocaleString()}` : "—"}</td>
+                      <td style={{ padding: "6px 10px 10px", textAlign: "right", color: "#888", fontSize: 11 }}>{prodWeeksWithData && prodTotals.mfgHours > 0 ? (prodTotals.mfgHours / prodWeeksWithData).toFixed(1) : "—"}</td>
+                      <td style={{ padding: "6px 10px 10px", textAlign: "right", color: "#888", fontSize: 11 }}>{prodWeeksWithData && prodTotals.allInHours > 0 ? (prodTotals.allInHours / prodWeeksWithData).toFixed(1) : "—"}</td>
+                      <td style={{ padding: "6px 10px 10px", textAlign: "right", color: "#555", fontSize: 11 }} title="A per-week average of a rate would be misleading; the weighted rate is on the Total row above.">—</td>
+                      <td style={{ padding: "6px 10px 10px", textAlign: "right", color: "#555", fontSize: 11 }} title="A per-week average of a rate would be misleading; the weighted rate is on the Total row above.">—</td>
+                      {isAdmin && <td />}
+                    </tr>
                     {productivityRows.slice().reverse().map((row) => (
                       <tr key={row.weekStart} style={{ borderTop: "1px solid #2a2a3a" }}>
                         <td style={{ padding: "10px", color: "#e0e0e0" }}>{row.label} <span style={{ color: "#555", fontSize: 10 }}>({row.weekStart})</span></td>
@@ -6709,6 +6774,8 @@ export default function App() {
       })()}
 
       {/* ================== TRANSACTION LOG ================== */}
+      {tab === "square" && <SquareSales packSizes={squarePackSizes} />}
+
       {tab === "log" && (() => {
         const filteredLog = transactionLog.filter(e => {
           if (!search) return true;

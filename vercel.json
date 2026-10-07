@@ -4,5 +4,10 @@
       "path": "/api/toast-sync?mode=full&weeks=4",
       "schedule": "0 8 * * 1"
     }
-  ]
+  ],
+  "functions": {
+    "api/square-sales.js": {
+      "maxDuration": 60
+    }
+  }
 }
