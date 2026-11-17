@@ -1,4 +1,4 @@
-// SUPABASE VERSION: v121
+// SUPABASE VERSION: v122
 
 // Format a Date as YYYY-MM-DD in local timezone. Avoid .toISOString().slice(0,10)
 // for date stamps — that returns UTC and breaks for users west of UTC after
@@ -12,6 +12,30 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 
 export const supabase = createClient(supabaseUrl, supabaseKey)
+
+// Supabase returns at most 1000 rows per request (project max-rows), and a plain
+// select("*") silently stops there. Any table that can grow past that must be read
+// page by page. `build` returns a fresh query each call; give it an order ending in
+// a unique column (id) so rows can't shift between pages.
+async function fetchAllRows(build, pageSize = 1000) {
+  const rows = []
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await build().range(from, from + pageSize - 1)
+    if (error) throw error
+    rows.push(...data)
+    if (data.length < pageSize) return rows
+  }
+}
+
+// Group rows by a key column, for attaching child lines to their parents.
+function groupBy(rows, key) {
+  const map = new Map()
+  for (const r of rows) {
+    if (!map.has(r[key])) map.set(r[key], [])
+    map.get(r[key]).push(r)
+  }
+  return map
+}
 
 // -- ITEMS --
 
@@ -118,8 +142,7 @@ export async function restoreItem(id) {
 // -- BOM LINES --
 
 export async function fetchBomLines() {
-  const { data, error } = await supabase.from("bom_lines").select("*")
-  if (error) throw error
+  const data = await fetchAllRows(() => supabase.from("bom_lines").select("*").order("id"))
   return data.map(r => ({ id: r.id, assemblyId: r.assembly_id, partId: r.component_id, qty: Number(r.qty) }))
 }
 
@@ -199,11 +222,12 @@ export async function setItemVendors(itemId, rows) {
 // across lots. Core mechanism for recall traceability.
 
 export async function fetchOrderLotAllocations(orderId) {
-  let q = supabase.from("order_lot_allocations").select("*").order("allocated_at");
-  if (orderId) q = q.eq("order_id", orderId);
-  const { data, error } = await q;
-  if (error) throw error;
-  return (data || []).map(r => ({
+  const data = await fetchAllRows(() => {
+    let q = supabase.from("order_lot_allocations").select("*").order("allocated_at").order("id");
+    if (orderId) q = q.eq("order_id", orderId);
+    return q;
+  });
+  return data.map(r => ({
     id: r.id,
     orderId: r.order_id,
     itemId: r.item_id,
@@ -297,8 +321,7 @@ export async function upsertLaborHours({ weekStart, manufacturingHours, allInHou
 // -- ORDERS --
 
 export async function fetchOrders() {
-  const { data, error } = await supabase.from("orders").select("*").order("order_date", { ascending: false })
-  if (error) throw error
+  const data = await fetchAllRows(() => supabase.from("orders").select("*").order("order_date", { ascending: false }).order("id"))
   return data.map(r => ({
     id: r.id, customer: r.customer, item: r.item_id, qty: Number(r.qty),
     date: r.order_date, status: r.status, notes: r.notes, shipDate: r.ship_date || null,
@@ -323,10 +346,8 @@ export async function deleteOrder(id) {
 // -- PURCHASE ORDERS --
 
 export async function fetchPurchaseOrders() {
-  const { data: poData, error: poErr } = await supabase.from("purchase_orders").select("*").order("po_date", { ascending: false })
-  if (poErr) throw poErr
-  const { data: lineData, error: lineErr } = await supabase.from("po_lines").select("*")
-  if (lineErr) throw lineErr
+  const poData = await fetchAllRows(() => supabase.from("purchase_orders").select("*").order("po_date", { ascending: false }).order("id"))
+  const lineData = await fetchAllRows(() => supabase.from("po_lines").select("*").order("id"))
   return poData.map(po => ({
     id: po.id, vendor: po.vendor_name, vendorId: po.vendor_id,
     date: po.po_date, status: po.status, total: Number(po.total),
@@ -414,14 +435,12 @@ export async function bulkInsertItems(items) {
 // -- RECEIPTS --
 
 export async function fetchReceipts() {
-  const { data: rcpts, error: rErr } = await supabase.from("receipts").select("*").order("created_at", { ascending: false })
-  if (rErr) throw rErr
-  const { data: lines, error: lErr } = await supabase.from("receipt_lines").select("*")
-  if (lErr) throw lErr
+  const rcpts = await fetchAllRows(() => supabase.from("receipts").select("*").order("created_at", { ascending: false }).order("id"))
+  const linesByReceipt = groupBy(await fetchAllRows(() => supabase.from("receipt_lines").select("*").order("id")), "receipt_id")
   return rcpts.map(r => ({
     id: r.id, poId: r.po_id, type: r.receipt_type, date: r.receipt_date,
     notes: r.notes, createdBy: r.created_by, createdAt: r.created_at,
-    lines: lines.filter(l => l.receipt_id === r.id).map(l => ({
+    lines: (linesByReceipt.get(r.id) || []).map(l => ({
       partId: l.part_id, name: l.part_name, qtyExpected: Number(l.qty_expected),
       qtyReceived: Number(l.qty_received), unit: l.unit,
       lotNumber: l.lot_number || "",
@@ -455,17 +474,15 @@ export async function updateItemQty(id, newQty) {
 // -- PRODUCTION RUNS --
 
 export async function fetchProductionRuns() {
-  const { data: runs, error: rErr } = await supabase.from("production_runs").select("*").order("created_at", { ascending: false })
-  if (rErr) throw rErr
-  const { data: consumed, error: cErr } = await supabase.from("production_consumed").select("*")
-  if (cErr) throw cErr
+  const runs = await fetchAllRows(() => supabase.from("production_runs").select("*").order("created_at", { ascending: false }).order("id"))
+  const consumedByRun = groupBy(await fetchAllRows(() => supabase.from("production_consumed").select("*").order("id")), "run_id")
   return runs.map(r => ({
     id: r.id, assemblyId: r.assembly_id, assemblyName: r.assembly_name,
     qtyProduced: Number(r.qty_produced), date: r.run_date, notes: r.notes,
     createdBy: r.created_by, createdAt: r.created_at, lotNumber: r.lot_number || "",
     status: r.status || "Complete", plannedDate: r.planned_date || null,
     sourcePlanWeek: r.source_plan_week || null,
-    consumed: consumed.filter(c => c.run_id === r.id).map(c => ({
+    consumed: (consumedByRun.get(r.id) || []).map(c => ({
       partId: c.part_id, name: c.part_name, qty: Number(c.qty_consumed), unit: c.unit,
     })),
   }))
@@ -933,8 +950,7 @@ export async function changePassword(newPassword) {
 // -- INVENTORY LOTS --
 
 export async function fetchInventoryLots() {
-  const { data, error } = await supabase.from("inventory_lots").select("*").order("production_date")
-  if (error) throw error
+  const data = await fetchAllRows(() => supabase.from("inventory_lots").select("*").order("production_date").order("id"))
   return data.map(r => ({
     id: r.id, itemId: r.item_id, lotNumber: r.lot_number,
     qty: Number(r.qty), productionDate: r.production_date,
