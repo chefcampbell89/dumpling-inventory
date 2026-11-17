@@ -1,4 +1,4 @@
-// HELP CONTENT VERSION: v10
+// HELP CONTENT VERSION: v11
 // ============================================================
 // Ops Genie — Static Help Knowledge Base
 // ============================================================
@@ -242,8 +242,8 @@ export const TOPICS = [
     id: "orders-fulfill",
     category: "orders",
     title: "How do I fulfill / ship an order?",
-    keywords: ["fulfill order", "ship order", "mark fulfilled", "allocate lots", "complete order", "shipped", "lot allocation", "multiple lots", "split lot", "two lots", "make from bin", "produce at shipment"],
-    answer: "Change a line's status to Fulfilled (or use Ship All on the card to do every open line at once). For lot-tracked items this opens a lot-allocation step. For each line you pick the exact lot(s) that ship — click \"Add lot\" to split one line across several lots. Each lot dropdown offers both existing finished-good lots (\"in stock\") and the flavor's source/bin lots to produce from at ship time (\"make from …\"); nothing is pre-filled, so you always confirm what actually went out. Pulling a bit more than a lot's recorded (approximate) count shows a warning but still lets you ship. This lot-to-order record is what makes recall traceability possible. A partly shipped order shows an amber \"Partial (X/Y)\" indicator.",
+    keywords: ["fulfill order", "ship order", "mark fulfilled", "allocate lots", "complete order", "shipped", "lot allocation", "multiple lots", "split lot", "two lots", "make from bin", "make from pack", "produce at shipment", "choose bin", "bin lot not showing", "missing lot", "fifo"],
+    answer: "Change a line's status to Fulfilled (or use Ship All on the card to do every open line at once). For lot-tracked items this opens a lot-allocation step. For each line you pick the exact lot(s) that ship — click \"Add lot\" to split one line across several lots. Each lot dropdown offers both existing finished-good lots (\"in stock\") and the flavor's upstream lots to produce from at ship time (\"make from …\") — one group per level, e.g. both LG Pack and LG Bin lots for a retail case. Every level is always offered, even when finished stock or packs are on hand, so you can choose to make it from a bin; nothing forces you to use older stock first. Nothing is pre-filled, so you always confirm what actually went out. Pulling a bit more than a lot's recorded (approximate) count shows a warning but still lets you ship. This lot-to-order record is what makes recall traceability possible. A partly shipped order shows an amber \"Partial (X/Y)\" indicator.",
     related: ["orders-shipall", "lot-what", "lottracking-overview"],
   },
   {

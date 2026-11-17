@@ -1,4 +1,4 @@
-// APP VERSION: v188
+// APP VERSION: v189
 import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   fetchItems, upsertItem, discontinueItem, restoreItem, bulkInsertItems,
@@ -992,23 +992,14 @@ export default function App() {
         ? (lotsByItem[line.item] || []).filter(l => l.qty > 0)
             .sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""))
         : [];
-      // Unit backfill chain (per 1 finished unit): gives the source item, the
-      // consumption ratio, and the selectable source lots. Scaled per-allocation
-      // by the entered qty at confirm time.
-      const bfChainUnit = isLotTracked ? findBackfillChain(line.item, 1) : null;
-      const bfSourceItemId = bfChainUnit ? bfChainUnit[0].consumedId : null;
-      const bfSourceItem = bfSourceItemId ? allItems.find(i => i.id === bfSourceItemId) : null;
-      const bfRatio = bfChainUnit ? bfChainUnit[0].consumedQty : 0; // source units per 1 finished unit
-      const bfSourceLots = bfChainUnit ? (bfChainUnit[0].eligibleLots || []) : [];
+      // Every upstream level with lots in stock (e.g. LG Pack and LG Bin), each with
+      // its unit chain + ratio. Scaled per-allocation by the entered qty at confirm.
+      const bfSources = isLotTracked ? findBackfillSources(line.item) : [];
       return {
         line, item, isLotTracked, remaining,
         allocations: isLotTracked ? [{ lotNumber: "", qty: 0, productionDate: "", availableInLot: 0, backfillFrom: null }] : [],
         existingLots,
-        bfChainUnit,
-        bfSourceItemId,
-        bfSourceItemName: bfSourceItem?.name || bfSourceItemId || "",
-        bfRatio,
-        bfSourceLots,
+        bfSources,
       };
     });
     setFulfillRows(rows);
@@ -1058,18 +1049,21 @@ export default function App() {
 
       // ==== PHASE A — Produce any "make from source lot" allocations ====
       // Each allocation with backfillFrom set means: produce alloc.qty of the line's
-      // SKU from source lot alloc.lotNumber, inheriting that lot #, by scaling the
-      // row's unit backfill chain to alloc.qty. The produced finished lot then flows
-      // through Phase B like any other allocation. Rough counts: if the source lot
-      // has less than needed we still produce — the deduction just clamps to zero.
+      // SKU from source item alloc.backfillFrom's lot alloc.lotNumber, inheriting
+      // that lot #, by scaling that source's unit chain to alloc.qty. The produced
+      // finished lot then flows through Phase B like any other allocation. Rough
+      // counts: if the source lot has less than needed we still produce — the
+      // deduction just clamps to zero.
       for (const row of rowsForUpdate) {
-        if (!row.bfChainUnit) continue;
+        if (!row.bfSources?.length) continue;
         const runDate = row.line.shipDate || todayLocal();
         for (const alloc of row.allocations) {
           const q = Number(alloc.qty) || 0;
           if (!alloc.backfillFrom || !alloc.lotNumber || q <= 0) continue;
+          const source = row.bfSources.find(s => s.itemId === alloc.backfillFrom);
+          if (!source) continue;
           const inheritedLot = alloc.lotNumber;
-          const chain = row.bfChainUnit.map(step => ({
+          const chain = source.chainUnit.map(step => ({
             ...step,
             producedQty: step.producedQty * q,
             consumedQty: step.consumedQty * q,
@@ -1355,10 +1349,12 @@ export default function App() {
   }, [lots]);
 
   // ---- Backfill-production-at-ship-time helper ----
-  // Walks down the BOM from `itemId` looking for a chain of "produce X from Y"
-  // steps where the deepest source has an existing lot # with enough on-hand to
-  // cover production. Returns the chain (deepest-first) or null if no path
-  // through pre-existing lots exists.
+  // Walks down the BOM from `itemId` (per 1 finished unit) and returns every level
+  // that has source lots in stock, shallowest first — e.g. for a Retail Case both
+  // LG Pack lots and LG Bin lots. Each source carries its chain of "produce X from
+  // Y" steps (deepest-first) so the fulfill modal can produce the SKU from any of
+  // them at ship time. Every level is offered even when a shallower one has stock:
+  // the person shipping decides which lot goes out.
   //
   // The "primary" BOM line at each level is the upstream component that shares
   // the produced item's flavor prefix (e.g. 400-LG Pack → 300-LG Bin). This is
@@ -1366,43 +1362,41 @@ export default function App() {
   // labels, raw materials) are consumed normally during the run but don't carry
   // a lot.
   const flavorOfId = useCallback((id) => (id?.match(/^\d+-(\w+)/)?.[1] || ""), []);
-  const findBackfillChain = useCallback((itemId, qty) => {
-    const item = allItems.find(i => i.id === itemId);
-    if (!item || !item.bom || item.bom.length === 0) return null;
+  const findBackfillSources = useCallback((itemId) => {
     const flavor = flavorOfId(itemId);
-    if (!flavor) return null;
-    // Find the same-flavor BOM line (the "primary" lot-bearing upstream).
-    const primary = item.bom.find(b => flavorOfId(b.partId) === flavor);
-    if (!primary) return null;
-    const needed = primary.qty * qty;
-    // Offer any existing lots of the primary that have stock. We no longer require a
-    // single lot to cover the whole qty — the fulfill modal lets the user split a
-    // line across several source lots, and rough (approximate) bin counts shouldn't
-    // hide a usable lot.
-    const direct = (lotsByItem[primary.partId] || [])
-      .filter(l => l.qty > 0)
-      .sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
-    if (direct.length > 0) {
-      // Base case — deepest source. User picks one of these lots.
-      return [{
-        producedId: itemId, producedQty: qty,
-        consumedId: primary.partId, consumedQty: needed,
-        eligibleLots: direct,         // user-selectable at the deepest step only
-        inherited: false,
-      }];
+    if (!flavor) return [];
+    const sources = [];
+    let steps = []; // deepest-first
+    let curId = itemId;
+    let curQty = 1;
+    const seen = new Set();
+    while (!seen.has(curId)) {
+      seen.add(curId);
+      const cur = allItems.find(i => i.id === curId);
+      // The same-flavor BOM line is the "primary" lot-bearing upstream.
+      const primary = cur?.bom?.find(b => flavorOfId(b.partId) === flavor);
+      if (!primary) break;
+      const needed = primary.qty * curQty;
+      steps = [{ producedId: curId, producedQty: curQty, consumedId: primary.partId, consumedQty: needed }, ...steps];
+      // Any lot with stock is offered — no single lot needs to cover the whole qty,
+      // since the modal lets the user split a line across several lots.
+      const lots = (lotsByItem[primary.partId] || [])
+        .filter(l => l.qty > 0)
+        .sort((a, b) => (a.productionDate || "").localeCompare(b.productionDate || ""));
+      if (lots.length > 0) {
+        const src = allItems.find(i => i.id === primary.partId);
+        sources.push({
+          itemId: primary.partId,
+          name: src?.name || primary.partId,
+          ratio: needed, // source units per 1 finished unit
+          chainUnit: steps,
+          lots,
+        });
+      }
+      curId = primary.partId;
+      curQty = needed;
     }
-    // Recurse: try chasing further down through this primary.
-    const child = findBackfillChain(primary.partId, needed);
-    if (!child) return null;
-    return [
-      ...child,
-      {
-        producedId: itemId, producedQty: qty,
-        consumedId: primary.partId, consumedQty: needed,
-        eligibleLots: null,           // inherits from deepest step
-        inherited: true,
-      },
-    ];
+    return sources;
   }, [allItems, lotsByItem, flavorOfId]);
 
   // Allocations indexed by orderId for fast per-line/per-group lookups.
@@ -8365,8 +8359,9 @@ export default function App() {
               const key = `${a.backfillFrom || r.line.item}|${a.lotNumber}`;
               let cap;
               if (a.backfillFrom) {
+                const ratio = r.bfSources.find(s => s.itemId === a.backfillFrom)?.ratio || 0;
                 const src = (lotsByItem[a.backfillFrom] || []).find(l => l.lotNumber === a.lotNumber);
-                cap = src ? (r.bfRatio > 0 ? src.qty / r.bfRatio : Infinity) : 0;
+                cap = src ? (ratio > 0 ? src.qty / ratio : Infinity) : 0;
               } else {
                 const lot = (lotsByItem[r.line.item] || []).find(l => l.lotNumber === a.lotNumber);
                 cap = lot ? lot.qty : 0;
@@ -8412,7 +8407,7 @@ export default function App() {
                         <div style={{ fontSize: 12, color: "#888", fontStyle: "italic", padding: "8px 0" }}>
                           This item is not lot-tracked. Confirm fulfillment to mark complete without allocation.
                         </div>
-                      ) : (row.existingLots.length === 0 && row.bfSourceLots.length === 0) ? (
+                      ) : (row.existingLots.length === 0 && row.bfSources.length === 0) ? (
                         <div style={{ fontSize: 12, color: "#ef4444", padding: "8px 0" }}>
                           No lots available — no finished stock and no source lots to produce from.
                         </div>
@@ -8422,21 +8417,25 @@ export default function App() {
                           {row.allocations.map((alloc, allocIdx) => {
                             const cap = Number(alloc.availableInLot) || 0;
                             const over = !!alloc.lotNumber && Number(alloc.qty) > cap;
-                            const selVal = alloc.lotNumber ? `${alloc.backfillFrom ? "b" : "e"}:${alloc.lotNumber}` : "";
+                            // Option values: "e:<lot>" for finished stock, "b<sourceIdx>:<lot>" for make-from.
+                            const bfIdx = alloc.backfillFrom ? row.bfSources.findIndex(s => s.itemId === alloc.backfillFrom) : -1;
+                            const selVal = alloc.lotNumber ? `${alloc.backfillFrom ? `b${bfIdx}` : "e"}:${alloc.lotNumber}` : "";
                             return (
                               <div key={allocIdx} style={{ display: "grid", gridTemplateColumns: "2fr 90px 96px 30px", gap: 8, alignItems: "center" }}>
                                 <select value={selVal} onChange={(e) => {
                                   const v = e.target.value;
                                   if (!v) { updateFulfillAllocation(rowIdx, allocIdx, { lotNumber: "", backfillFrom: null, availableInLot: 0, productionDate: "" }); return; }
-                                  const kind = v.slice(0, 1);
-                                  const ln = v.slice(2);
+                                  const sep = v.indexOf(":");
+                                  const kind = v.slice(0, sep);
+                                  const ln = v.slice(sep + 1);
                                   if (kind === "e") {
                                     const lot = row.existingLots.find(l => l.lotNumber === ln);
                                     updateFulfillAllocation(rowIdx, allocIdx, { lotNumber: ln, backfillFrom: null, availableInLot: lot?.qty || 0, productionDate: lot?.productionDate || "" });
                                   } else {
-                                    const src = row.bfSourceLots.find(l => l.lotNumber === ln);
-                                    const capEq = row.bfRatio > 0 ? Math.floor((src?.qty || 0) / row.bfRatio) : 0;
-                                    updateFulfillAllocation(rowIdx, allocIdx, { lotNumber: ln, backfillFrom: row.bfSourceItemId, availableInLot: capEq, productionDate: src?.productionDate || "" });
+                                    const source = row.bfSources[Number(kind.slice(1))];
+                                    const src = source?.lots.find(l => l.lotNumber === ln);
+                                    const capEq = source?.ratio > 0 ? Math.floor((src?.qty || 0) / source.ratio) : 0;
+                                    updateFulfillAllocation(rowIdx, allocIdx, { lotNumber: ln, backfillFrom: source?.itemId || null, availableInLot: capEq, productionDate: src?.productionDate || "" });
                                   }
                                 }} style={{ ...IS, fontSize: 12 }}>
                                   <option value="">Select lot…</option>
@@ -8449,18 +8448,18 @@ export default function App() {
                                       ))}
                                     </optgroup>
                                   )}
-                                  {row.bfSourceLots.length > 0 && (
-                                    <optgroup label={`Make from ${row.bfSourceItemName}`}>
-                                      {row.bfSourceLots.map(l => {
-                                        const capEq = row.bfRatio > 0 ? Math.floor(l.qty / row.bfRatio) : 0;
+                                  {row.bfSources.map((source, si) => (
+                                    <optgroup key={source.itemId} label={`Make from ${source.name}`}>
+                                      {source.lots.map(l => {
+                                        const capEq = source.ratio > 0 ? Math.floor(l.qty / source.ratio) : 0;
                                         return (
-                                          <option key={`b:${l.lotNumber}`} value={`b:${l.lotNumber}`}>
-                                            Lot {l.lotNumber} — make from {row.bfSourceItemName} (~{capEq} avail{l.productionDate ? `, made ${l.productionDate}` : ""})
+                                          <option key={`b${si}:${l.lotNumber}`} value={`b${si}:${l.lotNumber}`}>
+                                            Lot {l.lotNumber} — make from {source.name} (~{capEq} avail{l.productionDate ? `, made ${l.productionDate}` : ""})
                                           </option>
                                         );
                                       })}
                                     </optgroup>
-                                  )}
+                                  ))}
                                 </select>
                                 <input type="number" min={0} step="any" value={alloc.qty || 0} onChange={(e) => updateFulfillAllocation(rowIdx, allocIdx, { qty: Number(e.target.value) || 0 })} style={{ ...IS, fontSize: 12, borderColor: over ? "#f59e0b" : undefined }} />
                                 <span style={{ fontSize: 10, color: over ? "#f59e0b" : "#666" }}>
@@ -8473,7 +8472,7 @@ export default function App() {
                           <button onClick={() => addFulfillAllocation(rowIdx)} style={{ ...B2, fontSize: 11, padding: "4px 10px", alignSelf: "flex-start", marginTop: 4 }}>
                             <Plus size={12} /> Add lot
                           </button>
-                          {row.bfSourceLots.length > 0 && (
+                          {row.bfSources.length > 0 && (
                             <div style={{ fontSize: 10, color: "#666", marginTop: 2 }}>
                               <Hammer size={10} style={{ verticalAlign: "middle", marginRight: 3 }} />
                               "Make from" rows produce this SKU from the source lot at ship time, inheriting its lot #.
